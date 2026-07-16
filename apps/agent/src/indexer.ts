@@ -3,13 +3,15 @@ import { watch, type ChokidarOptions, type FSWatcher } from "chokidar";
 import {
   GraphSnapshotSchema,
   PROTOCOL_VERSION,
+  sanitizeGraphSnapshot,
+  sanitizeUnknownStrings,
   type GraphDelta,
   type GraphEdge,
   type GraphNode,
   type GraphQuery,
   type GraphSnapshot,
 } from "@constelix/contracts";
-import { InMemoryGraphStore, diffSnapshots, stableId } from "@constelix/graph-core";
+import { InMemoryGraphStore, stableId } from "@constelix/graph-core";
 import { AnalyzerWorkerClient } from "./analyzer-worker-client.js";
 import type { ConstelixDatabase, IndexedFileRecord } from "./database.js";
 import type { EventBus } from "./events.js";
@@ -18,6 +20,7 @@ import {
   buildIgnoreMatcher,
   detectSupportedLanguage,
   isSecretPath,
+  readTypeScriptResolutionOptions,
   scanWorkspace,
   type ScanResult,
   type ScannedSource,
@@ -25,7 +28,12 @@ import {
 
 const MAX_INCREMENTAL_CHANGED_PATHS = 24;
 const MAX_INCREMENTAL_AFFECTED_FILES = 200;
-const INDEX_RULE_FILES = new Set([".gitignore", ".constelixignore"]);
+const INDEX_RULE_FILES = new Set([
+  ".gitignore",
+  ".constelixignore",
+  "tsconfig.json",
+  "jsconfig.json",
+]);
 
 class IncrementalFallbackError extends Error {
   constructor(message: string) {
@@ -45,6 +53,8 @@ export interface IndexStatus {
 
 export interface WorkspaceIndexerOptions {
   watcherFactory?: (path: string, options: ChokidarOptions) => FSWatcher;
+  watcherRestartBaseDelayMs?: number;
+  watcherRestartMaxDelayMs?: number;
 }
 
 export class WorkspaceIndexer {
@@ -52,12 +62,14 @@ export class WorkspaceIndexer {
   #fullSnapshot: GraphSnapshot;
   #watcher: FSWatcher | undefined;
   #watcherReady = false;
-  #watcherReadyError: Error | undefined;
   #watcherReadyPromise: Promise<void> = Promise.resolve();
   #resolveWatcherReady: (() => void) | undefined;
+  #watcherRestartTimer: NodeJS.Timeout | undefined;
+  #watcherRestartAttempts = 0;
   #timer: NodeJS.Timeout | undefined;
   #active: Promise<void> | undefined;
   #running = false;
+  #currentOperation: "full" | "incremental" | undefined;
   #queued = false;
   #closed = false;
   #forceFullReason: string | undefined;
@@ -85,10 +97,13 @@ export class WorkspaceIndexer {
         truncated: false,
       });
     this.graph = new InMemoryGraphStore(this.#fullSnapshot);
+    for (const file of database.loadFiles(workspaceId)) {
+      this.#files.set(file.relativePath, file);
+    }
     this.#status = {
       phase: persisted ? "ready" : "idle",
-      completed: persisted?.nodes.length ?? 0,
-      total: persisted?.nodes.length ?? 0,
+      completed: this.#files.size,
+      total: this.#files.size,
       revision: this.#fullSnapshot.revision,
     };
   }
@@ -97,15 +112,23 @@ export class WorkspaceIndexer {
     return this.#status;
   }
 
+  get indexedFileCount(): number {
+    return this.#files.size;
+  }
+
   async start(): Promise<void> {
     if (this.#watcher) return;
+    this.initializeWatcher(false);
+    this.publishStatus("scanning", 0, 0, "Starting filesystem watcher");
+    this.schedule("Initial index", 0);
+  }
+
+  private initializeWatcher(reconcileOnReady: boolean): void {
+    if (this.#closed || this.#watcher !== undefined) return;
     this.#watcherReady = false;
-    this.#watcherReadyError = undefined;
-    this.#watcherReadyPromise = new Promise((resolveReady) => {
-      this.#resolveWatcherReady = resolveReady;
-    });
+    this.beginWatcherReadyWait();
     const watcherFactory = this.options.watcherFactory ?? watch;
-    this.#watcher = watcherFactory(this.workspaceRoot, {
+    const watcher = watcherFactory(this.workspaceRoot, {
       ignoreInitial: true,
       persistent: true,
       awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 },
@@ -118,31 +141,64 @@ export class WorkspaceIndexer {
         );
       },
     });
-    this.#watcher.once("ready", () => {
+    this.#watcher = watcher;
+    watcher.once("ready", () => {
+      if (this.#watcher !== watcher) return;
       this.#watcherReady = true;
       this.finishWatcherReadyWait();
+      if (reconcileOnReady && this.#currentOperation !== "full") {
+        this.schedule("Filesystem watcher recovered; reconciling workspace", 0);
+      }
     });
-    this.#watcher.on("all", (event, path) => {
+    watcher.on("all", (event, path) => {
+      if (this.#watcher !== watcher) return;
       if (event === "add" || event === "change" || event === "unlink") {
         this.schedulePath(path);
       }
     });
-    this.#watcher.on("error", (error) => {
-      if (!this.#watcherReady) {
-        this.#watcherReadyError =
-          error instanceof Error ? error : new Error(String(error));
-        this.finishWatcherReadyWait();
-      }
-      this.publishStatus("error", 0, 0, String(error));
+    watcher.on("error", (error) => {
+      if (this.#watcher !== watcher) return;
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.publishStatus("error", 0, 0, normalized.message);
+      this.recoverWatcher(watcher);
     });
-    this.publishStatus("scanning", 0, 0, "Starting filesystem watcher");
-    this.schedule("Initial index", 0);
+  }
+
+  private recoverWatcher(watcher: FSWatcher): void {
+    if (this.#closed || this.#watcher !== watcher) return;
+    this.#watcher = undefined;
+    this.#watcherReady = false;
+    this.beginWatcherReadyWait();
+    const closeWatcher = watcher.close().catch(() => undefined);
+    this.#watcherRestartAttempts += 1;
+    const baseDelay = Math.max(1, this.options.watcherRestartBaseDelayMs ?? 250);
+    const maximumDelay = Math.max(
+      baseDelay,
+      this.options.watcherRestartMaxDelayMs ?? 5_000,
+    );
+    const delay = Math.min(
+      maximumDelay,
+      baseDelay * 2 ** Math.min(this.#watcherRestartAttempts - 1, 6),
+    );
+    if (this.#watcherRestartTimer) clearTimeout(this.#watcherRestartTimer);
+    this.#watcherRestartTimer = setTimeout(() => {
+      this.#watcherRestartTimer = undefined;
+      void closeWatcher.then(() => {
+        this.initializeWatcher(true);
+      });
+    }, delay);
+    this.#watcherRestartTimer.unref();
   }
 
   schedule(reason = "Workspace changed", delay = 250): void {
     if (this.#closed) return;
     this.#forceFullReason = reason;
     this.armTimer(delay);
+  }
+
+  /** Schedules one known filesystem path for the incremental pipeline. */
+  notifyPathChanged(path: string, delay = 25): void {
+    this.schedulePath(path, delay);
   }
 
   private schedulePath(path: string, delay = 250): void {
@@ -208,11 +264,13 @@ export class WorkspaceIndexer {
       return;
     }
     this.#running = true;
+    this.#currentOperation = "full";
     const revision = this.#fullSnapshot.revision + 1;
     try {
       const scanStartedBeforeWatcherReady = !this.#watcherReady;
       this.publishStatus("scanning", 0, 0, reason);
       let scan = await scanWorkspace(this.workspaceId, this.workspaceRoot);
+      this.publishProvisionalScan(scan);
       let normalized = await this.analyzeScan(scan, revision);
 
       if (scanStartedBeforeWatcherReady) {
@@ -226,6 +284,7 @@ export class WorkspaceIndexer {
         const reconciledScan = await scanWorkspace(this.workspaceId, this.workspaceRoot);
         if (!scansMatch(scan, reconciledScan)) {
           scan = reconciledScan;
+          this.publishProvisionalScan(scan);
           normalized = await this.analyzeScan(scan, revision);
         }
       } else {
@@ -234,18 +293,21 @@ export class WorkspaceIndexer {
 
       const snapshot = GraphSnapshotSchema.parse(normalized.snapshot);
       this.publishStatus("persisting", scan.files.length, scan.files.length);
-      const delta = diffSnapshots(this.#fullSnapshot, snapshot);
-      this.database.replaceGraph(this.workspaceId, snapshot, [
-        ...scan.diagnostics,
-        ...normalized.diagnostics,
-      ]);
-      this.database.replaceFiles(this.workspaceId, revision, scan.files);
+      this.database.replaceIndexRevision(
+        this.workspaceId,
+        snapshot,
+        scan.files,
+        [...scan.diagnostics, ...normalized.diagnostics],
+      );
       this.#files.clear();
       for (const file of scan.files) this.#files.set(file.relativePath, toFileRecord(file));
       this.graph.replace(snapshot);
       this.#fullSnapshot = snapshot;
-      this.events.publish("graph.delta", delta);
-      this.events.publish("graph.snapshot", { graph: this.graph.snapshot(500) });
+      this.events.publish("graph.snapshot", {
+        graph: this.graph.snapshot(500),
+        provisional: false,
+      });
+      if (this.#watcherReady) this.#watcherRestartAttempts = 0;
       if (
         !this.#queued &&
         this.#pendingChanges.size === 0 &&
@@ -256,10 +318,13 @@ export class WorkspaceIndexer {
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Indexing failed.";
-      this.publishStatus("error", 0, 0, message);
-      this.database.audit(this.workspaceId, "index", "reindex", "failed", { message });
+      if (!this.#closed) {
+        const message = error instanceof Error ? error.message : "Indexing failed.";
+        this.publishStatus("error", 0, 0, message);
+        this.database.audit(this.workspaceId, "index", "reindex", "failed", { message });
+      }
     } finally {
+      this.#currentOperation = undefined;
       this.#running = false;
       if (this.#queued || this.#pendingChanges.size > 0 || this.#forceFullReason !== undefined) {
         this.#queued = false;
@@ -268,11 +333,28 @@ export class WorkspaceIndexer {
     }
   }
 
+  private publishProvisionalScan(scan: ScanResult): void {
+    if (this.#fullSnapshot.revision !== 0) return;
+    const provisional = createFileSystemSnapshot(
+      this.workspaceId,
+      this.#fullSnapshot.revision,
+      basename(this.workspaceRoot),
+      scan.files,
+      true,
+    );
+    this.graph.replace(provisional);
+    this.events.publish("graph.snapshot", {
+      graph: this.graph.snapshot(500),
+      provisional: true,
+    });
+  }
+
   private async analyzeScan(
     scan: ScanResult,
     revision: number,
   ): Promise<ReturnType<typeof normalizeAnalysisResult>> {
     this.publishStatus("parsing", 0, scan.files.length);
+    const typeScriptResolution = await readTypeScriptResolutionOptions(this.workspaceRoot);
     const analysisResult = await this.#analyzer.analyze(
       scan.files.map((file) => ({
         workspaceId: this.workspaceId,
@@ -280,7 +362,12 @@ export class WorkspaceIndexer {
         source: file.source,
         revision,
       })),
-      { workspaceId: this.workspaceId, revision, projectName: basename(this.workspaceRoot) },
+      {
+        workspaceId: this.workspaceId,
+        revision,
+        projectName: basename(this.workspaceRoot),
+        ...(typeScriptResolution === undefined ? {} : { typeScriptResolution }),
+      },
     );
     this.publishStatus("resolving", scan.files.length, scan.files.length);
     return normalizeAnalysisResult(
@@ -292,9 +379,19 @@ export class WorkspaceIndexer {
   }
 
   private async waitForWatcherReady(): Promise<void> {
-    await this.#watcherReadyPromise;
-    if (this.#watcherReadyError !== undefined) throw this.#watcherReadyError;
-    if (!this.#watcherReady) throw new Error("Filesystem watcher closed before becoming ready.");
+    while (!this.#closed) {
+      if (this.#watcherReady) return;
+      const readiness = this.#watcherReadyPromise;
+      await readiness;
+    }
+    throw new Error("Filesystem watcher closed before becoming ready.");
+  }
+
+  private beginWatcherReadyWait(): void {
+    if (this.#resolveWatcherReady !== undefined) return;
+    this.#watcherReadyPromise = new Promise((resolveReady) => {
+      this.#resolveWatcherReady = resolveReady;
+    });
   }
 
   private finishWatcherReadyWait(): void {
@@ -311,6 +408,7 @@ export class WorkspaceIndexer {
     }
 
     this.#running = true;
+    this.#currentOperation = "incremental";
     const revision = this.#fullSnapshot.revision + 1;
     try {
       this.publishStatus("scanning", 0, changedPaths.length, "Applying filesystem changes");
@@ -331,14 +429,16 @@ export class WorkspaceIndexer {
         }
         const source = await this.readIncrementalSource(relativePath, diagnostics);
         if (source === undefined) removedPaths.add(relativePath);
-        else changedSources.set(relativePath, source);
+        else if (this.#files.get(relativePath)?.contentHash !== source.contentHash) {
+          changedSources.set(relativePath, source);
+        }
       }
 
       if (changedSources.size === 0 && removedPaths.size === 0) {
         this.publishStatus(
           "ready",
-          0,
-          0,
+          this.#files.size,
+          this.#files.size,
           undefined,
           this.#status.lastIndexedAt === undefined
             ? {}
@@ -367,6 +467,7 @@ export class WorkspaceIndexer {
 
       this.publishStatus("parsing", 0, affectedSources.size);
       const sourceFiles = [...affectedSources.values()];
+      const typeScriptResolution = await readTypeScriptResolutionOptions(this.workspaceRoot);
       const analysisResult = await this.#analyzer.analyze(
         sourceFiles.map((file) => ({
           workspaceId: this.workspaceId,
@@ -374,7 +475,12 @@ export class WorkspaceIndexer {
           source: file.source,
           revision,
         })),
-        { workspaceId: this.workspaceId, revision, projectName: basename(this.workspaceRoot) },
+        {
+          workspaceId: this.workspaceId,
+          revision,
+          projectName: basename(this.workspaceRoot),
+          ...(typeScriptResolution === undefined ? {} : { typeScriptResolution }),
+        },
       );
       this.publishStatus("resolving", sourceFiles.length, sourceFiles.length);
       const normalized = normalizeAnalysisResult(
@@ -406,15 +512,18 @@ export class WorkspaceIndexer {
       this.graph.applyDelta(delta);
       this.#fullSnapshot = snapshot;
       this.events.publish("graph.delta", delta);
-      this.publishStatus("ready", changedPaths.length, changedPaths.length, undefined, {
+      this.publishStatus("ready", this.#files.size, this.#files.size, undefined, {
         lastIndexedAt: new Date().toISOString(),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Incremental indexing failed.";
-      this.database.audit(this.workspaceId, "index", "incremental", "fallback", { message });
-      this.#forceFullReason = `Incremental reconciliation fallback: ${message}`;
-      this.#queued = true;
+      if (!this.#closed) {
+        const message = error instanceof Error ? error.message : "Incremental indexing failed.";
+        this.database.audit(this.workspaceId, "index", "incremental", "fallback", { message });
+        this.#forceFullReason = `Incremental reconciliation fallback: ${message}`;
+        this.#queued = true;
+      }
     } finally {
+      this.#currentOperation = undefined;
       this.#running = false;
       if (this.#queued || this.#pendingChanges.size > 0 || this.#forceFullReason !== undefined) {
         this.#queued = false;
@@ -514,7 +623,7 @@ export class WorkspaceIndexer {
       index: {
         phase,
         progress,
-        filesIndexed: completed,
+        filesIndexed: this.#files.size,
         symbolsIndexed: this.graph.nodeCount,
         edgesIndexed: this.graph.edgeCount,
         ...(message === undefined ? {} : { message }),
@@ -525,6 +634,7 @@ export class WorkspaceIndexer {
   async close(): Promise<void> {
     this.#closed = true;
     if (this.#timer) clearTimeout(this.#timer);
+    if (this.#watcherRestartTimer) clearTimeout(this.#watcherRestartTimer);
     this.finishWatcherReadyWait();
     await this.#watcher?.close();
     this.#watcher = undefined;
@@ -744,27 +854,29 @@ function normalizeAnalysisResult(
     const nodes = parsed.data.nodes.map((node) => ({ ...node, revision }));
     const edges = parsed.data.edges.map((edge) => ({ ...edge, revision }));
     return {
-      snapshot: GraphSnapshotSchema.parse({
-        ...parsed.data,
-        protocolVersion: PROTOCOL_VERSION,
-        workspaceId,
-        revision,
-        nodes,
-        edges,
-        truncated: false,
-        cursor: undefined,
-      }),
-      diagnostics: candidate.diagnostics ?? [],
+      snapshot: sanitizeGraphSnapshot(
+        GraphSnapshotSchema.parse({
+          ...parsed.data,
+          protocolVersion: PROTOCOL_VERSION,
+          workspaceId,
+          revision,
+          nodes,
+          edges,
+          truncated: false,
+          cursor: undefined,
+        }),
+      ),
+      diagnostics: sanitizeUnknownStrings(candidate.diagnostics ?? []) as unknown[],
     };
   }
 
   // A degraded file graph keeps the dashboard useful if a native parser fails.
   return {
     snapshot: createFallbackSnapshot(workspaceId, revision, files),
-    diagnostics: [
+    diagnostics: sanitizeUnknownStrings([
       ...(candidate.diagnostics ?? []),
       { message: "Language analyzers returned no valid snapshot; file-only graph was used." },
-    ],
+    ]) as unknown[],
   };
 }
 
@@ -773,51 +885,105 @@ function createFallbackSnapshot(
   revision: number,
   files: readonly ScannedSource[],
 ): GraphSnapshot {
+  return createFileSystemSnapshot(
+    workspaceId,
+    revision,
+    basename(workspaceId),
+    files,
+    false,
+  );
+}
+
+function createFileSystemSnapshot(
+  workspaceId: string,
+  revision: number,
+  projectName: string,
+  files: readonly ScannedSource[],
+  provisional: boolean,
+): GraphSnapshot {
   const projectId = stableId("node", workspaceId, "project");
   const project: GraphNode = {
     protocolVersion: PROTOCOL_VERSION,
     id: projectId,
     kind: "project",
-    name: basename(workspaceId),
-    qualifiedName: workspaceId,
-    relativePath: ".",
+    name: projectName,
+    qualifiedName: projectName,
+    relativePath: "",
     language: "unknown",
     revision,
-    metadata: { degraded: true },
+    metadata: provisional ? { provisional: true } : { degraded: true },
   };
-  const nodes: GraphNode[] = [project];
-  const edges: GraphEdge[] = [];
+  const nodes = new Map<string, GraphNode>([[project.id, project]]);
+  const edges = new Map<string, GraphEdge>();
   for (const file of files) {
+    const parts = file.relativePath.split("/");
+    const fileName = parts.pop() ?? file.relativePath;
+    let parentId = projectId;
+    let folderPath = "";
+    for (const folderName of parts) {
+      folderPath = folderPath ? `${folderPath}/${folderName}` : folderName;
+      const folderId = stableId("node", workspaceId, "folder", folderPath);
+      if (!nodes.has(folderId)) {
+        nodes.set(folderId, {
+          protocolVersion: PROTOCOL_VERSION,
+          id: folderId,
+          kind: "folder",
+          name: folderName,
+          qualifiedName: folderPath,
+          relativePath: folderPath,
+          language: "unknown",
+          revision,
+          metadata: provisional ? { provisional: true } : { degraded: true },
+        });
+        const edge: GraphEdge = {
+          protocolVersion: PROTOCOL_VERSION,
+          id: stableId("edge", parentId, folderId, "contains"),
+          source: parentId,
+          target: folderId,
+          relation: "contains",
+          confidence: "extracted",
+          evidence: [],
+          revision,
+          metadata: {},
+        };
+        edges.set(edge.id, edge);
+      }
+      parentId = folderId;
+    }
     const id = stableId("node", workspaceId, "file", file.relativePath);
-    nodes.push({
+    nodes.set(id, {
       protocolVersion: PROTOCOL_VERSION,
       id,
       kind: "file",
-      name: basename(file.relativePath),
+      name: fileName,
       qualifiedName: file.relativePath,
       relativePath: file.relativePath,
       language: file.language,
       revision,
-      metadata: { contentHash: file.contentHash },
+      metadata: {
+        contentHash: file.contentHash,
+        ...(provisional ? { provisional: true } : { degraded: true }),
+      },
     });
-    edges.push({
+    const edge: GraphEdge = {
       protocolVersion: PROTOCOL_VERSION,
-      id: stableId("edge", projectId, id, "contains"),
-      source: projectId,
+      id: stableId("edge", parentId, id, "contains"),
+      source: parentId,
       target: id,
       relation: "contains",
       confidence: "extracted",
       evidence: [],
       revision,
       metadata: {},
-    });
+    };
+    edges.set(edge.id, edge);
   }
-  return GraphSnapshotSchema.parse({
+  return sanitizeGraphSnapshot(GraphSnapshotSchema.parse({
     protocolVersion: PROTOCOL_VERSION,
     workspaceId,
     revision,
-    nodes,
-    edges,
+    nodes: [...nodes.values()],
+    edges: [...edges.values()],
     truncated: false,
-  });
+  }));
 }

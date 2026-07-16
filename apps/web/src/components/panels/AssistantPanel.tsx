@@ -15,6 +15,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
   const error = useWorkspaceStore((state) => state.assistantError);
   const thinking = useWorkspaceStore((state) => state.assistantThinking);
   const evidencePath = useWorkspaceStore((state) => state.evidencePath);
+  const evidencePartial = useWorkspaceStore((state) => state.evidencePartial);
   const nodes = useWorkspaceStore((state) => state.nodes);
   const submitQuestion = useWorkspaceStore((state) => state.submitQuestion);
   const cancelQuestion = useWorkspaceStore((state) => state.cancelQuestion);
@@ -22,9 +23,11 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
   const actTask = useWorkspaceStore((state) => state.actTask);
   const actAvailable = useWorkspaceStore((state) => state.actAvailable);
   const codexReason = useWorkspaceStore((state) => state.codexReason);
+  const rootPath = useWorkspaceStore((state) => state.rootPath);
   const createActTask = useWorkspaceStore((state) => state.createActTask);
   const approveActTask = useWorkspaceStore((state) => state.approveActTask);
   const cancelActTask = useWorkspaceStore((state) => state.cancelActTask);
+  const resetActTask = useWorkspaceStore((state) => state.resetActTask);
 
   const evidenceLabels = useMemo(() => {
     if (!evidencePath) return [];
@@ -44,6 +47,8 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
       minWidth={480}
       minHeight={180}
       currentHeight={height}
+      collapsed={data.collapsed}
+      expandedHeight={data.expandedHeight}
       accent="violet"
       className="assistant-panel"
     >
@@ -89,13 +94,20 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
             {error ? <p className="assistant-error">{error}</p> : null}
             {answer ? <p className="answer-copy">{answer}</p> : !thinking && !error ? <p className="answer-placeholder">La respuesta mostrará evidencia verificable del grafo.</p> : null}
             {evidenceLabels.length ? (
-              <div className="evidence-path" aria-label="Recorrido de evidencia">
-                {evidenceLabels.map((item, index) => (
-                  <span key={item.id}>
-                    <button type="button" onClick={() => void navigateEvidence(item.id)}>{item.label}</button>
-                    {index < evidenceLabels.length - 1 ? <i aria-hidden="true">→</i> : null}
-                  </span>
-                ))}
+              <div>
+                {evidencePartial ? (
+                  <p className="evidence-partial" role="status">
+                    Evidencia parcial: algunos nodos todavía no pudieron cargarse en el canvas.
+                  </p>
+                ) : null}
+                <div className="evidence-path" aria-label="Recorrido de evidencia">
+                  {evidenceLabels.map((item, index) => (
+                    <span key={item.id}>
+                      <button type="button" onClick={() => void navigateEvidence(item.id)}>{item.label}</button>
+                      {index < evidenceLabels.length - 1 ? <i aria-hidden="true">→</i> : null}
+                    </span>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>
@@ -110,13 +122,30 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                 <ShieldCheck aria-hidden="true" size={24} />
                 <div><strong>Delegación con aprobación</strong><p>Codex podrá escribir y ejecutar comandos dentro del workspace. La red estará habilitada; las rutas externas permanecen bloqueadas.</p></div>
               </div>
+              <label className="act-objective" htmlFor="constelix-act-objective">
+                Objetivo del turno
+                <textarea
+                  id="constelix-act-objective"
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  placeholder="Describe una tarea concreta para Codex…"
+                />
+              </label>
+              <p className="act-scope-root"><strong>Raíz protegida:</strong> <code>{rootPath}</code></p>
+              {error ? <p className="assistant-error">{error}</p> : null}
               <button className="act-primary" type="button" disabled={!question.trim()} onClick={() => void createActTask()}>Preparar tarea</button>
             </>
           ) : actTask.status === "awaitingApproval" ? (
             <div className="approval-card">
               <div><AlertTriangle aria-hidden="true" size={17} /><strong>Revisa antes de aprobar</strong></div>
               <p>{actTask.objective}</p>
-              <ul><li>Escritura: solo este workspace</li><li>Comandos: permitidos</li><li>Red: habilitada</li></ul>
+              <ul>
+                <li>Raíz: <code>{rootPath}</code></li>
+                <li>Escritura: solo este workspace</li>
+                <li>Comandos: permitidos</li>
+                <li>Red: habilitada</li>
+                <li>Expira: <time dateTime={actTask.expiresAt}>{new Date(actTask.expiresAt).toLocaleString()}</time></li>
+              </ul>
               <div className="approval-actions">
                 <button type="button" onClick={() => void cancelActTask()}><X aria-hidden="true" size={12} /> Cancelar</button>
                 <button className="approve" type="button" onClick={() => void approveActTask()}><Check aria-hidden="true" size={12} /> Aprobar turno</button>
@@ -125,8 +154,12 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
           ) : (
             <div className={`act-progress act-progress--${actTask.status}`}>
               <div><span className="act-status-dot" /><strong>{actTask.status === "running" ? "Codex está trabajando" : actTask.status === "completed" ? "Tarea completada" : actTask.status}</strong></div>
+              <p className="act-scope-root"><strong>Raíz:</strong> <code>{rootPath}</code></p>
               <p>{actTask.output.at(-1) ?? "Esperando eventos del agente…"}</p>
               {actTask.status === "running" ? <button type="button" onClick={() => void cancelActTask()}>Cancelar</button> : null}
+              {actTask.status === "completed" || actTask.status === "cancelled" || actTask.status === "failed" ? (
+                <button type="button" onClick={resetActTask}>Nueva tarea</button>
+              ) : null}
             </div>
           )}
         </div>

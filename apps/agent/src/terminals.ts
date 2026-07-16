@@ -15,6 +15,7 @@ interface TerminalSession {
   outputChunks: TerminalOutputChunk[];
   outputBytes: number;
   latestSequence: number;
+  exited: boolean;
 }
 
 interface TerminalOutputChunk {
@@ -86,6 +87,7 @@ export class TerminalManager {
       outputChunks: [],
       outputBytes: 0,
       latestSequence: 0,
+      exited: false,
     };
     this.#sessions.set(id, session);
     child.onData((data) => {
@@ -95,7 +97,7 @@ export class TerminalManager {
       this.events.publish("terminal.output", { terminalId: id, data, sequence });
     });
     child.onExit(({ exitCode, signal }) => {
-      this.#sessions.delete(id);
+      session.exited = true;
       this.events.publish("terminal.exit", { terminalId: id, exitCode, signal });
     });
     this.events.publish("terminal.created", { terminalId: id, cwd, shell, createdAt });
@@ -104,20 +106,20 @@ export class TerminalManager {
 
   write(id: string, data: string): void {
     const session = this.#sessions.get(id);
-    if (!session) return;
+    if (!session || session.exited) return;
     session.process.write(data);
   }
 
   resize(id: string, cols: number, rows: number): void {
     const session = this.#sessions.get(id);
-    if (!session) return;
+    if (!session || session.exited) return;
     session.process.resize(clamp(cols, 20, 500), clamp(rows, 5, 200));
   }
 
   remove(id: string): boolean {
     const session = this.#sessions.get(id);
     if (!session) return false;
-    session.process.kill();
+    if (!session.exited) session.process.kill();
     this.#sessions.delete(id);
     return true;
   }
@@ -142,7 +144,9 @@ export class TerminalManager {
 
   close(): void {
     this.#unsubscribe();
-    for (const session of this.#sessions.values()) session.process.kill();
+    for (const session of this.#sessions.values()) {
+      if (!session.exited) session.process.kill();
+    }
     this.#sessions.clear();
   }
 }

@@ -16,19 +16,23 @@ import {
 
 describe("workspace path security", () => {
   it("canonicalizes a directory and accepts contained files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "constelix-security-"));
-    await mkdir(join(root, "src"));
-    await writeFile(join(root, "src", "main.ts"), "export const ok = true;\n");
-    const canonical = await canonicalizeWorkspace(root);
-    await expect(resolveExistingWorkspacePath(canonical, "src/main.ts")).resolves.toBe(
-      join(canonical, "src", "main.ts"),
+    const root = await mkdtemp(join(tmpdir(), "constelix café workspace-"));
+    await mkdir(join(root, "src con espacios"));
+    await writeFile(
+      join(root, "src con espacios", "módulo.ts"),
+      "export const ok = true;\n",
     );
+    const canonical = await canonicalizeWorkspace(root);
+    await expect(
+      resolveExistingWorkspacePath(canonical, "src con espacios/módulo.ts"),
+    ).resolves.toBe(join(canonical, "src con espacios", "módulo.ts"));
   });
 
   it("rejects absolute paths and traversal", () => {
     expect(() => normalizeRelativePath("../secret")).toThrow(PathSecurityError);
     expect(() => normalizeRelativePath("/etc/passwd")).toThrow(PathSecurityError);
     expect(() => normalizeRelativePath("src/../../secret")).toThrow(PathSecurityError);
+    expect(() => normalizeRelativePath("src/\0secret")).toThrow(PathSecurityError);
   });
 
   it("rejects symlinks escaping the workspace for reads and writes", async () => {

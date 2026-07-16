@@ -33,5 +33,11 @@ test("asks with evidence and requires explicit approval before acting", async ({
   await expect(page.getByTestId("act-panel")).toBeVisible();
   await page.getByRole("button", { name: "Preparar tarea" }).click();
   await expect(page.getByText("Revisa antes de aprobar")).toBeVisible();
+  await expect(page.getByText("Raíz:", { exact: false })).toBeVisible();
+  await expect(page.getByText("Expira:", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Aprobar turno" })).toBeVisible();
+  await page.getByRole("button", { name: "Aprobar turno" }).click();
+  await expect(page.getByText("Tarea completada")).toBeVisible();
+  await page.getByRole("button", { name: "Nueva tarea" }).click();
+  await expect(page.getByRole("button", { name: "Preparar tarea" })).toBeVisible();
 });

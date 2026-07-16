@@ -358,3 +358,76 @@ export type TerminalCreateRequest = z.infer<typeof TerminalCreateRequestSchema>;
 export type TerminalOutputChunk = z.infer<typeof TerminalOutputChunkSchema>;
 export type TerminalOutputSnapshot = z.infer<typeof TerminalOutputSnapshotSchema>;
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
+
+const CLEAR_SECRET_PATTERNS = [
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|$)/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\bAIza[A-Za-z0-9_-]{35}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{40,}\b/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+  /\bsk_live_[A-Za-z0-9]{20,}\b/g,
+  /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g,
+] as const;
+
+const SECRET_ASSIGNMENT_PATTERN =
+  /((?:(?:aws[_-]?)?secret[_-]?access[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|token|secret|password|passwd)\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi;
+
+/** Redacts high-confidence credential material before graph data leaves the analyzer boundary. */
+export function redactSensitiveText(value: string): string {
+  let redacted = value;
+  for (const pattern of CLEAR_SECRET_PATTERNS) {
+    redacted = redacted.replace(pattern, "[REDACTED_CREDENTIAL]");
+  }
+  return redacted.replace(SECRET_ASSIGNMENT_PATTERN, "$1[REDACTED]");
+}
+
+export function sanitizeGraphNode(node: GraphNode): GraphNode {
+  return {
+    ...node,
+    metadata: sanitizeRecord(node.metadata),
+  };
+}
+
+export function sanitizeGraphEdge(edge: GraphEdge): GraphEdge {
+  return {
+    ...edge,
+    evidence: edge.evidence.map((item) => ({
+      ...item,
+      ...(item.excerpt === undefined ? {} : { excerpt: redactSensitiveText(item.excerpt) }),
+    })),
+    metadata: sanitizeRecord(edge.metadata),
+  };
+}
+
+export function sanitizeGraphSnapshot(snapshot: GraphSnapshot): GraphSnapshot {
+  return GraphSnapshotSchema.parse({
+    ...snapshot,
+    nodes: snapshot.nodes.map(sanitizeGraphNode),
+    edges: snapshot.edges.map(sanitizeGraphEdge),
+  });
+}
+
+export function sanitizeGraphDelta(delta: GraphDelta): GraphDelta {
+  return GraphDeltaSchema.parse({
+    ...delta,
+    nodesAdded: delta.nodesAdded.map(sanitizeGraphNode),
+    nodesUpdated: delta.nodesUpdated.map(sanitizeGraphNode),
+    edgesAdded: delta.edgesAdded.map(sanitizeGraphEdge),
+    edgesUpdated: delta.edgesUpdated.map(sanitizeGraphEdge),
+  });
+}
+
+export function sanitizeUnknownStrings(value: unknown): unknown {
+  if (typeof value === "string") return redactSensitiveText(value);
+  if (Array.isArray(value)) return value.map(sanitizeUnknownStrings);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, sanitizeUnknownStrings(item)]),
+  );
+}
+
+function sanitizeRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeUnknownStrings(value) as Record<string, unknown>;
+}

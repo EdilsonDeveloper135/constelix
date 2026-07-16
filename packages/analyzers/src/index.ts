@@ -8,6 +8,7 @@ export {
   type AnalyzeSourceInput,
   type AnalyzeWorkspaceOptions,
   type AnalyzerDiagnostic,
-  type SourceFileInput
+  type SourceFileInput,
+  type TypeScriptResolutionOptions
 } from "./analyzer.js";
 export { analysisEdgeId, analysisNodeId, analyzerStableId } from "./ids.js";

@@ -7,6 +7,7 @@ import TypeScript from "tree-sitter-typescript";
 import {
   GraphSnapshotSchema,
   PROTOCOL_VERSION,
+  redactSensitiveText,
   type GraphConfidence,
   type GraphEdge,
   type GraphEvidence,
@@ -19,7 +20,18 @@ import {
 } from "@constelix/contracts";
 import { analysisEdgeId, analysisNodeId, analyzerStableId } from "./ids.js";
 
-const SUPPORTED_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py"]);
+const SUPPORTED_EXTENSIONS = new Set([
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".py",
+  ".pyi",
+]);
 const DEFAULT_EXCLUDED_DIRECTORIES = new Set([
   ".git",
   ".hg",
@@ -57,6 +69,12 @@ export interface AnalyzeFilesOptions {
   workspaceId: string;
   revision?: number;
   projectName?: string;
+  typeScriptResolution?: TypeScriptResolutionOptions;
+}
+
+export interface TypeScriptResolutionOptions {
+  baseUrl: string;
+  paths: Record<string, readonly string[]>;
 }
 
 export interface AnalyzeWorkspaceOptions {
@@ -104,10 +122,12 @@ interface PendingRelation {
 export function detectLanguage(relativePath: string): Language {
   const lower = relativePath.toLocaleLowerCase();
   if (lower.endsWith(".tsx")) return "tsx";
-  if (lower.endsWith(".ts")) return "typescript";
+  if (lower.endsWith(".ts") || lower.endsWith(".mts") || lower.endsWith(".cts")) {
+    return "typescript";
+  }
   if (lower.endsWith(".jsx")) return "jsx";
   if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
-  if (lower.endsWith(".py")) return "python";
+  if (lower.endsWith(".py") || lower.endsWith(".pyi")) return "python";
   return "unknown";
 }
 
@@ -251,7 +271,13 @@ export function analyzeFiles(files: readonly SourceFileInput[], options: Analyze
     addEdge(edges, parentId, fileNode.id, "contains", "extracted", [], revision);
   }
 
-  resolveCrossFileRelations(nodes, edges, options.workspaceId, revision);
+  resolveCrossFileRelations(
+    nodes,
+    edges,
+    options.workspaceId,
+    revision,
+    options.typeScriptResolution,
+  );
   removeUnreferencedExternalNodes(nodes, edges);
   return {
     snapshot: GraphSnapshotSchema.parse({
@@ -368,7 +394,7 @@ function visitNode(node: Parser.SyntaxNode, owner: OwnerContext, context: ParseC
       relativePath: context.relativePath,
       language: context.language,
       range: rangeFor(node),
-      metadata: { signature: compactText(node.text, 240) }
+      metadata: { signature: redactSensitiveText(compactText(node.text, 240)) }
     });
     context.nodes.set(symbol.id, symbol);
     const named = context.symbolsByName.get(symbol.name) ?? [];
@@ -544,13 +570,14 @@ function resolveCrossFileRelations(
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphEdge>,
   workspaceId: string,
-  revision: number
+  revision: number,
+  typeScriptResolution?: TypeScriptResolutionOptions,
 ): void {
   const modules = [...nodes.values()].filter((node) => node.kind === "module");
   const moduleKeys = new Map<string, GraphNode>();
   for (const module of modules) {
     const normalizedPath = normalizeRelativePath(module.relativePath);
-    const withoutExtension = normalizedPath.replace(/\.(?:[cm]?[jt]sx?|py)$/i, "");
+    const withoutExtension = normalizedPath.replace(/\.(?:[cm]?[jt]sx?|pyi?)$/i, "");
     moduleKeys.set(normalizedPath, module);
     moduleKeys.set(withoutExtension, module);
     moduleKeys.set(withoutExtension.replace(/\/index$/i, ""), module);
@@ -573,7 +600,14 @@ function resolveCrossFileRelations(
     let confidence: GraphConfidence = edge.confidence;
     if (edge.relation === "imports") {
       const source = nodes.get(edge.source);
-      if (source !== undefined) resolved = resolveImportTarget(source, specifier, moduleKeys);
+      if (source !== undefined) {
+        resolved = resolveImportTarget(
+          source,
+          specifier,
+          moduleKeys,
+          typeScriptResolution,
+        );
+      }
       if (resolved !== undefined) confidence = "resolved";
     } else {
       const candidates = symbolsByName.get(simpleName(specifier) ?? specifier) ?? [];
@@ -605,25 +639,75 @@ function resolveCrossFileRelations(
   void workspaceId;
 }
 
-function resolveImportTarget(source: GraphNode, specifier: string, modules: ReadonlyMap<string, GraphNode>): GraphNode | undefined {
+function resolveImportTarget(
+  source: GraphNode,
+  specifier: string,
+  modules: ReadonlyMap<string, GraphNode>,
+  typeScriptResolution?: TypeScriptResolutionOptions,
+): GraphNode | undefined {
   if (source.language === "python" && specifier.startsWith(".")) {
     const dotCount = specifier.match(/^\.+/)?.[0].length ?? 1;
     const packageParts = source.qualifiedName.split(".").slice(0, -1);
     const keep = Math.max(0, packageParts.length - (dotCount - 1));
     const suffix = specifier.slice(dotCount).replaceAll("/", ".");
     const qualified = [...packageParts.slice(0, keep), ...suffix.split(".").filter(Boolean)].join(".");
-    return modules.get(qualified);
+    return findModule(modules, qualified);
   }
   if (specifier.startsWith(".")) {
     const base = path.posix.dirname(source.relativePath);
     const resolved = normalizeRelativePath(path.posix.join(base, specifier));
-    return modules.get(resolved) ?? modules.get(resolved.replace(/\.(?:[cm]?[jt]sx?|py)$/i, ""));
+    return findModule(modules, resolved);
   }
   if (source.language === "python") {
     const normalized = specifier.replace(/^\.+/, "").replaceAll("/", ".");
-    return modules.get(normalized);
+    return findModule(modules, normalized);
   }
-  return modules.get(specifier);
+  if (typeScriptResolution !== undefined) {
+    for (const [pattern, targets] of Object.entries(typeScriptResolution.paths)) {
+      const wildcard = matchPathPattern(pattern, specifier);
+      if (wildcard === undefined) continue;
+      for (const target of targets) {
+        const substituted = target.replaceAll("*", wildcard);
+        const candidate = normalizeModuleCandidate(
+          path.posix.join(typeScriptResolution.baseUrl, substituted),
+        );
+        const resolved = findModule(modules, candidate);
+        if (resolved !== undefined) return resolved;
+      }
+    }
+    const baseUrlCandidate = normalizeModuleCandidate(
+      path.posix.join(typeScriptResolution.baseUrl, specifier),
+    );
+    const baseUrlResolved = findModule(modules, baseUrlCandidate);
+    if (baseUrlResolved !== undefined) return baseUrlResolved;
+  }
+  return findModule(modules, specifier);
+}
+
+function matchPathPattern(pattern: string, specifier: string): string | undefined {
+  const wildcardIndex = pattern.indexOf("*");
+  if (wildcardIndex === -1) return pattern === specifier ? "" : undefined;
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) return undefined;
+  return specifier.slice(prefix.length, specifier.length - suffix.length);
+}
+
+function normalizeModuleCandidate(value: string): string {
+  return path.posix.normalize(value.replaceAll("\\", "/")).replace(/^\.\//, "");
+}
+
+function findModule(
+  modules: ReadonlyMap<string, GraphNode>,
+  candidate: string,
+): GraphNode | undefined {
+  const normalized = normalizeModuleCandidate(candidate);
+  const withoutExtension = normalized.replace(/\.(?:[cm]?[jt]sx?|pyi?)$/i, "");
+  return (
+    modules.get(normalized) ??
+    modules.get(withoutExtension) ??
+    modules.get(withoutExtension.replace(/\/index$/i, ""))
+  );
 }
 
 function ensureFolders(
@@ -868,12 +952,12 @@ function evidenceFor(node: Parser.SyntaxNode, relativePath: string): GraphEviden
   return {
     relativePath,
     range: rangeFor(node),
-    excerpt: compactText(node.text, 300)
+    excerpt: redactSensitiveText(compactText(node.text, 300))
   };
 }
 
 function moduleNameForPath(relativePath: string, language: Language): string {
-  const withoutExtension = relativePath.replace(/\.(?:[cm]?[jt]sx?|py)$/i, "");
+  const withoutExtension = relativePath.replace(/\.(?:[cm]?[jt]sx?|pyi?)$/i, "");
   const normalized = withoutExtension.replace(/\/index$/i, "");
   if (language === "python") return normalized.replace(/\/__init__$/i, "").replaceAll("/", ".") || "__root__";
   return normalized || "__root__";

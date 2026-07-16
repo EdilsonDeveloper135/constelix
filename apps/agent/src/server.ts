@@ -16,7 +16,7 @@ import {
   TerminalCreateRequestSchema,
   type PanelState,
 } from "@constelix/contracts";
-import { AskService, OpenAIUnavailableError } from "./ask.js";
+import { AskService, DEFAULT_ASK_MODEL, OpenAIUnavailableError } from "./ask.js";
 import { CodexManager, CodexUnavailableError } from "./codex.js";
 import { ConstelixDatabase } from "./database.js";
 import { EventBus } from "./events.js";
@@ -63,6 +63,11 @@ export interface AgentServerOptions {
   dev?: boolean;
   port?: number;
   capabilityToken?: string;
+  /**
+   * Overrides the per-workspace state directory for isolated tests and
+   * benchmarks. Production callers should use the macOS default.
+   */
+  storageDirectory?: string;
   databasePath?: string;
   webDistPath?: string;
   devOrigin?: string;
@@ -80,14 +85,16 @@ export interface RunningAgentServer {
 export async function startAgentServer(options: AgentServerOptions): Promise<RunningAgentServer> {
   const workspaceId = createWorkspaceId(options.workspaceRoot);
   const capabilityToken = options.capabilityToken ?? randomBytes(32).toString("base64url");
-  const storageDirectory = resolve(
-    homedir(),
-    "Library",
-    "Application Support",
-    "Constelix",
-    "workspaces",
-    workspaceId,
-  );
+  const storageDirectory =
+    options.storageDirectory ??
+    resolve(
+      homedir(),
+      "Library",
+      "Application Support",
+      "Constelix",
+      "workspaces",
+      workspaceId,
+    );
   await mkdir(storageDirectory, { recursive: true, mode: 0o700 });
   const lock = await WorkspaceLock.acquire(resolve(storageDirectory, "agent.lock"));
   const database = new ConstelixDatabase(
@@ -183,7 +190,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       index: {
         ...indexer.status,
         progress: total === 0 ? 0 : indexer.status.completed / total,
-        filesIndexed: indexer.status.completed,
+        filesIndexed: indexer.indexedFileCount,
         symbolsIndexed: graph.nodes.length,
         edgesIndexed: graph.edges.length,
       },
@@ -193,7 +200,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
         act: codexAvailability.available,
         terminal: true,
         codexReason: codexAvailability.reason,
-        model: process.env.CONSTELIX_OPENAI_MODEL ?? "gpt-5.4-mini",
+        model: process.env.CONSTELIX_OPENAI_MODEL ?? DEFAULT_ASK_MODEL,
         languages: ["javascript", "typescript", "python"],
       },
     };
@@ -229,7 +236,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       relativePath: input.relativePath,
       sizeBytes: file.sizeBytes,
     });
-    indexer.schedule(`Editor saved ${input.relativePath}`, 25);
+    indexer.notifyPathChanged(input.relativePath, 25);
     return {
       protocolVersion: PROTOCOL_VERSION,
       relativePath: input.relativePath,
@@ -288,7 +295,14 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       }
       return reply
         .code(202)
-        .send(ask.startTurn(request.params.id, input.prompt, input.requestId ?? randomUUID()));
+        .send(
+          ask.startTurn(
+            request.params.id,
+            input.prompt,
+            input.requestId ?? randomUUID(),
+            input.selectedNodeIds ?? [],
+          ),
+        );
     },
   );
 

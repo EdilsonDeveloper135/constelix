@@ -15,6 +15,7 @@ import {
 } from "@xyflow/react";
 
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
+import { MAX_VISIBLE_SEMANTIC_NODES } from "../../lib/workspaceGraph";
 import type { SemanticFlowNode, WorkspaceNode } from "../../types";
 import { AssistantPanel } from "../panels/AssistantPanel";
 import { EditorPanel } from "../panels/EditorPanel";
@@ -49,21 +50,41 @@ const miniMapColor = (node: Node): string => {
   return "#788286";
 };
 
+function cwdForSemanticNode(node: SemanticFlowNode): string {
+  const path = node.data.relativePath ?? ".";
+  if (node.data.kind !== "module") return path;
+  const parts = path.split("/");
+  parts.pop();
+  return parts.join("/") || ".";
+}
+
 function CanvasInner() {
   const nodes = useWorkspaceStore((state) => state.nodes);
   const edges = useWorkspaceStore((state) => state.edges);
   const onNodesChange = useWorkspaceStore((state) => state.onNodesChange);
   const onEdgesChange = useWorkspaceStore((state) => state.onEdgesChange);
   const selectNode = useWorkspaceStore((state) => state.selectNode);
-  const openFile = useWorkspaceStore((state) => state.openFile);
+  const raisePanel = useWorkspaceStore((state) => state.raisePanel);
   const openTerminal = useWorkspaceStore((state) => state.openTerminal);
-  const expandNode = useWorkspaceStore((state) => state.expandNode);
+  const setCanvasZoom = useWorkspaceStore((state) => state.setCanvasZoom);
   const saveLayout = useWorkspaceStore((state) => state.saveLayout);
   const evidencePath = useWorkspaceStore((state) => state.evidencePath);
   const evidenceCursor = useWorkspaceStore((state) => state.evidenceCursor);
   const index = useWorkspaceStore((state) => state.index);
+  const graphRevision = useWorkspaceStore((state) => state.graphRevision);
+  const graphTruncated = useWorkspaceStore((state) => state.graphTruncated);
+  const graphCursor = useWorkspaceStore((state) => state.graphCursor);
+  const graphReconciling = useWorkspaceStore((state) => state.graphReconciling);
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [locked, setLocked] = useState(false);
+  const semanticNodeCount = useMemo(
+    () => nodes.filter((node) => node.type === "semantic").length,
+    [nodes],
+  );
+  const visibleSemanticNodeCount = useMemo(
+    () => nodes.filter((node) => node.type === "semantic" && !node.hidden).length,
+    [nodes],
+  );
 
   const decoratedNodes = useMemo(() => {
     if (!evidencePath) return nodes;
@@ -101,6 +122,10 @@ function CanvasInner() {
   }, [edges, evidenceCursor, evidencePath]);
 
   useEffect(() => {
+    setCanvasZoom(initialZoom);
+  }, [setCanvasZoom]);
+
+  useEffect(() => {
     const focusGraph = () => {
       const semanticNodes = nodes.filter((node) => node.type === "semantic").map(({ id }) => ({ id }));
       if (semanticNodes.length) void fitView({ nodes: semanticNodes, padding: 0.16, duration: 320, maxZoom: 1 });
@@ -108,6 +133,40 @@ function CanvasInner() {
     window.addEventListener("constelix:fit-graph", focusGraph);
     return () => window.removeEventListener("constelix:fit-graph", focusGraph);
   }, [fitView, nodes]);
+
+  useEffect(() => {
+    const focusEvidence = (event: Event) => {
+      const nodeIds = (event as CustomEvent<string[]>).detail;
+      const visibleIds = nodeIds.filter((nodeId) =>
+        nodes.some((node) => node.id === nodeId && !node.hidden),
+      );
+      if (visibleIds.length === 0) return;
+      void fitView({
+        nodes: visibleIds.map((id) => ({ id })),
+        padding: 0.22,
+        duration: 220,
+        maxZoom: 1,
+      });
+    };
+    window.addEventListener("constelix:focus-evidence", focusEvidence);
+    return () =>
+      window.removeEventListener("constelix:focus-evidence", focusEvidence);
+  }, [fitView, nodes]);
+
+  useEffect(() => {
+    const activeId = evidencePath?.nodeIds[evidenceCursor - 1];
+    if (!activeId) return;
+    const activeNode = nodes.find(
+      (node) => node.id === activeId && !node.hidden,
+    );
+    if (!activeNode) return;
+    void fitView({
+      nodes: [{ id: activeId }],
+      padding: 0.42,
+      duration: 260,
+      maxZoom: 1,
+    });
+  }, [evidenceCursor, evidencePath, fitView, nodes]);
 
   return (
     <main className="workspace-canvas" aria-label="Mapa visual del proyecto" data-testid="workspace-canvas">
@@ -118,28 +177,28 @@ function CanvasInner() {
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeClick={(_, node) => selectNode(node.id)}
-        onNodeDoubleClick={(_, node) => {
-          if (node.type !== "semantic") return;
-          const semanticNode = node as SemanticFlowNode;
-          const path = semanticNode.data.relativePath;
-          if (!path) return;
-          if (semanticNode.data.kind === "directory" || semanticNode.data.kind === "workspace") {
-            void expandNode(node.id);
+        onNodeClick={(_, node) => {
+          if (node.type === "semantic") {
+            selectNode(node.id);
           } else {
-            void expandNode(node.id);
-            openFile(path, node.id);
+            selectNode(null);
+            raisePanel(node.id);
           }
         }}
         onNodeContextMenu={(event, node) => {
           if (node.type !== "semantic") return;
           const semanticNode = node as SemanticFlowNode;
-          if (semanticNode.data.kind !== "directory" && semanticNode.data.kind !== "workspace") return;
+          if (
+            semanticNode.data.kind !== "directory" &&
+            semanticNode.data.kind !== "workspace" &&
+            semanticNode.data.kind !== "module"
+          ) return;
           event.preventDefault();
-          openTerminal(semanticNode.data.relativePath ?? ".", node.id);
+          openTerminal(cwdForSemanticNode(semanticNode), node.id);
         }}
         onPaneClick={() => selectNode(null)}
         onNodeDragStop={saveLayout}
+        onMove={(_, viewport) => setCanvasZoom(viewport.zoom)}
         defaultViewport={initialViewport}
         minZoom={0.35}
         maxZoom={1.7}
@@ -148,7 +207,7 @@ function CanvasInner() {
         zoomOnPinch
         nodesConnectable={false}
         nodesDraggable={!locked}
-        elevateNodesOnSelect
+        elevateNodesOnSelect={false}
         onlyRenderVisibleElements
         colorMode="dark"
         proOptions={{ hideAttribution: false }}
@@ -174,11 +233,24 @@ function CanvasInner() {
         </Controls>
       </ReactFlow>
       <Legend />
-      {index.phase !== "ready" ? (
+      {index.phase !== "ready" || graphReconciling ? (
         <div className={`index-status index-status--${index.phase}`} role="status">
           <span className="index-status-dot" />
-          <span>{index.message ?? "Indexando…"}</span>
+          <span>{graphReconciling ? "Reconciliando grafo…" : index.message ?? "Indexando…"}</span>
           <strong>{Math.round(index.progress * 100)}%</strong>
+        </div>
+      ) : (
+        <div className="index-status index-status--ready" role="status">
+          <span className="index-status-dot" />
+          <span>{index.filesIndexed.toLocaleString()} archivos · {index.symbolsIndexed.toLocaleString()} símbolos · {index.edgesIndexed.toLocaleString()} relaciones</span>
+          <strong>rev {graphRevision}</strong>
+        </div>
+      )}
+      {graphTruncated ? (
+        <div className="graph-partial-status" role="status">
+          Vista parcial: {visibleSemanticNodeCount.toLocaleString()} de {semanticNodeCount.toLocaleString()} nodos cargados
+          {semanticNodeCount > MAX_VISIBLE_SEMANTIC_NODES ? ` · límite visual ${MAX_VISIBLE_SEMANTIC_NODES}` : ""}
+          {graphCursor ? " · hay más resultados" : ""}
         </div>
       ) : null}
     </main>

@@ -4,8 +4,10 @@ import { analyzeFiles, analyzeSource, detectLanguage } from "./index.js";
 describe("language detection", () => {
   it("recognizes every MVP source extension", () => {
     expect(detectLanguage("view.tsx")).toBe("tsx");
+    expect(detectLanguage("module.mts")).toBe("typescript");
     expect(detectLanguage("service.mjs")).toBe("javascript");
     expect(detectLanguage("worker.py")).toBe("python");
+    expect(detectLanguage("types.pyi")).toBe("python");
     expect(detectLanguage("README.md")).toBe("unknown");
   });
 });
@@ -76,6 +78,38 @@ def helper():
     expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)?.qualifiedName).toBe("pkg.service");
   });
 
+  it("resolves TypeScript baseUrl and paths aliases", () => {
+    const result = analyzeFiles([
+      {
+        relativePath: "src/api.ts",
+        source: `import { service } from "@fixture/services/service"; export const api = service();`,
+      },
+      {
+        relativePath: "src/services/service.ts",
+        source: `export function service() { return 1; }`,
+      },
+    ], {
+      workspaceId: "fixture",
+      projectName: "demo",
+      typeScriptResolution: {
+        baseUrl: ".",
+        paths: { "@fixture/*": ["src/*"] },
+      },
+    });
+
+    const apiModule = result.snapshot.nodes.find(
+      (node) => node.kind === "module" && node.relativePath === "src/api.ts",
+    );
+    const importEdge = result.snapshot.edges.find(
+      (edge) => edge.source === apiModule?.id && edge.relation === "imports",
+    );
+    expect(importEdge?.confidence).toBe("resolved");
+    expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)).toMatchObject({
+      kind: "module",
+      relativePath: "src/services/service.ts",
+    });
+  });
+
   it("extracts every module in a Python multi-import", () => {
     const result = analyzeFiles([
       { relativePath: "pkg/api.py", source: "import pkg.one, pkg.two as two\n" },
@@ -96,5 +130,18 @@ def helper():
     const second = analyzeSource({ ...input, revision: 2 });
     expect(first.snapshot.nodes.map((node) => node.id)).toEqual(second.snapshot.nodes.map((node) => node.id));
     expect(first.snapshot.edges.map((edge) => edge.id)).toEqual(second.snapshot.edges.map((edge) => edge.id));
+  });
+
+  it("redacts credential material from graph signatures and evidence", () => {
+    const secret = "real-production-secret-12345";
+    const result = analyzeSource({
+      workspaceId: "fixture",
+      relativePath: "src/config.ts",
+      source: `export function connect() { const api_key="${secret}"; return api_key; }`,
+    });
+
+    const serialized = JSON.stringify(result.snapshot);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("[REDACTED]");
   });
 });

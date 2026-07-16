@@ -146,4 +146,107 @@ describe("ConstelixDatabase", () => {
     ).toEqual({ count: 0 });
     database.close();
   });
+
+  it("replaces a cold graph revision and file manifest atomically", () => {
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("ws", "/tmp/workspace");
+    const initial: GraphSnapshot = {
+      protocolVersion: 1,
+      workspaceId: "ws",
+      revision: 1,
+      nodes: [
+        {
+          protocolVersion: 1,
+          id: "project",
+          kind: "project",
+          name: "workspace",
+          qualifiedName: "workspace",
+          relativePath: "",
+          language: "unknown",
+          revision: 1,
+          metadata: {},
+        },
+      ],
+      edges: [],
+      truncated: false,
+    };
+    database.replaceIndexRevision("ws", initial, [
+      {
+        relativePath: "main.ts",
+        contentHash: "before",
+        sizeBytes: 10,
+        mtimeMs: 1,
+        language: "typescript",
+      },
+    ]);
+
+    const next: GraphSnapshot = {
+      ...initial,
+      revision: 2,
+      nodes: initial.nodes.map((node) => ({ ...node, revision: 2 })),
+    };
+    const duplicateFile = {
+      relativePath: "duplicate.ts",
+      contentHash: "after",
+      sizeBytes: 20,
+      mtimeMs: 2,
+      language: "typescript",
+    };
+    expect(() =>
+      database.replaceIndexRevision("ws", next, [duplicateFile, duplicateFile]),
+    ).toThrow();
+
+    expect(database.loadGraph("ws")?.revision).toBe(1);
+    expect(database.loadFiles("ws")).toEqual([
+      {
+        relativePath: "main.ts",
+        contentHash: "before",
+        sizeBytes: 10,
+        mtimeMs: 1,
+        language: "typescript",
+      },
+    ]);
+    database.close();
+  });
+
+  it("redacts graph secrets before SQLite persistence", () => {
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("ws", "/tmp/workspace");
+    const secret = "real-production-secret-12345";
+    const snapshot: GraphSnapshot = {
+      protocolVersion: 1,
+      workspaceId: "ws",
+      revision: 1,
+      nodes: [
+        {
+          protocolVersion: 1,
+          id: "function",
+          kind: "function",
+          name: "connect",
+          qualifiedName: "src/config.connect",
+          relativePath: "src/config.ts",
+          language: "typescript",
+          revision: 1,
+          metadata: { signature: `function connect(api_key="${secret}")` },
+        },
+      ],
+      edges: [],
+      truncated: false,
+    };
+
+    database.replaceIndexRevision("ws", snapshot, [], [
+      { message: `api_key=${secret}` },
+    ]);
+
+    const node = database.raw
+      .prepare("SELECT data_json FROM graph_nodes WHERE workspace_id = ?")
+      .get("ws") as { data_json: string };
+    const revision = database.raw
+      .prepare("SELECT diagnostics_json FROM index_revisions WHERE workspace_id = ?")
+      .get("ws") as { diagnostics_json: string };
+    expect(node.data_json).not.toContain(secret);
+    expect(revision.diagnostics_json).not.toContain(secret);
+    expect(node.data_json).toContain("[REDACTED]");
+    database.close();
+  });
 });

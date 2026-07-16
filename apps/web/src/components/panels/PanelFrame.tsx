@@ -1,5 +1,5 @@
 import { Maximize2, Minus, X } from "lucide-react";
-import { memo, type PropsWithChildren, useRef, useState } from "react";
+import { memo, type PropsWithChildren } from "react";
 import { NodeResizer, useReactFlow } from "@xyflow/react";
 
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
@@ -11,6 +11,8 @@ interface PanelFrameProps extends PropsWithChildren {
   minWidth: number;
   minHeight: number;
   currentHeight?: number | undefined;
+  collapsed?: boolean | undefined;
+  expandedHeight?: number | undefined;
   accent?: "cyan" | "green" | "violet";
   className?: string;
   actions?: React.ReactNode;
@@ -23,33 +25,37 @@ export const PanelFrame = memo(function PanelFrame({
   minWidth,
   minHeight,
   currentHeight = minHeight,
+  collapsed = false,
+  expandedHeight = currentHeight,
   accent = "cyan",
   className = "",
   actions,
   children
 }: PanelFrameProps) {
-  const togglePanel = useWorkspaceStore((state) => state.togglePanel);
+  const compactMode = useWorkspaceStore((state) => state.compactMode);
+  const closePanel = useWorkspaceStore((state) => state.closePanel);
+  const setPanelCollapsed = useWorkspaceStore((state) => state.setPanelCollapsed);
   const saveLayout = useWorkspaceStore((state) => state.saveLayout);
-  const { fitView, updateNode } = useReactFlow();
-  const [collapsed, setCollapsed] = useState(false);
-  const expandedHeight = useRef(currentHeight);
+  const { fitView } = useReactFlow();
 
   const toggleCollapsed = () => {
-    if (!collapsed) expandedHeight.current = currentHeight > 60 ? currentHeight : minHeight;
-    const next = !collapsed;
-    setCollapsed(next);
-    updateNode(id, (node) => ({
-      style: { ...node.style, height: next ? 42 : expandedHeight.current }
-    }));
-    window.setTimeout(saveLayout, 0);
+    const rememberedHeight = collapsed
+      ? Math.max(expandedHeight, minHeight)
+      : currentHeight > 60
+        ? currentHeight
+        : Math.max(expandedHeight, minHeight);
+    setPanelCollapsed(id, !collapsed, rememberedHeight);
   };
 
   return (
-    <section className={`tool-panel tool-panel--${accent} ${collapsed ? "tool-panel--collapsed" : ""} ${className}`} aria-label={title}>
+    <section
+      className={`tool-panel tool-panel--${accent} ${collapsed ? "tool-panel--collapsed" : ""} ${compactMode ? "tool-panel--compact" : ""} ${className}`}
+      aria-label={title}
+    >
       <NodeResizer
         minWidth={minWidth}
         minHeight={collapsed ? 42 : minHeight}
-        isVisible={!collapsed}
+        isVisible={!collapsed && !compactMode}
         lineClassName="panel-resizer-line"
         handleClassName="panel-resizer-handle"
         onResizeEnd={saveLayout}
@@ -59,7 +65,11 @@ export const PanelFrame = memo(function PanelFrame({
           {icon}
           <span>{title}</span>
         </div>
-        <div className="panel-title-actions nodrag">
+        <div
+          className="panel-title-actions nodrag"
+          onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
           {actions}
           <button type="button" aria-label={collapsed ? "Restaurar panel" : "Contraer panel"} onClick={toggleCollapsed}>
             <Minus aria-hidden="true" size={14} />
@@ -71,12 +81,18 @@ export const PanelFrame = memo(function PanelFrame({
           >
             <Maximize2 aria-hidden="true" size={13} />
           </button>
-          <button type="button" aria-label="Cerrar panel" onClick={() => togglePanel(id, false)}>
+          <button type="button" aria-label="Cerrar panel" onClick={() => closePanel(id)}>
             <X aria-hidden="true" size={14} />
           </button>
         </div>
       </header>
-      <div className="panel-body nowheel nodrag nopan">{children}</div>
+      <div className="panel-body nowheel nodrag nopan">
+        {compactMode && !collapsed ? (
+          <div className="panel-compact-placeholder" aria-hidden="true">
+            Contenido suspendido a este nivel de zoom
+          </div>
+        ) : children}
+      </div>
     </section>
   );
 });

@@ -10,6 +10,8 @@ Constelix is a local-first visual software engineering workspace. It turns a Jav
 - Codex CLI for **Act** mode
 - `OPENAI_API_KEY` in the process environment for **Ask** mode (`.env.local` is loaded only by the development CLI)
 
+Ask defaults to `gpt-5.6-terra`; override it locally with `CONSTELIX_OPENAI_MODEL` when needed.
+
 ## Development
 
 ```bash
@@ -31,7 +33,7 @@ pnpm test:e2e
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.0.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.1.tgz
 constelix /absolute/path/to/a/project
 ```
 

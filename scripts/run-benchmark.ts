@@ -1,9 +1,12 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { startAgentServer } from "../apps/agent/src/server.js";
-import { generateBenchmarkFixture } from "./generate-benchmark.js";
+import {
+  generateBenchmarkFixture,
+  LINES_PER_BENCHMARK_FILE,
+} from "./generate-benchmark.js";
 
 const FILE_COUNT = 10_000;
 const COLD_BUDGET_MS = 90_000;
@@ -14,6 +17,7 @@ const startedAt = performance.now();
 const server = await startAgentServer({
   workspaceRoot: fixture,
   capabilityToken: "constelix-benchmark-capability",
+  storageDirectory: stateDirectory,
   databasePath: join(stateDirectory, "benchmark.sqlite"),
   webDistPath: join(stateDirectory, "no-web-assets"),
   port: 0
@@ -22,10 +26,36 @@ const server = await startAgentServer({
 try {
   const coldStatus = await waitForReady(server, 0, COLD_BUDGET_MS + 5_000);
   const coldMs = performance.now() - startedAt;
-  const changedFile = join(fixture, "src", "module-5000.js");
-  const original = await readFile(changedFile, "utf8");
+  const headers = {
+    authorization: `Bearer ${server.capabilityToken}`,
+    host: `127.0.0.1:${server.port}`,
+    "content-type": "application/json",
+  };
+  const read = await server.app.inject({
+    method: "POST",
+    url: "/api/v1/files/read",
+    headers,
+    payload: { protocolVersion: 1, relativePath: "src/module-5000.js" },
+  });
+  if (read.statusCode !== 200) {
+    throw new Error(`Benchmark editor read failed with HTTP ${read.statusCode}: ${read.body}`);
+  }
+  const opened = read.json<{ content: string; contentHash: string }>();
   const incrementalStartedAt = performance.now();
-  await writeFile(changedFile, `${original}\nexport const benchmarkChange = true;\n`, "utf8");
+  const write = await server.app.inject({
+    method: "PUT",
+    url: "/api/v1/files/write",
+    headers,
+    payload: {
+      protocolVersion: 1,
+      relativePath: "src/module-5000.js",
+      content: `${opened.content}\nexport const benchmarkChange = true;\n`,
+      expectedContentHash: opened.contentHash,
+    },
+  });
+  if (write.statusCode !== 200) {
+    throw new Error(`Benchmark editor write failed with HTTP ${write.statusCode}: ${write.body}`);
+  }
   const incrementalStatus = await waitForReady(
     server,
     coldStatus.revision,
@@ -34,6 +64,7 @@ try {
   const incrementalMs = performance.now() - incrementalStartedAt;
   const result = {
     files: coldStatus.total,
+    lines: FILE_COUNT * LINES_PER_BENCHMARK_FILE,
     coldMs: Math.round(coldMs),
     coldBudgetMs: COLD_BUDGET_MS,
     incrementalMs: Math.round(incrementalMs),

@@ -38,6 +38,12 @@ export interface SemanticNodeData extends Record<string, unknown> {
   relativePath?: string;
   language?: string;
   count?: number;
+  childCount?: number;
+  expanded?: boolean;
+  collapsed?: boolean;
+  hasMore?: boolean;
+  collapsedHidden?: boolean;
+  capacityHidden?: boolean;
   health?: "healthy" | "warning" | "idle";
   evidenceState?: "visited" | "current";
 }
@@ -51,6 +57,8 @@ export interface EditorPanelData extends Record<string, unknown> {
   contentHash?: string;
   anchorNodeId?: string;
   revealLine?: number;
+  collapsed?: boolean;
+  expandedHeight?: number;
 }
 
 export interface TerminalPanelData extends Record<string, unknown> {
@@ -59,6 +67,8 @@ export interface TerminalPanelData extends Record<string, unknown> {
   cwd: string;
   terminalId?: string;
   anchorNodeId?: string;
+  collapsed?: boolean;
+  expandedHeight?: number;
 }
 
 export type AssistantMode = "ask" | "act";
@@ -67,6 +77,8 @@ export interface AssistantPanelData extends Record<string, unknown> {
   panelType: "assistant";
   title: string;
   mode: AssistantMode;
+  collapsed?: boolean;
+  expandedHeight?: number;
 }
 
 export type SemanticFlowNode = Node<SemanticNodeData, "semantic">;
@@ -118,6 +130,13 @@ export interface BootstrapPayload {
     terminal: boolean;
     codexReason?: string;
   };
+}
+
+export interface TerminalRuntime {
+  terminalId: string;
+  cwd: string;
+  status: "running" | "exited";
+  exitLabel?: string;
 }
 
 export interface ActTask {

@@ -425,6 +425,69 @@ textarea:focus-visible {
   line-height: 1.1;
 }
 
+.semantic-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  padding: 2px 4px;
+  border: 1px solid #3d494d;
+  border-radius: 8px;
+  color: #879396;
+  font-size: 8px;
+  text-align: center;
+}
+
+.semantic-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0.35;
+  transition: opacity 120ms ease;
+}
+
+.semantic-node:hover .semantic-actions,
+.semantic-node--selected .semantic-actions,
+.semantic-actions:focus-within {
+  opacity: 1;
+}
+
+.semantic-actions button {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: #8f9a9d;
+  background: transparent;
+  cursor: pointer;
+}
+
+.semantic-actions button:hover,
+.semantic-actions button:focus-visible {
+  border-color: #465358;
+  color: var(--node-color);
+  background: #20292c;
+}
+
+.semantic-node--compact {
+  min-width: 94px;
+  min-height: 32px;
+  gap: 6px;
+  padding: 4px 8px;
+}
+
+.semantic-node--compact .semantic-icon {
+  width: 17px;
+  height: 20px;
+  flex-basis: 17px;
+}
+
+.semantic-node--compact .semantic-copy strong {
+  max-width: 86px;
+  font-size: 9px;
+}
+
 .semantic-health {
   width: 8px;
   height: 8px;
@@ -579,6 +642,22 @@ textarea:focus-visible {
   box-shadow: 0 0 7px rgba(121, 201, 103, 0.58);
 }
 
+.graph-partial-status {
+  position: absolute;
+  z-index: 35;
+  top: 49px;
+  left: 310px;
+  max-width: min(560px, calc(100vw - 430px));
+  padding: 6px 9px;
+  border: 1px solid #5f5437;
+  border-radius: 5px;
+  color: #c2b68f;
+  background: rgba(31, 28, 20, 0.92);
+  font-family: var(--mono);
+  font-size: 8px;
+  pointer-events: none;
+}
+
 .constelix-minimap {
   right: 125px !important;
   bottom: 16px !important;
@@ -654,6 +733,21 @@ textarea:focus-visible {
 
 .tool-panel--collapsed .panel-body {
   display: none;
+}
+
+.tool-panel--compact .panel-body {
+  background: #101719;
+}
+
+.panel-compact-placeholder {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  place-items: center;
+  padding: 12px;
+  color: #738084;
+  font-size: 9px;
+  text-align: center;
 }
 
 .panel-resizer-line {
@@ -798,6 +892,49 @@ textarea:focus-visible {
 .editor-save-status--conflict,
 .editor-save-status--error { color: var(--danger); }
 
+.editor-conflict {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #684448;
+  color: #d9a5a8;
+  background: #281b1d;
+  font-size: 9px;
+}
+
+.editor-conflict > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.editor-conflict > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.editor-conflict button {
+  display: inline-flex;
+  height: 23px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid #685053;
+  border-radius: 4px;
+  color: #d9b4b6;
+  background: #342326;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.editor-conflict button.editor-conflict-overwrite {
+  border-color: #745c39;
+  color: #dfc48c;
+  background: #31291b;
+}
+
 .editor-workspace {
   display: flex;
   min-height: 0;
@@ -850,6 +987,12 @@ textarea:focus-visible {
   width: 11px;
 }
 
+.file-tree-dirty {
+  margin-left: auto;
+  color: var(--cyan);
+  font-size: 13px;
+}
+
 .editor-code {
   position: relative;
   min-width: 0;
@@ -899,6 +1042,20 @@ textarea:focus-visible {
 .terminal-host .xterm-viewport {
   scrollbar-width: thin;
   scrollbar-color: #344044 transparent;
+}
+
+.terminal-transcript-warning {
+  position: absolute;
+  z-index: 4;
+  top: 5px;
+  right: 8px;
+  padding: 3px 5px;
+  border: 1px solid #5d543a;
+  border-radius: 3px;
+  color: #bfb28b;
+  background: rgba(37, 33, 23, 0.92);
+  font-size: 7px;
+  pointer-events: none;
 }
 
 .assistant-tabs {
@@ -1103,6 +1260,12 @@ textarea:focus-visible {
   font-style: normal;
 }
 
+.evidence-partial {
+  margin: 0 0 4px;
+  color: #c2ad78;
+  font-size: 8px;
+}
+
 .act-layout {
   display: flex;
   min-height: 0;
@@ -1111,6 +1274,43 @@ textarea:focus-visible {
   gap: 13px;
   padding: 12px 14px;
   overflow: auto;
+}
+
+.act-objective {
+  display: flex;
+  min-width: 180px;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 5px;
+  color: #aeb7b9;
+  font-size: 9px;
+}
+
+.act-objective textarea {
+  min-height: 55px;
+  padding: 7px 8px;
+  resize: vertical;
+  border: 1px solid #3f464d;
+  border-radius: 4px;
+  outline: 0;
+  color: #dce3e5;
+  background: #12181a;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.act-objective textarea:focus {
+  border-color: #73598f;
+}
+
+.act-scope-root {
+  overflow-wrap: anywhere;
+}
+
+.act-scope-root code,
+.approval-card code {
+  color: #b8a1cf;
+  font-family: var(--mono);
 }
 
 .act-copy,
@@ -1171,8 +1371,9 @@ textarea:focus-visible {
 }
 
 .approval-card ul {
-  display: flex;
-  gap: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 5px 18px;
   margin: 7px 0;
   padding-left: 15px;
   color: #a7a08e;
@@ -1336,6 +1537,7 @@ textarea:focus-visible {
   .command-trigger { width: 245px; }
   .canvas-legend { width: 235px; }
   .index-status { left: 268px; }
+  .graph-partial-status { left: 268px; }
   .constelix-minimap { width: 165px !important; height: 108px !important; }
 }
 
@@ -1349,7 +1551,8 @@ textarea:focus-visible {
   .connection-status span { display: none; }
   .command-trigger { width: 210px; }
   .canvas-legend { transform: scale(0.88); transform-origin: top left; }
-  .index-status { display: none; }
+  .index-status,
+  .graph-partial-status { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

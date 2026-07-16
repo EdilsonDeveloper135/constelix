@@ -134,6 +134,20 @@ describe("InMemoryGraphStore", () => {
     expect(store.search("service")[0]?.name).toBe("service");
   });
 
+  it("returns deterministic multi-hop neighbors up to the requested depth", () => {
+    const source = snapshot();
+    const store = new InMemoryGraphStore(source);
+    const root = source.nodes.find((item) => item.name === "root")!;
+
+    const oneHop = store.neighbors(root.id, { direction: "outbound", depth: 1 });
+    const threeHops = store.neighbors(root.id, { direction: "outbound", depth: 3 });
+
+    expect(oneHop.nodes.map((item) => item.name)).toEqual(["api"]);
+    expect(oneHop.edges).toHaveLength(1);
+    expect(threeHops.nodes.map((item) => item.name)).toEqual(["api", "service", "database"]);
+    expect(threeHops.edges).toHaveLength(3);
+  });
+
   it("applies a snapshot delta transactionally", () => {
     const before = snapshot(1);
     const after = snapshot(2);

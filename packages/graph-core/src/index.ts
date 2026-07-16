@@ -64,6 +64,7 @@ export interface GraphSearchOptions {
 export interface NeighborOptions extends GraphSearchOptions {
   direction?: GraphDirection;
   relations?: readonly GraphRelation[];
+  depth?: number;
 }
 
 export interface NeighborResult {
@@ -302,19 +303,38 @@ export class InMemoryGraphStore {
     const relationSet = new Set(options.relations ?? []);
     const kindSet = new Set(options.kinds ?? []);
     const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
-    const pairs: Array<{ node: GraphNode; edge: GraphEdge }> = [];
-    for (const edge of this.adjacentEdges(nodeId, direction)) {
-      if (relationSet.size > 0 && !relationSet.has(edge.relation)) continue;
-      const otherId = edge.source === nodeId ? edge.target : edge.source;
-      const node = this.nodes.get(otherId);
-      if (node === undefined || (kindSet.size > 0 && !kindSet.has(node.kind))) continue;
-      pairs.push({ node, edge });
+    const depth = Math.max(1, Math.min(4, Math.trunc(options.depth ?? 1)));
+    const visited = new Set([nodeId]);
+    const candidates: GraphNode[] = [];
+    const traversedEdges = new Map<string, GraphEdge>();
+    const queue: Array<{ id: string; depth: number }> = [{ id: nodeId, depth: 0 }];
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current === undefined || current.depth >= depth) continue;
+      const adjacent = this.adjacentEdges(current.id, direction)
+        .filter((edge) => relationSet.size === 0 || relationSet.has(edge.relation))
+        .sort((left, right) => left.id.localeCompare(right.id));
+      for (const edge of adjacent) {
+        const otherId = edge.source === current.id ? edge.target : edge.source;
+        if (visited.has(otherId)) continue;
+        const node = this.nodes.get(otherId);
+        if (node === undefined) continue;
+        visited.add(otherId);
+        traversedEdges.set(edge.id, edge);
+        queue.push({ id: otherId, depth: current.depth + 1 });
+        if (kindSet.size === 0 || kindSet.has(node.kind)) candidates.push(node);
+      }
     }
-    pairs.sort((left, right) => left.node.id.localeCompare(right.node.id) || left.edge.id.localeCompare(right.edge.id));
-    const selected = pairs.slice(0, limit);
+
+    const selectedNodes = candidates.slice(0, limit);
+    const included = new Set([nodeId, ...selectedNodes.map((node) => node.id)]);
+    const edges = [...traversedEdges.values()]
+      .filter((edge) => included.has(edge.source) && included.has(edge.target))
+      .sort((left, right) => left.id.localeCompare(right.id));
     return {
-      nodes: selected.map(({ node }) => node),
-      edges: selected.map(({ edge }) => edge)
+      nodes: selectedNodes,
+      edges
     };
   }
 

@@ -42,24 +42,26 @@ v0.0.1 - fix: Correct workspace startup errors
 5. Actualizar `KNOWN_ISSUES.md` con problemas reales y resultados pendientes.
 6. Auditar que no se incluyan `.env`, claves, tokens, credenciales, dependencias, temporales o artefactos innecesarios.
 7. Actualizar `VERSION`, las versiones npm, este documento y `CHANGELOG.md`.
-8. Preparar únicamente los archivos revisados y comprobarlos con `git diff --cached`.
-9. Crear el commit con el formato obligatorio.
-10. Crear una etiqueta anotada con la misma versión:
+8. Ejecutar `pnpm version:check` para comprobar que todos los metadatos coinciden.
+9. Preparar únicamente los archivos revisados y comprobarlos con `git diff --cached`.
+10. Crear el commit con el formato obligatorio.
+11. Crear una etiqueta anotada con la misma versión:
 
 ```bash
 git tag -a vMAJOR.MINOR.PATCH -m "Constelix vMAJOR.MINOR.PATCH"
 ```
 
-11. Verificar el commit, la etiqueta y el estado final. Nunca hacer push sin autorización expresa.
+12. Verificar el commit, la etiqueta y el estado final. Nunca hacer push sin autorización expresa.
 
 ## 5. Versión actual
 
-`v0.0.0`
+`v0.0.1`
 
 ## 6. Historial
 
 | Versión | Fecha | Descripción |
 |---|---|---|
+| `v0.0.1` | 2026-07-16 | Hardening del runtime, sincronización incremental y flujos IA del MVP. |
 | `v0.0.0` | 2026-07-16 | Checkpoint inicial del MVP de Constelix. |
 
 ## 7. Inmutabilidad

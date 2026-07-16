@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const FILE_COUNT = 10_000;
+export const LINES_PER_BENCHMARK_FILE = 200;
 const BATCH_SIZE = 250;
 
 export async function generateBenchmarkFixture(fileCount = FILE_COUNT): Promise<string> {
@@ -16,9 +17,16 @@ export async function generateBenchmarkFixture(fileCount = FILE_COUNT): Promise<
     const end = Math.min(start + BATCH_SIZE, fileCount);
     for (let index = start; index < end; index += 1) {
       const previous = index === 0 ? null : `module-${index - 1}.js`;
-      const source = previous
-        ? `import { value as previous } from "./${previous}";\nexport const value = previous + 1;\nexport function read${index}() { return value; }\n`
-        : "export const value = 0;\nexport function read0() { return value; }\n";
+      const statements = [
+        ...(previous ? [`import { value as previous } from "./${previous}";`] : []),
+        `export const value = ${previous ? "previous + 1" : "0"};`,
+        `export function read${index}() { return value; }`,
+      ];
+      const filler = Array.from(
+        { length: LINES_PER_BENCHMARK_FILE - statements.length },
+        (_, line) => `// benchmark fixture line ${line + statements.length + 1}`,
+      );
+      const source = `${[...statements, ...filler].join("\n")}\n`;
       jobs.push(writeFile(join(sourceRoot, `module-${index}.js`), source, "utf8"));
     }
     await Promise.all(jobs);

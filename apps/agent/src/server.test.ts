@@ -12,11 +12,39 @@ describe("local agent HTTP boundary", () => {
       workspaceRoot: root,
       port: 0,
       capabilityToken: "test-capability",
+      storageDirectory: join(root, ".constelix-test-state"),
       databasePath: join(root, "agent-test.sqlite"),
       webDistPath: join(root, "missing-web-dist"),
     });
     const host = new URL(server.origin).host;
     try {
+      const invalidHost = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/health",
+        headers: {
+          host: "attacker.invalid",
+          authorization: "Bearer test-capability",
+        },
+      });
+      expect(invalidHost.statusCode).toBe(403);
+      expect(invalidHost.json()).toMatchObject({
+        error: { code: "INVALID_HOST" },
+      });
+
+      const invalidOrigin = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/health",
+        headers: {
+          host,
+          origin: "https://attacker.invalid",
+          authorization: "Bearer test-capability",
+        },
+      });
+      expect(invalidOrigin.statusCode).toBe(403);
+      expect(invalidOrigin.json()).toMatchObject({
+        error: { code: "INVALID_ORIGIN" },
+      });
+
       const unauthorized = await server.app.inject({
         method: "GET",
         url: "/api/v1/health",
@@ -192,6 +220,25 @@ describe("local agent HTTP boundary", () => {
       });
       await ready;
       socket.close();
+
+      const unauthenticatedSocket = new WebSocket(
+        `${server.origin.replace("http", "ws")}/api/v1/events`,
+      );
+      const unauthenticatedClose = new Promise<CloseEvent>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("Unauthenticated WebSocket was not closed.")),
+          3_000,
+        );
+        unauthenticatedSocket.addEventListener("close", (event) => {
+          clearTimeout(timeout);
+          resolve(event);
+        });
+        unauthenticatedSocket.addEventListener("error", () => {
+          // A close event with the protocol code remains the source of truth.
+        });
+      });
+      const closeEvent = await unauthenticatedClose;
+      expect(closeEvent.code).toBe(4401);
 
       let indexPhase = "idle";
       for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {

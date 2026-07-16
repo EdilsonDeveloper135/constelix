@@ -1,6 +1,6 @@
 {
   "name": "constelix",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "description": "A local-first visual software engineering workspace.",
   "type": "module",
@@ -13,14 +13,15 @@
     "dev:agent": "pnpm --filter @constelix/agent dev",
     "dev:web": "pnpm --filter @constelix/web dev",
     "build": "pnpm -r build && pnpm package:cli",
-    "package:cli": "tsx scripts/package-cli.ts",
+    "package:cli": "node --import tsx scripts/package-cli.ts",
+    "version:check": "node --import tsx scripts/check-version.ts",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "benchmark": "tsx scripts/run-benchmark.ts",
-    "benchmark:fixture": "tsx scripts/generate-benchmark.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "benchmark": "node --import tsx scripts/run-benchmark.ts",
+    "benchmark:fixture": "node --import tsx scripts/generate-benchmark.ts",
+    "check": "pnpm version:check && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

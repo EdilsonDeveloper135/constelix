@@ -4,32 +4,34 @@ import { apiClient } from "../lib/api";
 import { useWorkspaceStore } from "../store/useWorkspaceStore";
 
 export function useAgentBridge(): void {
-  const hydrateBootstrap = useWorkspaceStore((state) => state.hydrateBootstrap);
   const handleAgentEvent = useWorkspaceStore((state) => state.handleAgentEvent);
   const setConnection = useWorkspaceStore((state) => state.setConnection);
 
   useEffect(() => {
-    let active = true;
     const unsubscribe = apiClient.subscribe(handleAgentEvent);
+    const unsubscribeConnection = apiClient.subscribeConnection((state) => {
+      if (state === "connected") {
+        setConnection(
+          useWorkspaceStore.getState().remoteHydrated
+            ? "connected"
+            : "connecting",
+        );
+      } else if (state === "connecting") {
+        setConnection("connecting");
+      } else {
+        setConnection("degraded");
+      }
+    });
     const disconnect = apiClient.connect();
 
     if (!apiClient.hasToken) {
       setConnection("degraded");
-    } else {
-      void apiClient
-        .bootstrap()
-        .then((payload) => {
-          if (active) hydrateBootstrap(payload);
-        })
-        .catch(() => {
-          if (active) setConnection("degraded");
-        });
     }
 
     return () => {
-      active = false;
       unsubscribe();
+      unsubscribeConnection();
       disconnect();
     };
-  }, [handleAgentEvent, hydrateBootstrap, setConnection]);
+  }, [handleAgentEvent, setConnection]);
 }

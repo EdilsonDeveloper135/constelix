@@ -7,8 +7,24 @@ import type { EventBus } from "./events.js";
 import { createSafeChildEnvironment, redactSecrets } from "./security.js";
 
 const execFileAsync = promisify(execFile);
-const TESTED_CODEX_VERSION = "0.144.1";
+export const TESTED_CODEX_VERSION = "0.144.1";
 const APPROVAL_TTL_MS = 15 * 60 * 1_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+type CodexAppServerProcess = Pick<
+  ChildProcessWithoutNullStreams,
+  "stdin" | "stdout" | "stderr" | "killed" | "kill" | "once"
+>;
+type RpcId = number | string;
+
+export interface CodexManagerOptions {
+  getCodexVersion?: () => Promise<string | undefined>;
+  spawnAppServer?: (
+    workspaceRoot: string,
+    environment: NodeJS.ProcessEnv,
+  ) => CodexAppServerProcess;
+  requestTimeoutMs?: number;
+}
 
 export function createCodexSandboxPolicy(workspaceRoot: string) {
   return {
@@ -47,6 +63,7 @@ export interface ActTaskRecord {
     expiresAt: string;
   };
   approvedAt?: string;
+  completedAt?: string;
   codexThreadId?: string;
   codexTurnId?: string;
   error?: string;
@@ -72,7 +89,7 @@ export class CodexUnavailableError extends Error {
 export class CodexManager {
   readonly #tasks = new Map<string, ActTaskRecord>();
   readonly #pending = new Map<number, PendingRequest>();
-  #process: ChildProcessWithoutNullStreams | undefined;
+  #process: CodexAppServerProcess | undefined;
   #requestId = 0;
   #stdoutBuffer = "";
   #availability: { available: boolean; version?: string; reason?: string } | undefined;
@@ -82,16 +99,15 @@ export class CodexManager {
     private readonly workspaceRoot: string,
     private readonly events: EventBus,
     private readonly database: ConstelixDatabase,
+    private readonly options: CodexManagerOptions = {},
   ) {}
 
   async availability(): Promise<{ available: boolean; version?: string; reason?: string }> {
     if (this.#availability) return this.#availability;
     try {
-      const { stdout } = await execFileAsync("codex", ["--version"], {
-        env: createSafeChildEnvironment(),
-        timeout: 5_000,
-      });
-      const version = /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1];
+      const version = this.options.getCodexVersion
+        ? await this.options.getCodexVersion()
+        : await resolveInstalledCodexVersion();
       if (!version) {
         this.#availability = { available: false, reason: "Unable to determine Codex CLI version." };
       } else if (version !== TESTED_CODEX_VERSION) {
@@ -186,7 +202,8 @@ export class CodexManager {
         sandboxPolicy: createCodexSandboxPolicy(this.workspaceRoot),
       })) as { turn?: { id?: string }; id?: string };
       const turnId = turnResult.turn?.id ?? turnResult.id;
-      if (turnId) task.codexTurnId = turnId;
+      if (!turnId) throw new Error("Codex did not return a turn id.");
+      task.codexTurnId = turnId;
       task.status = "running";
       this.persist(task);
       this.events.publish("act.task.started", task);
@@ -194,13 +211,17 @@ export class CodexManager {
       return task;
     } catch (error) {
       task.status = "failed";
+      task.completedAt = new Date().toISOString();
+      task.error = redactSecrets(
+        error instanceof Error ? error.message : "Codex failed to start.",
+      );
       this.persist(task);
       this.events.publish("act.task.failed", {
         taskId: task.id,
-        message: redactSecrets(error instanceof Error ? error.message : "Codex failed to start."),
+        message: task.error,
       });
       this.publishAct(task, "failed", {
-        message: redactSecrets(error instanceof Error ? error.message : "Codex failed to start."),
+        message: task.error,
       });
       throw error;
     }
@@ -208,16 +229,54 @@ export class CodexManager {
 
   async cancel(id: string): Promise<ActTaskRecord> {
     const task = this.requireTask(id);
-    if (task.status === "running" && task.codexThreadId) {
+    if (task.status === "pending_approval") {
+      task.status = "cancelled";
+      task.completedAt = new Date().toISOString();
+      this.persist(task);
+      this.events.publish("act.task.cancelled", { taskId: task.id });
+      this.publishAct(task, "cancelled");
+      return task;
+    }
+
+    if (task.status !== "running") {
+      if (isTerminalTaskStatus(task.status)) return task;
+      throw new Error("Only pending or running tasks can be cancelled.");
+    }
+    if (!task.codexThreadId || !task.codexTurnId) {
+      const message = "Codex cannot cancel a turn without both thread and turn ids.";
+      task.status = "failed";
+      task.completedAt = new Date().toISOString();
+      task.error = message;
+      this.persist(task);
+      this.events.publish("act.task.failed", { taskId: task.id, message });
+      this.publishAct(task, "failed", { message });
+      throw new Error(message);
+    }
+
+    try {
       await this.request("turn/interrupt", {
         threadId: task.codexThreadId,
-        ...(task.codexTurnId ? { turnId: task.codexTurnId } : {}),
-      }).catch(() => undefined);
+        turnId: task.codexTurnId,
+      });
+    } catch (error) {
+      const message = redactSecrets(
+        error instanceof Error ? error.message : "Codex failed to request cancellation.",
+      );
+      task.status = "failed";
+      task.completedAt = new Date().toISOString();
+      task.error = message;
+      this.persist(task);
+      this.events.publish("act.task.failed", { taskId: task.id, message });
+      this.publishAct(task, "failed", { message });
+      throw error;
     }
-    task.status = "cancelled";
-    this.persist(task);
-    this.events.publish("act.task.cancelled", { taskId: task.id });
-    this.publishAct(task, "cancelled");
+
+    this.database.audit(this.workspaceId, "codex", "turn/interrupt", "requested", {
+      taskId: task.id,
+    });
+    this.publishAct(task, "cancel_requested", {
+      message: "Constelix solicitó cancelar el turno; espera la confirmación de Codex.",
+    });
     return task;
   }
 
@@ -239,12 +298,16 @@ export class CodexManager {
 
   private async ensureStarted(): Promise<void> {
     if (this.#process && !this.#process.killed) return;
-    const child = spawn("codex", ["app-server"], {
-        cwd: this.workspaceRoot,
-        env: createSafeChildEnvironment(),
-        stdio: ["pipe", "pipe", "pipe"],
-    });
+    const environment = createSafeChildEnvironment();
+    const child = this.options.spawnAppServer
+      ? this.options.spawnAppServer(this.workspaceRoot, environment)
+      : spawn("codex", ["app-server"], {
+          cwd: this.workspaceRoot,
+          env: environment,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
     this.#process = child;
+    this.#stdoutBuffer = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data: string) => this.consumeStdout(data));
     child.stderr.setEncoding("utf8");
@@ -253,13 +316,13 @@ export class CodexManager {
         message: redactSecrets(data).slice(0, 2_000),
       });
     });
-    child.once("exit", (code, signal) => this.handleExit(code, signal));
-    child.once("error", (error) => this.handleExit(null, null, error));
+    child.once("exit", (code, signal) => this.handleExit(child, code, signal));
+    child.once("error", (error) => this.handleExit(child, null, null, error));
 
     await this.request("initialize", {
-      clientInfo: { name: "constelix", title: "Constelix", version: "0.0.0" },
+      clientInfo: { name: "constelix", title: "Constelix", version: "0.0.1" },
     });
-    this.notify("initialized", {});
+    this.notify("initialized");
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
@@ -268,15 +331,21 @@ export class CodexManager {
       const timeout = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`Codex request timed out: ${method}`));
-      }, 30_000);
+      }, this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
       timeout.unref();
       this.#pending.set(id, { resolve, reject, timeout });
-      this.send({ id, method, params });
+      try {
+        this.send({ id, method, params });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new Error("Unable to contact Codex."));
+      }
     });
   }
 
-  private notify(method: string, params: unknown): void {
-    this.send({ method, params });
+  private notify(method: string, params?: unknown): void {
+    this.send(params === undefined ? { method } : { method, params });
   }
 
   private send(message: unknown): void {
@@ -302,58 +371,137 @@ export class CodexManager {
     } catch {
       return;
     }
-    if (typeof message.id === "number") {
+
+    const method = typeof message.method === "string" ? message.method : undefined;
+    if (method && isRpcId(message.id)) {
+      this.handleServerRequest(
+        message.id,
+        method,
+        asRecord(message.params),
+      );
+      return;
+    }
+
+    if (!method && typeof message.id === "number") {
       const pending = this.#pending.get(message.id);
       if (!pending) return;
       clearTimeout(pending.timeout);
       this.#pending.delete(message.id);
-      if (message.error) {
+      if (message.error !== undefined && message.error !== null) {
         pending.reject(new Error(redactSecrets(JSON.stringify(message.error))));
       } else {
         pending.resolve(message.result);
       }
       return;
     }
-    if (typeof message.method !== "string") return;
-    const params = (message.params ?? {}) as Record<string, unknown>;
-    this.events.publish("act.codex.event", { method: message.method, params });
-    const eventThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
+
+    if (!method) return;
+    const params = asRecord(message.params);
+    this.events.publish("act.codex.event", { method, params });
+    const eventThreadId = getEventThreadId(params);
     const eventTask = eventThreadId
       ? [...this.#tasks.values()].find((candidate) => candidate.codexThreadId === eventThreadId)
       : undefined;
-    if (eventTask && (message.method.startsWith("item/") || message.method === "turn/started")) {
-      const summary = summarizeCodexEvent(message.method, params);
-      this.database.audit(this.workspaceId, "codex", message.method, "event", {
+    if (eventTask && (method.startsWith("item/") || method === "turn/started")) {
+      const summary = summarizeCodexEvent(method, params);
+      this.database.audit(this.workspaceId, "codex", method, "event", {
         taskId: eventTask.id,
         summary,
       });
-      this.publishAct(eventTask, message.method, { message: summary });
+      this.publishAct(eventTask, method, { message: summary });
     }
 
-    if (message.method === "turn/completed") {
-      const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (method === "turn/completed") {
+      const threadId = getEventThreadId(params);
+      const turn = asRecord(params.turn);
+      const turnId = typeof turn.id === "string" ? turn.id : undefined;
       const task = [...this.#tasks.values()].find(
-        (candidate) => candidate.codexThreadId === threadId && candidate.status === "running",
+        (candidate) =>
+          candidate.codexThreadId === threadId &&
+          candidate.status === "running" &&
+          candidate.codexTurnId === turnId,
       );
       if (task) {
-        const turn = params.turn as { status?: string; error?: { message?: string } | null } | undefined;
-        task.status = turn?.status === "failed" ? "failed" : "completed";
-        if (task.status === "failed") {
-          task.error = redactSecrets(turn?.error?.message ?? "Codex reported a failed turn.");
+        const terminal = mapTerminalTurn(turn);
+        task.status = terminal.status;
+        task.completedAt = new Date().toISOString();
+        if (terminal.error) {
+          task.error = terminal.error;
+        } else {
+          delete task.error;
         }
         this.persist(task);
-        this.events.publish(task.status === "failed" ? "act.task.failed" : "act.task.completed", task);
-        this.publishAct(task, task.status === "failed" ? "failed" : "completed", task.error ? { message: task.error } : undefined);
+        if (task.status === "failed") {
+          this.events.publish("act.task.failed", {
+            taskId: task.id,
+            message: task.error ?? "Codex reported a failed turn.",
+          });
+          this.publishAct(task, "failed", {
+            message: task.error ?? "Codex reported a failed turn.",
+          });
+        } else if (task.status === "cancelled") {
+          this.events.publish("act.task.cancelled", { taskId: task.id });
+          this.publishAct(task, "cancelled");
+        } else {
+          this.events.publish("act.task.completed", task);
+          this.publishAct(task, "completed");
+        }
       }
     }
   }
 
+  private handleServerRequest(
+    id: RpcId,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    const task = this.findTaskForParams(params);
+    const response = deniedServerRequestResponse(id, method);
+    try {
+      this.send(response);
+    } catch (error) {
+      this.events.publish("act.runtime.notice", {
+        message: redactSecrets(
+          error instanceof Error
+            ? error.message
+            : `Unable to deny Codex request ${method}.`,
+        ),
+      });
+      return;
+    }
+
+    const summary = summarizeDeniedServerRequest(method, params);
+    this.database.audit(this.workspaceId, "codex", method, "denied", {
+      ...(task ? { taskId: task.id } : {}),
+      summary,
+    });
+    this.events.publish("act.codex.request.denied", {
+      ...(task ? { taskId: task.id } : {}),
+      method,
+      message: summary,
+    });
+    if (task) {
+      this.publishAct(task, "request_denied", { message: summary });
+    }
+  }
+
+  private findTaskForParams(params: Record<string, unknown>): ActTaskRecord | undefined {
+    const threadId = getEventThreadId(params);
+    return threadId
+      ? [...this.#tasks.values()].find((candidate) => candidate.codexThreadId === threadId)
+      : undefined;
+  }
+
   private handleExit(
+    child: CodexAppServerProcess,
     code: number | null,
     signal: NodeJS.Signals | null,
     cause?: Error,
   ): void {
+    if (this.#process !== child) return;
     this.#process = undefined;
+    this.#availability = undefined;
+    this.#stdoutBuffer = "";
     const error = new CodexUnavailableError(
       redactSecrets(cause?.message ?? `Codex exited (${code ?? "unknown"}/${signal ?? "no signal"}).`),
     );
@@ -365,8 +513,13 @@ export class CodexManager {
     for (const task of this.#tasks.values()) {
       if (task.status === "running" || task.status === "approved") {
         task.status = "failed";
+        task.completedAt = new Date().toISOString();
         task.error = error.message;
         this.persist(task);
+        this.events.publish("act.task.failed", {
+          taskId: task.id,
+          message: error.message,
+        });
         this.publishAct(task, "failed", { message: error.message });
       }
     }
@@ -405,9 +558,125 @@ export class CodexManager {
   }
 
   close(): void {
-    this.#process?.kill("SIGTERM");
-    this.#process = undefined;
+    const child = this.#process;
+    if (!child) return;
+    this.handleExit(
+      child,
+      null,
+      "SIGTERM",
+      new CodexUnavailableError("Codex manager closed."),
+    );
+    child.kill("SIGTERM");
   }
+}
+
+async function resolveInstalledCodexVersion(): Promise<string | undefined> {
+  const { stdout } = await execFileAsync("codex", ["--version"], {
+    env: createSafeChildEnvironment(),
+    timeout: 5_000,
+  });
+  return /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function isRpcId(value: unknown): value is RpcId {
+  return typeof value === "number" || typeof value === "string";
+}
+
+function getEventThreadId(params: Record<string, unknown>): string | undefined {
+  if (typeof params.threadId === "string") return params.threadId;
+  return typeof params.conversationId === "string" ? params.conversationId : undefined;
+}
+
+function deniedServerRequestResponse(
+  id: RpcId,
+  method: string,
+): Record<string, unknown> {
+  switch (method) {
+    case "item/commandExecution/requestApproval":
+    case "item/fileChange/requestApproval":
+      return { id, result: { decision: "decline" } };
+    case "applyPatchApproval":
+    case "execCommandApproval":
+      return { id, result: { decision: "denied" } };
+    case "item/permissions/requestApproval":
+      return {
+        id,
+        result: {
+          permissions: {},
+          scope: "turn",
+          strictAutoReview: true,
+        },
+      };
+    default:
+      return {
+        id,
+        error: {
+          code: -32601,
+          message: `Server request ${method} is not supported by Constelix.`,
+        },
+      };
+  }
+}
+
+function summarizeDeniedServerRequest(
+  method: string,
+  params: Record<string, unknown>,
+): string {
+  if (method === "item/fileChange/requestApproval" || method === "applyPatchApproval") {
+    const grantRoot = typeof params.grantRoot === "string"
+      ? ` (${redactSecrets(params.grantRoot).slice(0, 400)})`
+      : "";
+    return `Constelix denegó una solicitud adicional de escritura${grantRoot}; el turno no puede ampliar su alcance.`;
+  }
+  if (method === "item/commandExecution/requestApproval" || method === "execCommandApproval") {
+    return "Constelix denegó una solicitud adicional de ejecución; el turno no puede ampliar su alcance.";
+  }
+  if (method === "item/permissions/requestApproval") {
+    return "Constelix denegó una ampliación de permisos solicitada por Codex.";
+  }
+  return `Constelix rechazó la solicitud server→client no soportada ${method}.`;
+}
+
+function mapTerminalTurn(
+  turn: Record<string, unknown>,
+): { status: "completed" | "failed" | "cancelled"; error?: string } {
+  const status = typeof turn.status === "string" ? turn.status : "unknown";
+  if (status === "completed") return { status: "completed" };
+  if (status === "interrupted" || status === "cancelled") {
+    return { status: "cancelled" };
+  }
+  if (status === "failed") {
+    return {
+      status: "failed",
+      error: extractTurnError(turn.error) ?? "Codex reported a failed turn.",
+    };
+  }
+  return {
+    status: "failed",
+    error: `Codex completed with an unexpected terminal status: ${redactSecrets(status)}.`,
+  };
+}
+
+function extractTurnError(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return redactSecrets(value);
+  const error = asRecord(value);
+  if (typeof error.message === "string" && error.message.trim()) {
+    return redactSecrets(error.message);
+  }
+  return undefined;
+}
+
+function isTerminalTaskStatus(status: ActTaskStatus): boolean {
+  return status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "expired";
 }
 
 function summarizeCodexEvent(method: string, params: Record<string, unknown>): string {

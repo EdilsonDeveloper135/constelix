@@ -1,6 +1,10 @@
 import {
+  ActTaskSchema,
+  EvidencePathSchema,
   FileReadResponseSchema,
   FileWriteResponseSchema,
+  GraphSnapshotSchema,
+  PanelStateSchema,
   ServerEventSchema,
   TerminalOutputSnapshotSchema,
   type ActApproveRequest,
@@ -18,11 +22,14 @@ import { PROTOCOL_VERSION, type AgentEvent, type BootstrapPayload } from "../typ
 import { readCapabilityToken } from "./auth";
 
 type EventListener = (event: AgentEvent) => void;
+type SocketConnectionState = "connecting" | "connected" | "disconnected";
+type ConnectionListener = (state: SocketConnectionState) => void;
 
 class ConstelixApiClient {
   private readonly token = readCapabilityToken();
   private socket: WebSocket | null = null;
   private listeners = new Set<EventListener>();
+  private connectionListeners = new Set<ConnectionListener>();
   private reconnectTimer: number | null = null;
   private shouldReconnect = true;
 
@@ -33,7 +40,9 @@ class ConstelixApiClient {
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
-    headers.set("Content-Type", "application/json");
+    if (init.body !== undefined && init.body !== null) {
+      headers.set("Content-Type", "application/json");
+    }
     headers.set("X-Constelix-Protocol", String(PROTOCOL_VERSION));
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
 
@@ -46,12 +55,13 @@ class ConstelixApiClient {
     return (await response.json()) as T;
   }
 
-  bootstrap(): Promise<BootstrapPayload> {
-    return this.request<BootstrapPayload>("/bootstrap");
+  async bootstrap(): Promise<BootstrapPayload> {
+    const response = await this.request<unknown>("/bootstrap");
+    return parseBootstrapPayload(response);
   }
 
-  queryGraph(rootIds: string[], cursor?: string): Promise<GraphSnapshot> {
-    return this.request<GraphSnapshot>("/graph/query", {
+  async queryGraph(rootIds: string[], cursor?: string): Promise<GraphSnapshot> {
+    const response = await this.request<unknown>("/graph/query", {
       method: "POST",
       body: JSON.stringify({
         protocolVersion: PROTOCOL_VERSION,
@@ -64,6 +74,7 @@ class ConstelixApiClient {
         ...(cursor ? { cursor } : {})
       })
     });
+    return GraphSnapshotSchema.parse(response);
   }
 
   async readFile(relativePath: string) {
@@ -111,13 +122,17 @@ class ConstelixApiClient {
     return TerminalOutputSnapshotSchema.parse(response);
   }
 
-  ask(threadId: string, prompt: string): Promise<{ turnId: string; requestId: string; accepted: true }> {
+  ask(
+    threadId: string,
+    prompt: string,
+    selectedNodeIds: string[] = [],
+  ): Promise<{ turnId: string; requestId: string; accepted: true }> {
     const body: AskTurnRequest = {
       protocolVersion: PROTOCOL_VERSION,
       requestId: crypto.randomUUID(),
       threadId,
       prompt,
-      selectedNodeIds: []
+      selectedNodeIds
     };
     return this.request(`/ask/threads/${encodeURIComponent(threadId)}/turns`, {
       method: "POST",
@@ -125,16 +140,17 @@ class ConstelixApiClient {
     });
   }
 
-  createActTask(objective: string): Promise<ContractActTask> {
+  async createActTask(objective: string): Promise<ContractActTask> {
     const body: ActTaskRequest = {
       protocolVersion: PROTOCOL_VERSION,
       objective,
       capabilities: ["read", "write", "command"]
     };
-    return this.request("/act/tasks", {
+    const response = await this.request<unknown>("/act/tasks", {
       method: "POST",
       body: JSON.stringify(body)
     });
+    return ActTaskSchema.parse(response);
   }
 
   approveActTask(id: string): Promise<void> {
@@ -154,18 +170,25 @@ class ConstelixApiClient {
 
   connect(): () => void {
     this.shouldReconnect = true;
+    this.publishConnection("connecting");
     this.openSocket();
     return () => {
       this.shouldReconnect = false;
       if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
-      this.socket?.close();
+      const socket = this.socket;
       this.socket = null;
+      socket?.close();
     };
   }
 
   subscribe(listener: EventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  subscribeConnection(listener: ConnectionListener): () => void {
+    this.connectionListeners.add(listener);
+    return () => this.connectionListeners.delete(listener);
   }
 
   sendEvent(event: Record<string, unknown>): boolean {
@@ -178,16 +201,24 @@ class ConstelixApiClient {
     if (!this.token || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    this.socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/events`);
-    this.socket.addEventListener("open", () => {
-      this.socket?.send(JSON.stringify({ protocolVersion: PROTOCOL_VERSION, type: "auth", token: this.token }));
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/events`);
+    this.socket = socket;
+    socket.addEventListener("open", () => {
+      if (this.socket !== socket) return;
+      socket.send(JSON.stringify({ protocolVersion: PROTOCOL_VERSION, type: "auth", token: this.token }));
     });
-    this.socket.addEventListener("message", (message) => {
+    socket.addEventListener("message", (message) => {
+      if (this.socket !== socket) return;
       try {
         const raw = JSON.parse(String(message.data)) as unknown;
         const parsed = ServerEventSchema.safeParse(raw);
         if (parsed.success) {
           this.listeners.forEach((listener) => listener(parsed.data));
+          return;
+        }
+        const normalizedSnapshot = normalizeGraphSnapshotEvent(raw);
+        if (normalizedSnapshot) {
+          this.listeners.forEach((listener) => listener(normalizedSnapshot));
           return;
         }
         if (
@@ -196,20 +227,207 @@ class ConstelixApiClient {
           "protocolVersion" in raw &&
           raw.protocolVersion === PROTOCOL_VERSION &&
           "type" in raw &&
-          typeof raw.type === "string"
+          raw.type === "connection.ready"
         ) {
+          this.publishConnection("connected");
           this.listeners.forEach((listener) => listener(raw as AgentEvent));
         }
       } catch {
         // Malformed local-agent events are ignored; the next snapshot reconciles state.
       }
     });
-    this.socket.addEventListener("close", () => {
+    socket.addEventListener("close", () => {
+      if (this.socket !== socket) return;
       this.socket = null;
+      this.publishConnection("disconnected");
       if (!this.shouldReconnect) return;
-      this.reconnectTimer = window.setTimeout(() => this.openSocket(), 1500);
+      this.reconnectTimer = window.setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.shouldReconnect) return;
+        this.publishConnection("connecting");
+        this.openSocket();
+      }, 1500);
     });
+  }
+
+  private publishConnection(state: SocketConnectionState): void {
+    this.connectionListeners.forEach((listener) => listener(state));
   }
 }
 
 export const apiClient = new ConstelixApiClient();
+
+function normalizeGraphSnapshotEvent(raw: unknown): AgentEvent | null {
+  if (typeof raw !== "object" || raw === null || !("type" in raw) || raw.type !== "graph.snapshot") {
+    return null;
+  }
+  const candidate = "graph" in raw
+    ? raw.graph
+    : "payload" in raw &&
+        typeof raw.payload === "object" &&
+        raw.payload !== null &&
+        "graph" in raw.payload
+      ? raw.payload.graph
+      : undefined;
+  const graph = GraphSnapshotSchema.safeParse(candidate);
+  if (!graph.success) return null;
+  return { protocolVersion: PROTOCOL_VERSION, type: "graph.snapshot", graph: graph.data };
+}
+
+function parseBootstrapPayload(raw: unknown): BootstrapPayload {
+  const record = requireRecord(raw, "bootstrap");
+  if (record.protocolVersion !== PROTOCOL_VERSION) {
+    throw new Error("El agente respondió con una versión de protocolo incompatible.");
+  }
+  const workspaceRecord = requireRecord(record.workspace, "workspace");
+  const workspaceId = requireString(workspaceRecord.id, "workspace.id");
+  const workspaceName = requireString(workspaceRecord.name, "workspace.name");
+  const rootPath = requireString(workspaceRecord.rootPath, "workspace.rootPath");
+  const branch =
+    workspaceRecord.branch === undefined
+      ? undefined
+      : requireString(workspaceRecord.branch, "workspace.branch");
+  const graph = GraphSnapshotSchema.parse(record.graph);
+
+  const indexRecord = requireRecord(record.index, "index");
+  const phases = new Set([
+    "idle",
+    "scanning",
+    "parsing",
+    "resolving",
+    "persisting",
+    "ready",
+    "error",
+  ]);
+  const phase = requireString(indexRecord.phase, "index.phase");
+  if (!phases.has(phase)) throw new Error("El agente devolvió una fase de indexación inválida.");
+  const index = {
+    phase: phase as BootstrapPayload["index"]["phase"],
+    progress: requireProgress(indexRecord.progress, "index.progress"),
+    filesIndexed: requireCount(indexRecord.filesIndexed, "index.filesIndexed"),
+    symbolsIndexed: requireCount(indexRecord.symbolsIndexed, "index.symbolsIndexed"),
+    edgesIndexed: requireCount(indexRecord.edgesIndexed, "index.edgesIndexed"),
+    ...(indexRecord.message === undefined
+      ? {}
+      : { message: requireString(indexRecord.message, "index.message") }),
+  };
+
+  const layout =
+    record.layout === undefined
+      ? undefined
+      : requireArray(record.layout, "layout").map((panel) =>
+          PanelStateSchema.parse(panel),
+        );
+  const conversation =
+    record.conversation === undefined
+      ? undefined
+      : requireArray(record.conversation, "conversation").map((message, indexValue) => {
+          const messageRecord = requireRecord(
+            message,
+            `conversation[${indexValue}]`,
+          );
+          const role = requireString(
+            messageRecord.role,
+            `conversation[${indexValue}].role`,
+          );
+          if (role !== "user" && role !== "assistant") {
+            throw new Error("El agente devolvió un rol de conversación inválido.");
+          }
+          const validatedRole: "user" | "assistant" = role;
+          return {
+            role: validatedRole,
+            content: requireString(
+              messageRecord.content,
+              `conversation[${indexValue}].content`,
+            ),
+            ...(messageRecord.evidence === undefined
+              ? {}
+              : { evidence: EvidencePathSchema.parse(messageRecord.evidence) }),
+          };
+        });
+
+  const capabilities =
+    record.capabilities === undefined
+      ? undefined
+      : parseCapabilities(record.capabilities);
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    workspace: {
+      id: workspaceId,
+      name: workspaceName,
+      rootPath,
+      ...(branch ? { branch } : {}),
+    },
+    graph,
+    index,
+    ...(layout ? { layout } : {}),
+    ...(conversation ? { conversation } : {}),
+    ...(capabilities ? { capabilities } : {}),
+  };
+}
+
+function parseCapabilities(raw: unknown): NonNullable<BootstrapPayload["capabilities"]> {
+  const record = requireRecord(raw, "capabilities");
+  return {
+    ask: requireBoolean(record.ask, "capabilities.ask"),
+    act: requireBoolean(record.act, "capabilities.act"),
+    terminal: requireBoolean(record.terminal, "capabilities.terminal"),
+    ...(record.codexReason === undefined
+      ? {}
+      : { codexReason: requireString(record.codexReason, "capabilities.codexReason") }),
+  };
+}
+
+function requireRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return value;
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return value;
+}
+
+function requireNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return value;
+}
+
+function requireProgress(value: unknown, label: string): number {
+  const number = requireNumber(value, label);
+  if (number < 0 || number > 1) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return number;
+}
+
+function requireCount(value: unknown, label: string): number {
+  const number = requireNumber(value, label);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return number;
+}
+
+function requireBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return value;
+}

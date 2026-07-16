@@ -8,6 +8,11 @@ import type {
   GraphSnapshot,
   PanelState,
 } from "@constelix/contracts";
+import {
+  sanitizeGraphDelta,
+  sanitizeGraphSnapshot,
+  sanitizeUnknownStrings,
+} from "@constelix/contracts";
 
 export interface IndexedFileRecord {
   relativePath: string;
@@ -184,7 +189,9 @@ export class ConstelixDatabase {
   }
 
   replaceGraph(workspaceId: string, snapshot: GraphSnapshot, diagnostics: unknown[] = []): void {
-    const revision = snapshot.revision;
+    const safeSnapshot = sanitizeGraphSnapshot(snapshot);
+    const safeDiagnostics = sanitizeUnknownStrings(diagnostics);
+    const revision = safeSnapshot.revision;
     const insertNode = this.raw.prepare(
       "INSERT INTO graph_nodes(workspace_id,id,revision,data_json) VALUES (?,?,?,?)",
     );
@@ -200,7 +207,7 @@ export class ConstelixDatabase {
       this.raw.prepare("DELETE FROM graph_nodes WHERE workspace_id = ?").run(workspaceId);
       this.raw.prepare("DELETE FROM graph_edges WHERE workspace_id = ?").run(workspaceId);
       this.raw.prepare("DELETE FROM graph_search WHERE workspace_id = ?").run(workspaceId);
-      for (const node of snapshot.nodes) {
+      for (const node of safeSnapshot.nodes) {
         insertNode.run(workspaceId, node.id, revision, json(node));
         const record = node as GraphNode & { documentation?: string };
         insertSearch.run(
@@ -212,7 +219,7 @@ export class ConstelixDatabase {
           record.documentation ?? "",
         );
       }
-      for (const edge of snapshot.edges) {
+      for (const edge of safeSnapshot.edges) {
         insertEdge.run(workspaceId, edge.id, revision, json(edge));
       }
       this.raw
@@ -220,7 +227,73 @@ export class ConstelixDatabase {
           `INSERT OR REPLACE INTO index_revisions(workspace_id,revision,created_at,diagnostics_json)
            VALUES (?,?,?,?)`,
         )
-        .run(workspaceId, revision, new Date().toISOString(), json(diagnostics));
+        .run(workspaceId, revision, new Date().toISOString(), json(safeDiagnostics));
+    })();
+  }
+
+  /** Replaces one complete graph revision and its file manifest in one transaction. */
+  replaceIndexRevision(
+    workspaceId: string,
+    snapshot: GraphSnapshot,
+    files: readonly IndexedFileRecord[],
+    diagnostics: unknown[] = [],
+  ): void {
+    const safeSnapshot = sanitizeGraphSnapshot(snapshot);
+    const safeDiagnostics = sanitizeUnknownStrings(diagnostics);
+    const revision = safeSnapshot.revision;
+    const insertNode = this.raw.prepare(
+      "INSERT INTO graph_nodes(workspace_id,id,revision,data_json) VALUES (?,?,?,?)",
+    );
+    const insertEdge = this.raw.prepare(
+      "INSERT INTO graph_edges(workspace_id,id,revision,data_json) VALUES (?,?,?,?)",
+    );
+    const insertSearch = this.raw.prepare(
+      `INSERT INTO graph_search(workspace_id,node_id,name,qualified_name,relative_path,documentation)
+       VALUES (?,?,?,?,?,?)`,
+    );
+    const insertFile = this.raw.prepare(
+      `INSERT INTO files(workspace_id,relative_path,content_hash,size_bytes,mtime_ms,language,indexed_revision)
+       VALUES (?,?,?,?,?,?,?)`,
+    );
+
+    this.raw.transaction(() => {
+      this.raw.prepare("DELETE FROM graph_nodes WHERE workspace_id = ?").run(workspaceId);
+      this.raw.prepare("DELETE FROM graph_edges WHERE workspace_id = ?").run(workspaceId);
+      this.raw.prepare("DELETE FROM graph_search WHERE workspace_id = ?").run(workspaceId);
+      this.raw.prepare("DELETE FROM files WHERE workspace_id = ?").run(workspaceId);
+
+      for (const node of safeSnapshot.nodes) {
+        insertNode.run(workspaceId, node.id, revision, json(node));
+        const record = node as GraphNode & { documentation?: string };
+        insertSearch.run(
+          workspaceId,
+          node.id,
+          node.name,
+          node.qualifiedName ?? "",
+          node.relativePath ?? "",
+          record.documentation ?? "",
+        );
+      }
+      for (const edge of safeSnapshot.edges) {
+        insertEdge.run(workspaceId, edge.id, revision, json(edge));
+      }
+      for (const file of files) {
+        insertFile.run(
+          workspaceId,
+          file.relativePath,
+          file.contentHash,
+          file.sizeBytes,
+          file.mtimeMs,
+          file.language,
+          revision,
+        );
+      }
+      this.raw
+        .prepare(
+          `INSERT OR REPLACE INTO index_revisions(workspace_id,revision,created_at,diagnostics_json)
+           VALUES (?,?,?,?)`,
+        )
+        .run(workspaceId, revision, new Date().toISOString(), json(safeDiagnostics));
     })();
   }
 
@@ -256,18 +329,20 @@ export class ConstelixDatabase {
     fileChanges: IncrementalFileChanges = {},
     diagnostics: unknown[] = [],
   ): void {
-    if (delta.workspaceId !== workspaceId) {
+    const safeDelta = sanitizeGraphDelta(delta);
+    const safeDiagnostics = sanitizeUnknownStrings(diagnostics);
+    if (safeDelta.workspaceId !== workspaceId) {
       throw new Error("Graph delta belongs to another workspace.");
     }
-    if (delta.revision <= delta.previousRevision) {
+    if (safeDelta.revision <= safeDelta.previousRevision) {
       throw new Error("Graph delta revision must advance.");
     }
     const currentRevision = this.raw
       .prepare("SELECT MAX(revision) AS revision FROM index_revisions WHERE workspace_id = ?")
       .get(workspaceId) as { revision: number | null };
-    if (currentRevision.revision !== delta.previousRevision) {
+    if (currentRevision.revision !== safeDelta.previousRevision) {
       throw new Error(
-        `Graph revision mismatch: expected ${currentRevision.revision ?? 0}, received ${delta.previousRevision}.`,
+        `Graph revision mismatch: expected ${currentRevision.revision ?? 0}, received ${safeDelta.previousRevision}.`,
       );
     }
 
@@ -309,14 +384,14 @@ export class ConstelixDatabase {
     );
 
     this.raw.transaction(() => {
-      for (const edgeId of delta.edgeIdsRemoved) deleteEdge.run(workspaceId, edgeId);
-      for (const nodeId of delta.nodeIdsRemoved) {
+      for (const edgeId of safeDelta.edgeIdsRemoved) deleteEdge.run(workspaceId, edgeId);
+      for (const nodeId of safeDelta.nodeIdsRemoved) {
         deleteSearch.run(workspaceId, nodeId);
         deleteNode.run(workspaceId, nodeId);
       }
 
-      for (const node of [...delta.nodesAdded, ...delta.nodesUpdated]) {
-        upsertNode.run(workspaceId, node.id, delta.revision, json(node));
+      for (const node of [...safeDelta.nodesAdded, ...safeDelta.nodesUpdated]) {
+        upsertNode.run(workspaceId, node.id, safeDelta.revision, json(node));
         deleteSearch.run(workspaceId, node.id);
         const record = node as GraphNode & { documentation?: string };
         insertSearch.run(
@@ -328,8 +403,8 @@ export class ConstelixDatabase {
           record.documentation ?? "",
         );
       }
-      for (const edge of [...delta.edgesAdded, ...delta.edgesUpdated]) {
-        upsertEdge.run(workspaceId, edge.id, delta.revision, json(edge));
+      for (const edge of [...safeDelta.edgesAdded, ...safeDelta.edgesUpdated]) {
+        upsertEdge.run(workspaceId, edge.id, safeDelta.revision, json(edge));
       }
 
       for (const relativePath of fileChanges.removedPaths ?? []) {
@@ -343,7 +418,7 @@ export class ConstelixDatabase {
           file.sizeBytes,
           file.mtimeMs,
           file.language,
-          delta.revision,
+          safeDelta.revision,
         );
       }
 
@@ -352,7 +427,12 @@ export class ConstelixDatabase {
           `INSERT INTO index_revisions(workspace_id,revision,created_at,diagnostics_json)
            VALUES (?,?,?,?)`,
         )
-        .run(workspaceId, delta.revision, new Date().toISOString(), json(diagnostics));
+        .run(
+          workspaceId,
+          safeDelta.revision,
+          new Date().toISOString(),
+          json(safeDiagnostics),
+        );
     })();
   }
 
@@ -367,14 +447,39 @@ export class ConstelixDatabase {
     const edges = this.raw
       .prepare("SELECT data_json FROM graph_edges WHERE workspace_id = ?")
       .all(workspaceId) as Array<{ data_json: string }>;
-    return {
+    return sanitizeGraphSnapshot({
       protocolVersion: 1,
       workspaceId,
       revision: revisionRow.revision,
       nodes: nodes.map((row) => parseJson<GraphNode>(row.data_json)),
       edges: edges.map((row) => parseJson<GraphEdge>(row.data_json)),
       truncated: false,
-    };
+    });
+  }
+
+  loadFiles(workspaceId: string): IndexedFileRecord[] {
+    return this.raw
+      .prepare(
+        `SELECT relative_path,content_hash,size_bytes,mtime_ms,language
+         FROM files WHERE workspace_id = ? ORDER BY relative_path`,
+      )
+      .all(workspaceId)
+      .map((row) => {
+        const record = row as {
+          relative_path: string;
+          content_hash: string;
+          size_bytes: number;
+          mtime_ms: number;
+          language: string | null;
+        };
+        return {
+          relativePath: record.relative_path,
+          contentHash: record.content_hash,
+          sizeBytes: record.size_bytes,
+          mtimeMs: record.mtime_ms,
+          language: record.language ?? "unknown",
+        };
+      });
   }
 
   saveLayout(workspaceId: string, revision: number, panels: PanelState[]): void {
@@ -426,7 +531,12 @@ export class ConstelixDatabase {
 
   loadAiMessages(threadId: string): Array<{ role: "user" | "assistant"; content: string; evidence?: unknown }> {
     const rows = this.raw
-      .prepare("SELECT role,content,evidence_json FROM ai_messages WHERE thread_id = ? ORDER BY created_at,id")
+      .prepare(
+        `SELECT role,content,evidence_json
+         FROM ai_messages
+         WHERE thread_id = ?
+         ORDER BY created_at,rowid`,
+      )
       .all(threadId) as Array<{ role: "user" | "assistant"; content: string; evidence_json: string | null }>;
     return rows.map((row) => ({
       role: row.role,
