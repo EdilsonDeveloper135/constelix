@@ -655,7 +655,25 @@ textarea:focus-visible {
   background: rgba(31, 28, 20, 0.92);
   font-family: var(--mono);
   font-size: 8px;
-  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.graph-partial-status button {
+  border: 1px solid #81724a;
+  border-radius: 4px;
+  padding: 3px 6px;
+  color: #ddd0a7;
+  background: #332e20;
+  font: inherit;
+  cursor: pointer;
+}
+
+.graph-partial-status button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .constelix-minimap {
@@ -1185,6 +1203,49 @@ textarea:focus-visible {
   color: #8d989b;
   background: transparent;
   cursor: pointer;
+}
+
+.conversation-history {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.conversation-message {
+  max-width: 94%;
+  padding: 6px 8px;
+  border: 1px solid #344044;
+  border-radius: 6px;
+  background: #151d20;
+}
+
+.conversation-message--user {
+  align-self: flex-end;
+  border-color: #4d425b;
+  background: #211c28;
+}
+
+.conversation-message > span {
+  display: block;
+  margin-bottom: 3px;
+  color: #8d989b;
+  font-size: 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.conversation-message > p {
+  margin: 0;
+  color: #c1c9cb;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.answer-copy--streaming {
+  padding-left: 8px;
+  border-left: 2px solid var(--violet);
 }
 
 .answer-copy,

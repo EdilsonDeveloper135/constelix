@@ -57,8 +57,18 @@ export const TerminalPanel = memo(function TerminalPanel({
     setTranscriptTruncated(false);
     let disposed = false;
     let resizeObserver: ResizeObserver | null = null;
+    // During bootstrap, the runtime selector can update before React Flow
+    // delivers the matching node props. Use the atomic store snapshot so a
+    // transient prop mismatch never deletes a restored PTY.
+    const currentNode = useWorkspaceStore
+      .getState()
+      .nodes.find((node) => node.id === id);
+    const mountCwd =
+      currentNode?.type === "terminalPanel"
+        ? currentNode.data.cwd
+        : data.cwd;
     let terminalSessionId =
-      runtime?.cwd === data.cwd ? runtime.terminalId : undefined;
+      runtime?.cwd === mountCwd ? runtime.terminalId : undefined;
     let terminalExited = runtime?.status === "exited";
     let removeOutputListener: (() => void) | null = null;
     let hydratingOutput = false;
@@ -66,7 +76,7 @@ export const TerminalPanel = memo(function TerminalPanel({
     let latestOutputSequence = 0;
     let warnedDisconnected = false;
 
-    if (runtime && runtime.cwd !== data.cwd) {
+    if (runtime && runtime.cwd !== mountCwd) {
       void apiClient.deleteTerminal(runtime.terminalId).catch(() => undefined);
       clearTerminalRuntime(id);
       return;
@@ -129,16 +139,20 @@ export const TerminalPanel = memo(function TerminalPanel({
 
       if (!demoMode && !terminalSessionId) {
         try {
-          const session = await apiClient.createTerminal(data.cwd);
+          const session = await apiClient.createTerminal(mountCwd, id);
+          if (disposed) {
+            await apiClient.deleteTerminal(session.id).catch(() => undefined);
+            return;
+          }
           terminalSessionId = session.id;
           registerTerminalRuntime(id, {
             terminalId: session.id,
-            cwd: data.cwd,
+            cwd: mountCwd,
             status: "running",
           });
           terminalExited = false;
-          if (disposed) return;
         } catch {
+          if (disposed) return;
           terminal.writeln(
             "\u001b[31mNo se pudo iniciar la PTY local. Ejecutando consola degradada.\u001b[0m",
           );
@@ -147,7 +161,7 @@ export const TerminalPanel = memo(function TerminalPanel({
 
       if (!demoMode && terminalSessionId) {
         terminal.writeln(
-          `\u001b[90mPTY · ${data.cwd} · sesión ${terminalSessionId.slice(0, 8)}\u001b[0m`,
+          `\u001b[90mPTY · ${mountCwd} · sesión ${terminalSessionId.slice(0, 8)}\u001b[0m`,
         );
         hydratingOutput = true;
         try {
@@ -184,7 +198,7 @@ export const TerminalPanel = memo(function TerminalPanel({
 
       if (demoMode || !terminalSessionId) {
         demoTerminalLines.forEach((line) => terminal.writeln(line));
-        terminal.write(terminalPrompt(data.cwd));
+        terminal.write(terminalPrompt(mountCwd));
       }
 
       let inputBuffer = "";
@@ -220,7 +234,7 @@ export const TerminalPanel = memo(function TerminalPanel({
             );
           }
           inputBuffer = "";
-          terminal.write(terminalPrompt(data.cwd).slice(2));
+          terminal.write(terminalPrompt(mountCwd).slice(2));
           return;
         }
         if (chunk === "\u007f") {

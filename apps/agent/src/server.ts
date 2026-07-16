@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -7,17 +7,25 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import { z, ZodError } from "zod";
+import { ZodError } from "zod";
 import {
+  ActApproveRequestSchema,
+  ActTaskRequestSchema,
+  AskTurnRequestSchema,
   FileReadRequestSchema,
   FileWriteRequestSchema,
   GraphQuerySchema,
+  LayoutWriteRequestSchema,
   PROTOCOL_VERSION,
+  ProtocolOnlyRequestSchema,
   TerminalCreateRequestSchema,
-  type PanelState,
 } from "@constelix/contracts";
 import { AskService, DEFAULT_ASK_MODEL, OpenAIUnavailableError } from "./ask.js";
-import { CodexManager, CodexUnavailableError } from "./codex.js";
+import {
+  CodexManager,
+  CodexUnavailableError,
+  type CodexManagerOptions,
+} from "./codex.js";
 import { ConstelixDatabase } from "./database.js";
 import { EventBus } from "./events.js";
 import {
@@ -30,33 +38,6 @@ import { WorkspaceIndexer } from "./indexer.js";
 import { detectSupportedLanguage } from "./scanner.js";
 import { PathSecurityError, redactSecrets } from "./security.js";
 import { TerminalManager } from "./terminals.js";
-
-const LayoutWriteSchema = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
-  revision: z.number().int().nonnegative().optional(),
-  panels: z.array(z.record(z.string(), z.unknown())).max(100),
-});
-
-const AskTurnCompatSchema = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
-  requestId: z.string().min(1).optional(),
-  threadId: z.string().min(1).optional(),
-  prompt: z.string().trim().min(1).max(20_000),
-  selectedNodeIds: z.array(z.string()).max(50).optional(),
-});
-
-const ActTaskCompatSchema = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
-  objective: z.string().trim().min(1).max(20_000),
-  capabilities: z.array(z.string()).min(1).optional(),
-  outsideWorkspace: z.literal("deny").optional(),
-});
-
-const ActApproveCompatSchema = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
-  taskId: z.string().min(1).optional(),
-  approved: z.literal(true).optional(),
-});
 
 export interface AgentServerOptions {
   workspaceRoot: string;
@@ -71,6 +52,7 @@ export interface AgentServerOptions {
   databasePath?: string;
   webDistPath?: string;
   devOrigin?: string;
+  codexOptions?: CodexManagerOptions;
 }
 
 export interface RunningAgentServer {
@@ -97,24 +79,68 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     );
   await mkdir(storageDirectory, { recursive: true, mode: 0o700 });
   const lock = await WorkspaceLock.acquire(resolve(storageDirectory, "agent.lock"));
-  const database = new ConstelixDatabase(
-    options.databasePath ?? resolve(storageDirectory, "constelix.sqlite"),
-  );
-  database.upsertWorkspace(workspaceId, options.workspaceRoot);
+  let database: ConstelixDatabase | undefined;
+  let events: EventBus | undefined;
+  let indexer: WorkspaceIndexer | undefined;
+  let terminals: TerminalManager | undefined;
+  let ask: AskService | undefined;
+  let codex: CodexManager | undefined;
+  let app: FastifyInstance | undefined;
+  try {
+    database = new ConstelixDatabase(
+      options.databasePath ?? resolve(storageDirectory, "constelix.sqlite"),
+    );
+    database.upsertWorkspace(workspaceId, options.workspaceRoot);
+    events = new EventBus();
+    indexer = new WorkspaceIndexer(workspaceId, options.workspaceRoot, database, events);
+    terminals = new TerminalManager(options.workspaceRoot, events);
+    ask = new AskService(workspaceId, options.workspaceRoot, indexer.graph, database, events);
+    codex = new CodexManager(
+      workspaceId,
+      options.workspaceRoot,
+      events,
+      database,
+      options.codexOptions,
+    );
+    void codex.availability();
+    app = Fastify({
+      logger: false,
+      bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
+    });
+  } catch (error) {
+    await cleanupAgentResources({
+      app,
+      ask,
+      codex,
+      terminals,
+      indexer,
+      events,
+      database,
+      lock,
+    }).catch(() => undefined);
+    throw error;
+  }
 
-  const events = new EventBus();
-  const indexer = new WorkspaceIndexer(workspaceId, options.workspaceRoot, database, events);
-  const terminals = new TerminalManager(options.workspaceRoot, events);
-  const ask = new AskService(workspaceId, options.workspaceRoot, indexer.graph, database, events);
-  const codex = new CodexManager(workspaceId, options.workspaceRoot, events, database);
-  const app = Fastify({
-    logger: false,
-    bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
-  });
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = cleanupAgentResources({
+      app,
+      ask,
+      codex,
+      terminals,
+      indexer,
+      events,
+      database,
+      lock,
+    });
+    return cleanupPromise;
+  };
 
-  await app.register(fastifyWebsocket, {
-    options: { maxPayload: 512 * 1024, perMessageDeflate: false },
-  });
+  try {
+    await app.register(fastifyWebsocket, {
+      options: { maxPayload: 512 * 1024, perMessageDeflate: false },
+    });
 
   let boundOrigin: string | undefined;
   const allowedOrigins = new Set<string>();
@@ -174,7 +200,8 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   app.get("/api/v1/bootstrap", async () => {
     const graph = indexer.graph.snapshot(500);
     const savedLayout = database.loadLayout(workspaceId) ?? { revision: 0, panels: [] };
-    const codexAvailability = await codex.availability();
+    const codexAvailability = codex.peekAvailability();
+    const activeActTask = codex.activeTask;
     const total = indexer.status.total;
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -187,12 +214,16 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       layout: savedLayout.panels,
       layoutState: savedLayout,
       conversation: database.loadAiMessages(`${workspaceId}:main`),
+      activeAskTurnIds: ask.activeTurnIds,
+      activeActTask: activeActTask
+        ? { protocolVersion: PROTOCOL_VERSION, ...activeActTask }
+        : null,
       index: {
         ...indexer.status,
         progress: total === 0 ? 0 : indexer.status.completed / total,
         filesIndexed: indexer.indexedFileCount,
-        symbolsIndexed: graph.nodes.length,
-        edgesIndexed: graph.edges.length,
+        symbolsIndexed: indexer.graph.nodeCount,
+        edgesIndexed: indexer.graph.edgeCount,
       },
       terminals: terminals.list(),
       capabilities: {
@@ -200,6 +231,8 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
         act: codexAvailability.available,
         terminal: true,
         codexReason: codexAvailability.reason,
+        codexChecking: codexAvailability.checking,
+        codexVersion: codexAvailability.version,
         model: process.env.CONSTELIX_OPENAI_MODEL ?? DEFAULT_ASK_MODEL,
         languages: ["javascript", "typescript", "python"],
       },
@@ -247,10 +280,10 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   });
 
   app.put("/api/v1/layout", async (request) => {
-    const input = LayoutWriteSchema.parse(request.body);
+    const input = LayoutWriteRequestSchema.parse(request.body);
     const revision = input.revision ?? indexer.graph.revision;
-    database.saveLayout(workspaceId, revision, input.panels as PanelState[]);
-    return { protocolVersion: PROTOCOL_VERSION, saved: true, revision };
+    const saved = database.saveLayout(workspaceId, revision, input.panels);
+    return { protocolVersion: PROTOCOL_VERSION, saved, revision };
   });
 
   app.post("/api/v1/terminals", async (request, reply) => {
@@ -260,6 +293,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       cols: input.columns,
       rows: input.rows,
       ...(input.shell === undefined ? {} : { shell: input.shell }),
+      ...(input.panelId === undefined ? {} : { panelId: input.panelId }),
     });
     database.audit(workspaceId, "terminal", "create", "success", { cwd: input.cwd ?? "." });
     return reply.code(201).send({ protocolVersion: PROTOCOL_VERSION, ...terminal });
@@ -289,8 +323,8 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   app.post<{ Params: { id: string } }>(
     "/api/v1/ask/threads/:id/turns",
     async (request, reply) => {
-      const input = AskTurnCompatSchema.parse(request.body);
-      if (input.threadId !== undefined && input.threadId !== request.params.id) {
+      const input = AskTurnRequestSchema.parse(request.body);
+      if (input.threadId !== request.params.id) {
         return reply.code(400).send(errorBody("THREAD_MISMATCH", "Thread id does not match URL."));
       }
       return reply
@@ -299,24 +333,32 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
           ask.startTurn(
             request.params.id,
             input.prompt,
-            input.requestId ?? randomUUID(),
-            input.selectedNodeIds ?? [],
+            input.requestId,
+            input.selectedNodeIds,
           ),
         );
     },
   );
 
   app.post("/api/v1/act/tasks", async (request, reply) => {
-    const input = ActTaskCompatSchema.parse(request.body);
-    const task = codex.createTask(input.objective);
+    const input = ActTaskRequestSchema.parse(request.body);
+    if (!isSupportedActScope(input.capabilities)) {
+      return reply.code(400).send(
+        errorBody(
+          "UNSUPPORTED_ACT_SCOPE",
+          "The MVP supports only the explicit read, write, and command capability set.",
+        ),
+      );
+    }
+    const task = codex.createTask(input.objective, input.capabilities);
     return reply.code(201).send({ protocolVersion: PROTOCOL_VERSION, ...task });
   });
 
   app.post<{ Params: { id: string } }>(
     "/api/v1/act/tasks/:id/approve",
     async (request, reply) => {
-      const input = ActApproveCompatSchema.parse(request.body);
-      if (input.taskId !== undefined && input.taskId !== request.params.id) {
+      const input = ActApproveRequestSchema.parse(request.body);
+      if (input.taskId !== request.params.id) {
         return reply.code(400).send(errorBody("TASK_MISMATCH", "Task id does not match URL."));
       }
       return { protocolVersion: PROTOCOL_VERSION, ...(await codex.approve(request.params.id)) };
@@ -325,10 +367,13 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
 
   app.post<{ Params: { id: string } }>(
     "/api/v1/act/tasks/:id/cancel",
-    async (request) => ({
-      protocolVersion: PROTOCOL_VERSION,
-      ...(await codex.cancel(request.params.id)),
-    }),
+    async (request) => {
+      ProtocolOnlyRequestSchema.parse(request.body);
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        ...(await codex.cancel(request.params.id)),
+      };
+    },
   );
 
   app.setErrorHandler((error, request, reply) => {
@@ -367,7 +412,6 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     }));
   }
 
-  try {
     await app.listen({ host: "127.0.0.1", port: options.port ?? (options.dev ? 4321 : 0) });
     const address = app.server.address();
     if (!address || typeof address === "string") throw new Error("Unable to determine agent port.");
@@ -376,7 +420,6 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     allowedOrigins.add(boundOrigin);
     await indexer.start();
 
-    let closed = false;
     return {
       app,
       workspaceId,
@@ -384,28 +427,44 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       port,
       origin: boundOrigin,
       async close() {
-        if (closed) return;
-        closed = true;
-        ask.close();
-        codex.close();
-        terminals.close();
-        await indexer.close();
-        events.close();
-        await app.close();
-        database.close();
-        await lock.release();
+        await cleanup();
       },
     };
   } catch (error) {
-    ask.close();
-    codex.close();
-    terminals.close();
-    await indexer.close();
-    events.close();
-    database.close();
-    await lock.release();
+    await cleanup().catch(() => undefined);
     throw error;
   }
+}
+
+async function cleanupAgentResources(resources: {
+  app: FastifyInstance | undefined;
+  ask: AskService | undefined;
+  codex: CodexManager | undefined;
+  terminals: TerminalManager | undefined;
+  indexer: WorkspaceIndexer | undefined;
+  events: EventBus | undefined;
+  database: ConstelixDatabase | undefined;
+  lock: WorkspaceLock;
+}): Promise<void> {
+  let firstError: unknown;
+  const attempt = async (action: () => void | Promise<void>): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      firstError ??= error;
+    }
+  };
+
+  await attempt(() => resources.ask?.close());
+  await attempt(() => resources.codex?.close());
+  await attempt(() => resources.terminals?.close());
+  await attempt(async () => resources.indexer?.close());
+  await attempt(() => resources.events?.close());
+  await attempt(async () => resources.app?.close());
+  await attempt(() => resources.database?.close());
+  await attempt(() => resources.lock.release());
+
+  if (firstError !== undefined) throw firstError;
 }
 
 function hasCapability(request: FastifyRequest, token: string): boolean {
@@ -422,6 +481,16 @@ function addCors(reply: FastifyReply, origin: string): void {
 
 function errorBody(code: string, message: string, recoverable = true): Record<string, unknown> {
   return { protocolVersion: PROTOCOL_VERSION, error: { code, message, recoverable } };
+}
+
+function isSupportedActScope(capabilities: readonly string[]): boolean {
+  const unique = new Set(capabilities);
+  return (
+    unique.size === 3 &&
+    unique.has("read") &&
+    unique.has("write") &&
+    unique.has("command")
+  );
 }
 
 function mapError(error: Error): {

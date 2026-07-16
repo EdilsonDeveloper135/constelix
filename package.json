@@ -1,6 +1,6 @@
 {
   "name": "constelix",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "A local-first visual software engineering workspace.",
   "type": "module",
@@ -9,7 +9,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "pnpm --parallel --filter @constelix/agent --filter @constelix/web dev",
+    "dev": "node --import tsx scripts/run-dev.ts",
     "dev:agent": "pnpm --filter @constelix/agent dev",
     "dev:web": "pnpm --filter @constelix/web dev",
     "build": "pnpm -r build && pnpm package:cli",
@@ -19,8 +19,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "benchmark": "node --import tsx scripts/run-benchmark.ts",
+    "benchmark": "node --import tsx scripts/run-benchmark.ts && node --import tsx scripts/run-runtime-benchmark.ts",
     "benchmark:fixture": "node --import tsx scripts/generate-benchmark.ts",
+    "smoke:codex": "node --import tsx scripts/smoke-codex.ts",
+    "smoke:package": "node --import tsx scripts/smoke-packaged-cli.ts",
     "check": "pnpm version:check && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {

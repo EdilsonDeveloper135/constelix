@@ -62,13 +62,24 @@ export const SemanticNode = memo(function SemanticNode({
     Boolean(data.relativePath) &&
     data.kind !== "workspace" &&
     data.kind !== "directory";
+  const expanded = hierarchy && Boolean(data.expanded) && !data.collapsed;
+  const evidenceDescription =
+    data.evidenceState === "current"
+      ? "Paso actual del recorrido de evidencia"
+      : data.evidenceState === "visited"
+        ? "Nodo visitado por el recorrido de evidencia"
+        : undefined;
 
   return (
     <article
       className={`semantic-node semantic-node--${data.kind}${selected ? " semantic-node--selected" : ""}${compactMode ? " semantic-node--compact" : ""}${evidenceClass}`}
+      role="group"
       aria-label={`${data.kind}: ${data.label}`}
+      aria-description={evidenceDescription}
+      aria-expanded={hierarchy ? expanded : undefined}
+      aria-current={data.evidenceState === "current" ? "step" : undefined}
       title={data.relativePath ?? data.label}
-      data-expanded={data.expanded ? "true" : "false"}
+      data-expanded={expanded ? "true" : "false"}
       onDoubleClick={(event) => {
         event.stopPropagation();
         void activateSemanticNode(id);
@@ -90,7 +101,14 @@ export const SemanticNode = memo(function SemanticNode({
           {hierarchy ? (
             <button
               type="button"
-              aria-label={data.collapsed ? `Expandir ${data.label}` : `Explorar o contraer ${data.label}`}
+              aria-expanded={expanded}
+              aria-label={
+                data.collapsed
+                  ? `Expandir ${data.label}`
+                  : data.expanded
+                    ? `Contraer ${data.label}`
+                    : `Explorar ${data.label}`
+              }
               onClick={(event) => {
                 event.stopPropagation();
                 void activateSemanticNode(id);

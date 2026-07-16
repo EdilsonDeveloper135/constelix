@@ -1,5 +1,24 @@
 # Changelog
 
+## [v0.0.2] - 2026-07-16
+
+### Added
+- Escaneo progresivo acotado, truncamiento durable del grafo y paginación recuperable para proyectos de hasta 10.000 archivos elegibles.
+- Orquestador de desarrollo, smoke del CLI empaquetado, benchmark de runtime y smoke real opt-in para Codex CLI 0.144.5.
+- Pruebas de reconexión, capacidades, evidencia bidireccional, recuperación de tareas Act y persistencia de terminales.
+
+### Fixed
+- Carreras de bootstrap que podían sobrescribir desconexiones, capacidades o páginas del grafo más recientes.
+- Restauración de sesiones PTY, conflictos de guardado de Monaco y persistencia monotónica del layout.
+- Timeouts ambiguos de Codex que podían dejar un turno ejecutándose mientras se aprobaba una segunda tarea.
+- Límites agregados de memoria, rescaneo de índices truncados y propagación transaccional del estado de truncamiento.
+- Correlación y recuperación de Ask/Act, rutas de evidencia verificadas y validación estricta del protocolo local.
+
+### Known issues
+- La prueba real de «Preguntar» sigue bloqueada por cuota insuficiente del proyecto de OpenAI configurado.
+- Vite advierte sobre chunks grandes generados por Monaco y ELK; no se observaron fallos funcionales.
+- Permanece una carrera TOCTOU residual frente a otro proceso hostil ejecutado por el mismo usuario de macOS.
+
 ## [v0.0.1] - 2026-07-16
 
 ### Added

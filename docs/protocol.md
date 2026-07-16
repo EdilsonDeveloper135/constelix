@@ -8,17 +8,31 @@ Every body and event includes `protocolVersion: 1` and is validated with the sch
 
 The CLI opens `/#token=<capability>`. The dashboard stores the token in memory, removes the fragment with `history.replaceState`, and sends it as a bearer credential. Static assets are public on loopback; `/api/v1/*` is protected.
 
+The WebSocket must receive `{ protocolVersion: 1, type: "authenticate", token }` as its first message within two seconds. The server then sends canonical `authenticated` and `connection.ready` envelopes. Legacy flattened messages are rejected.
+
+## Bootstrap reconciliation
+
+`GET /api/v1/bootstrap` is the authoritative reconnect snapshot. It returns the
+bounded graph, saved layout, conversation, active Ask turn IDs, the active Act
+task when one exists, recoverable terminal sessions, index status, and current
+capabilities. Live events that arrive after a bootstrap request take precedence
+over that response.
+
 ## Revisions
 
-Each committed index update increments the workspace revision. `GraphDelta.fromRevision` must match the client's revision; otherwise the client discards the delta and requests a fresh snapshot.
+Each committed index update increments the workspace revision. `GraphDelta.previousRevision` must match the client's revision; otherwise the client discards the delta and requests a fresh bootstrap. Snapshots and queries may be paginated; `truncated: true` can mean either more pages exist or the source index reached a configured safety limit.
 
 ## Streaming channels
 
-- `index.*`: progress and completion.
+- `index.progress`: scanning, parsing, resolving, persistence, counts, and completion.
+- `graph.snapshot`: bounded provisional or committed graph views.
 - `graph.delta`: revisioned semantic changes.
-- `terminal.*`: PTY output, exit, and errors.
-- `ask.*`: status, tool evidence, text deltas, completion, and errors.
-- `act.*`: task lifecycle, approval, Codex items, completion, and errors.
+- `terminal.output` and `terminal.exit`: PTY lifecycle.
+- `ask.event`: status, tool evidence, text deltas, canonical completion, and errors.
+- `capabilities.updated`: asynchronous Codex compatibility results.
+- `act.event`: approved task lifecycle and Codex activity.
+
+Every server event uses `{ protocolVersion, eventId, timestamp, type, payload }`. REST bodies, WebSocket messages, and responses are validated at their boundary with shared Zod contracts.
 
 ## Terminal output recovery
 

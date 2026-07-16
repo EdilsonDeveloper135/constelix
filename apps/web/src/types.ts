@@ -1,9 +1,12 @@
 import type { Edge, Node } from "@xyflow/react";
 import type {
+  ActTask as ContractActTask,
   EvidencePath as ContractEvidencePath,
   GraphSnapshot as ContractGraphSnapshot,
   PanelState,
-  ServerEvent
+  ServerEvent,
+  SourceRange,
+  TerminalSession,
 } from "@constelix/contracts";
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -29,13 +32,14 @@ export type GraphRelation =
   | "implements"
   | "calls";
 
-export type Confidence = "extracted" | "resolved" | "ambiguous";
+export type Confidence = "extracted" | "inferred" | "ambiguous";
 
 export interface SemanticNodeData extends Record<string, unknown> {
   kind: SemanticNodeKind;
   label: string;
   detail?: string;
   relativePath?: string;
+  range?: SourceRange;
   language?: string;
   count?: number;
   childCount?: number;
@@ -102,6 +106,11 @@ export type WorkspaceEdge = Edge<WorkspaceEdgeData, "graphEdge">;
 
 export type EvidencePath = ContractEvidencePath;
 export type GraphSnapshot = ContractGraphSnapshot;
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+  evidence?: EvidencePath;
+}
 
 export interface IndexStatus {
   phase: "idle" | "scanning" | "parsing" | "resolving" | "persisting" | "ready" | "error";
@@ -123,7 +132,10 @@ export interface BootstrapPayload {
   graph: GraphSnapshot;
   index: IndexStatus;
   layout?: PanelState[];
-  conversation?: Array<{ role: "user" | "assistant"; content: string; evidence?: EvidencePath }>;
+  conversation?: ConversationMessage[];
+  activeAskTurnIds: string[];
+  activeActTask: ContractActTask | null;
+  terminals: TerminalSession[];
   capabilities?: {
     ask: boolean;
     act: boolean;
@@ -142,7 +154,14 @@ export interface TerminalRuntime {
 export interface ActTask {
   id: string;
   objective: string;
-  status: "draft" | "awaitingApproval" | "running" | "completed" | "cancelled" | "failed";
+  status:
+    | "draft"
+    | "awaitingApproval"
+    | "running"
+    | "cancelling"
+    | "completed"
+    | "cancelled"
+    | "failed";
   expiresAt: string;
   output: string[];
 }
@@ -150,14 +169,4 @@ export interface ActTask {
 export type ConnectionState = "connecting" | "connected" | "degraded";
 export type RailTool = "map" | "files" | "diagrams" | "editor" | "terminal" | "preview" | "ai";
 
-type LegacyAgentEvent =
-  | { protocolVersion: 1; type: "connection.ready" }
-  | { protocolVersion: 1; type: "index.progress"; index: IndexStatus }
-  | { protocolVersion: 1; type: "graph.snapshot"; graph: GraphSnapshot }
-  | { protocolVersion: 1; type: "ask.delta"; threadId: string; delta: string }
-  | { protocolVersion: 1; type: "ask.completed"; threadId: string; answer?: string; evidencePath?: EvidencePath }
-  | { protocolVersion: 1; type: "ask.error"; threadId: string; message: string }
-  | { protocolVersion: 1; type: "terminal.output"; terminalId: string; data: string; sequence?: number }
-  | { protocolVersion: 1; type: "act.event"; taskId: string; message: string; status?: ActTask["status"] };
-
-export type AgentEvent = ServerEvent | LegacyAgentEvent;
+export type AgentEvent = ServerEvent;

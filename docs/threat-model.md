@@ -23,3 +23,5 @@
 ## Accepted residual risk
 
 Act mode has network access by product decision. A malicious trusted repository may attempt to influence an agent into disclosing readable host data or performing an external side effect. The MVP therefore marks Act as suitable only for repositories the user trusts, sanitizes inherited environment variables, records a local audit trail, and requires a fresh approval for every turn.
+
+Filesystem containment is designed for accidental traversal and repository-controlled symlinks, not for a second hostile process running as the same macOS user. Constelix revalidates canonical parents immediately before atomic writes, but Node.js does not expose a portable descriptor-relative rename API that completely removes the final path-check/write race. Do not open a workspace concurrently controlled by an untrusted local process.

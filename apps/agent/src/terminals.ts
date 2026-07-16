@@ -4,12 +4,15 @@ import { access, chmod } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import * as pty from "node-pty";
+import type { TerminalSession as TerminalSessionContract } from "@constelix/contracts";
 import type { EventBus } from "./events.js";
 import { resolveExistingWorkspacePath } from "./security.js";
 
-interface TerminalSession {
+interface TerminalSessionState {
   id: string;
+  panelId?: string;
   cwd: string;
+  shell: string;
   process: pty.IPty;
   createdAt: string;
   outputChunks: TerminalOutputChunk[];
@@ -26,7 +29,7 @@ interface TerminalOutputChunk {
 const MAX_OUTPUT_HISTORY_BYTES = 256 * 1024;
 
 export class TerminalManager {
-  readonly #sessions = new Map<string, TerminalSession>();
+  readonly #sessions = new Map<string, TerminalSessionState>();
   readonly #unsubscribe: () => void;
 
   constructor(
@@ -34,17 +37,10 @@ export class TerminalManager {
     private readonly events: EventBus,
   ) {
     this.#unsubscribe = events.onClientMessage((message) => {
-      const terminalId = typeof message.terminalId === "string" ? message.terminalId : undefined;
-      if (!terminalId) return;
-      if (message.type === "terminal.input" && typeof message.data === "string") {
-        this.write(terminalId, message.data);
-      }
-      if (
-        message.type === "terminal.resize" &&
-        typeof message.cols === "number" &&
-        typeof message.rows === "number"
-      ) {
-        this.resize(terminalId, message.cols, message.rows);
+      if (message.type === "terminal.input") {
+        this.write(message.terminalId, message.data);
+      } else if (message.type === "terminal.resize") {
+        this.resize(message.terminalId, message.cols, message.rows);
       }
     });
   }
@@ -54,7 +50,15 @@ export class TerminalManager {
     cols?: number;
     rows?: number;
     shell?: string;
-  }): Promise<{ id: string; cwd: string; shell: string; createdAt: string }> {
+    panelId?: string;
+  }): Promise<{
+    id: string;
+    panelId?: string;
+    cwd: string;
+    shell: string;
+    createdAt: string;
+    status: "running";
+  }> {
     await ensureNodePtyHelper();
     const cwd = options.cwd
       ? await resolveExistingWorkspacePath(this.workspaceRoot, options.cwd)
@@ -79,9 +83,11 @@ export class TerminalManager {
       encoding: "utf8",
     });
 
-    const session: TerminalSession = {
+    const session: TerminalSessionState = {
       id,
+      ...(options.panelId === undefined ? {} : { panelId: options.panelId }),
       cwd,
+      shell,
       process: child,
       createdAt,
       outputChunks: [],
@@ -101,7 +107,14 @@ export class TerminalManager {
       this.events.publish("terminal.exit", { terminalId: id, exitCode, signal });
     });
     this.events.publish("terminal.created", { terminalId: id, cwd, shell, createdAt });
-    return { id, cwd, shell, createdAt };
+    return {
+      id,
+      ...(options.panelId === undefined ? {} : { panelId: options.panelId }),
+      cwd,
+      shell,
+      createdAt,
+      status: "running",
+    };
   }
 
   write(id: string, data: string): void {
@@ -124,8 +137,18 @@ export class TerminalManager {
     return true;
   }
 
-  list(): Array<{ id: string; cwd: string; createdAt: string }> {
-    return [...this.#sessions.values()].map(({ id, cwd, createdAt }) => ({ id, cwd, createdAt }));
+  list(): TerminalSessionContract[] {
+    return [...this.#sessions.values()].map(
+      ({ id, panelId, cwd, shell, createdAt, exited }) => ({
+        protocolVersion: 1,
+        id,
+        ...(panelId === undefined ? {} : { panelId }),
+        cwd,
+        shell,
+        createdAt,
+        status: exited ? "exited" : "running",
+      }),
+    );
   }
 
   readOutput(
@@ -156,7 +179,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, Math.floor(value)));
 }
 
-function appendOutput(session: TerminalSession, chunk: TerminalOutputChunk): void {
+function appendOutput(session: TerminalSessionState, chunk: TerminalOutputChunk): void {
   session.outputChunks.push(chunk);
   session.outputBytes += Buffer.byteLength(chunk.data);
   while (session.outputBytes > MAX_OUTPUT_HISTORY_BYTES && session.outputChunks.length > 1) {

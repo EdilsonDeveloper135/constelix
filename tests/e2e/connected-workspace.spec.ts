@@ -1,13 +1,22 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
 import {
+  createWorkspaceId,
   startAgentServer,
   type RunningAgentServer,
 } from "../../apps/agent/src/server";
+import { ConstelixDatabase } from "../../apps/agent/src/database";
 
 const capabilityToken = "constelix-e2e-capability";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -24,6 +33,21 @@ test.describe("workspace connected to the local agent", () => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "constelix-e2e-"));
     workspaceRoot = join(temporaryDirectory, "sample-workspace");
     await cp(fixtureRoot, workspaceRoot, { recursive: true });
+    const databasePath = join(temporaryDirectory, "constelix.sqlite");
+    const workspaceId = createWorkspaceId(workspaceRoot);
+    const seed = new ConstelixDatabase(databasePath);
+    seed.upsertWorkspace(workspaceId, workspaceRoot);
+    seed.appendAiMessage(workspaceId, `${workspaceId}:main`, {
+      id: "e2e-question",
+      role: "user",
+      content: "¿Qué conecta el servicio de consultas?",
+    });
+    seed.appendAiMessage(workspaceId, `${workspaceId}:main`, {
+      id: "e2e-answer",
+      role: "assistant",
+      content: "El servicio conecta contratos, ProjectGraph y la función de respuesta.",
+    });
+    seed.close();
     server = await startAgentServer({
       workspaceRoot,
       dev: true,
@@ -31,7 +55,7 @@ test.describe("workspace connected to the local agent", () => {
       port: 4321,
       capabilityToken,
       storageDirectory: join(temporaryDirectory, "state"),
-      databasePath: join(temporaryDirectory, "constelix.sqlite"),
+      databasePath,
     });
 
     await waitForIndex(server);
@@ -68,6 +92,12 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".workspace-identity strong")).toHaveText("sample-workspace");
     await expect(page.getByTestId("workspace-canvas")).toBeVisible();
     await Promise.all([realFileRead, realPtyCreated]);
+    await expect(page.getByLabel("Historial de conversación")).toContainText(
+      "¿Qué conecta el servicio de consultas?",
+    );
+    await expect(page.getByLabel("Historial de conversación")).toContainText(
+      "El servicio conecta contratos",
+    );
 
     // The store starts from demo panel resources while bootstrap is in flight. Once both
     // real resources are available, only errors from the connected flow are relevant here.
@@ -105,7 +135,9 @@ test.describe("workspace connected to the local agent", () => {
     await expect(terminalInput).toBeAttached();
     await expect(terminal).not.toContainText("No se pudo iniciar la PTY local");
     await expect(terminal.locator(".xterm-rows")).toContainText("sample-workspace");
-    await writeTerminalCommand(page, secondPty.id, "uname -s\r", "Darwin");
+    await terminalInput.focus();
+    await terminalInput.pressSequentially("uname -s");
+    await terminalInput.press("Enter");
     await expect(terminal.locator(".xterm-rows")).toContainText("Darwin");
     await writeTerminalCommand(page, secondPty.id, "npm run build && npm test\r", "pass 1");
     await expect(terminal.locator(".xterm-rows")).toContainText("pass 1");
@@ -129,6 +161,18 @@ test.describe("workspace connected to the local agent", () => {
     await page.context().setOffline(false);
     await expect(page.getByRole("status").filter({ hasText: "Local · Conectado" })).toBeVisible({ timeout: 8_000 });
     await expect(terminal.locator(".xterm-rows")).toContainText("RECOVERED_CHUNK", { timeout: 8_000 });
+
+    const anchoredPtyCreated = page.waitForResponse(
+      (response) => response.url().endsWith("/api/v1/terminals") && response.status() === 201,
+    );
+    await page
+      .getByRole("group", { name: "directory: src", exact: true })
+      .getByRole("button", { name: "Abrir terminal en src", exact: true })
+      .dispatchEvent("click");
+    const anchoredPty = (await (await anchoredPtyCreated).json()) as { cwd: string };
+    expect(anchoredPty.cwd).toBe(await realpath(join(workspaceRoot!, "src")));
+    await expect(terminalPanels.first().locator(".xterm-rows")).toContainText("src");
+
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(page.getByRole("tab", { name: "Actuar" })).toHaveAttribute("aria-selected", "true");
     await page.waitForTimeout(650);
@@ -153,6 +197,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".editor-breadcrumbs")).toContainText("index.ts");
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("export");
     await expect(page.locator(".xterm").first()).toBeVisible();
+    expect(terminalCreates).toBe(0);
 
     const editor = page.locator(".monaco-editor");
     await editor.click();
@@ -187,7 +232,9 @@ test.describe("workspace connected to the local agent", () => {
 
     await editor.click();
     await page.keyboard.press("Meta+ArrowDown");
-    await page.keyboard.insertText("\n// versión local definitiva");
+    await page.keyboard.insertText(
+      "\nexport function e2eGraphSignal(): boolean { return true; }\n// versión local definitiva",
+    );
     const secondDiskContent = await readFile(indexPath, "utf8");
     await writeFile(indexPath, `${secondDiskContent}\n// cambio externo dos\n`);
     await page.getByRole("button", { name: "Guardar archivo" }).click();
@@ -196,6 +243,9 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".editor-conflict")).toHaveCount(0);
     await expect.poll(async () => readFile(indexPath, "utf8")).toContain("versión local definitiva");
     await expect.poll(async () => readFile(indexPath, "utf8")).not.toContain("cambio externo dos");
+    await expect(
+      page.locator('.semantic-node[aria-label="function: e2eGraphSignal"]'),
+    ).toBeVisible({ timeout: 3_000 });
   });
 });
 
@@ -234,13 +284,15 @@ async function writeTerminalCommand(
         }, 5_000);
 
         socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ protocolVersion: 1, type: "auth", token }));
+          socket.send(JSON.stringify({ protocolVersion: 1, type: "authenticate", token }));
         });
         socket.addEventListener("message", (event) => {
           const message = JSON.parse(String(event.data)) as {
             type?: string;
-            terminalId?: string;
-            data?: string;
+            payload?: {
+              terminalId?: string;
+              data?: string;
+            };
           };
           if (message.type === "authenticated") {
             socket.send(JSON.stringify({
@@ -250,8 +302,12 @@ async function writeTerminalCommand(
               data: command,
             }));
           }
-          if (message.type === "terminal.output" && message.terminalId === id && message.data) {
-            output += message.data;
+          if (
+            message.type === "terminal.output" &&
+            message.payload?.terminalId === id &&
+            message.payload.data
+          ) {
+            output += message.payload.data;
             if (output.includes(expected)) {
               window.clearTimeout(timeout);
               socket.close();
@@ -282,7 +338,7 @@ async function sendTerminalInput(
           rejectCommand(new Error("PTY input timed out."));
         }, 5_000);
         socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ protocolVersion: 1, type: "auth", token }));
+          socket.send(JSON.stringify({ protocolVersion: 1, type: "authenticate", token }));
         });
         socket.addEventListener("message", (event) => {
           const message = JSON.parse(String(event.data)) as { type?: string };

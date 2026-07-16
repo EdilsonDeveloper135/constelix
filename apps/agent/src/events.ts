@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import {
+  ClientEventSchema,
+  ServerEventSchema,
+  WebSocketAuthenticationSchema,
+  type ClientEvent,
+} from "@constelix/contracts";
 export interface LocalServerEvent {
   protocolVersion: 1;
   eventId: string;
@@ -28,17 +34,22 @@ export class EventBus {
   readonly #sockets = new Set<SocketState>();
 
   publish(type: string, payload: unknown): LocalServerEvent {
-    const compatibilityFields = legacyFields(payload);
     const event: LocalServerEvent = {
       protocolVersion: 1,
       eventId: randomUUID(),
       type,
       timestamp: new Date().toISOString(),
       payload,
-      ...compatibilityFields,
     };
     this.#emitter.emit("event", event);
-    const serialized = JSON.stringify(event);
+    const transportEvent = ServerEventSchema.safeParse(event);
+    if (!transportEvent.success) {
+      if (TRANSPORT_EVENT_TYPES.has(type)) {
+        throw new Error(`Invalid outbound WebSocket event: ${type}`);
+      }
+      return event;
+    }
+    const serialized = JSON.stringify(transportEvent.data);
     for (const state of this.#sockets) {
       if (state.authenticated && state.socket.readyState === 1) {
         state.socket.send(serialized);
@@ -64,11 +75,10 @@ export class EventBus {
     socket.on("message", (raw) => {
       if (!state.authenticated) {
         try {
-          const message = JSON.parse(raw.toString()) as { type?: string; token?: string };
-          if (
-            (message.type !== "authenticate" && message.type !== "auth") ||
-            message.token !== capabilityToken
-          ) {
+          const parsed = WebSocketAuthenticationSchema.safeParse(
+            JSON.parse(raw.toString()) as unknown,
+          );
+          if (!parsed.success || parsed.data.token !== capabilityToken) {
             socket.close(4401, "Unauthorized");
             return;
           }
@@ -100,23 +110,15 @@ export class EventBus {
       }
 
       try {
-        const message = JSON.parse(raw.toString()) as {
-          type?: string;
-          terminalId?: string;
-          data?: string;
-          cols?: number;
-          rows?: number;
-        };
+        const message = ClientEventSchema.parse(
+          JSON.parse(raw.toString()) as unknown,
+        );
         this.#emitter.emit("client-message", message);
       } catch {
-        socket.send(
-          JSON.stringify({
-            protocolVersion: 1,
-            eventId: randomUUID(),
-            type: "error",
-            timestamp: new Date().toISOString(),
-            payload: { code: "INVALID_MESSAGE", message: "Malformed JSON message." },
-          } satisfies LocalServerEvent),
+        sendSocketError(
+          socket,
+          "INVALID_MESSAGE",
+          "The WebSocket message is malformed or violates protocol version 1.",
         );
       }
     });
@@ -129,7 +131,7 @@ export class EventBus {
     socket.once("error", detach);
   }
 
-  onClientMessage(listener: (message: Record<string, unknown>) => void): () => void {
+  onClientMessage(listener: (message: ClientEvent) => void): () => void {
     this.#emitter.on("client-message", listener);
     return () => this.#emitter.off("client-message", listener);
   }
@@ -144,10 +146,30 @@ export class EventBus {
   }
 }
 
-function legacyFields(payload: unknown): Record<string, unknown> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return {};
-  const protectedKeys = new Set(["protocolVersion", "eventId", "type", "timestamp", "payload"]);
-  return Object.fromEntries(
-    Object.entries(payload as Record<string, unknown>).filter(([key]) => !protectedKeys.has(key)),
+const TRANSPORT_EVENT_TYPES = new Set([
+  "graph.delta",
+  "graph.snapshot",
+  "index.progress",
+  "terminal.output",
+  "terminal.exit",
+  "ask.event",
+  "capabilities.updated",
+  "act.event",
+  "error",
+]);
+
+function sendSocketError(
+  socket: LocalWebSocket,
+  code: string,
+  message: string,
+): void {
+  socket.send(
+    JSON.stringify({
+      protocolVersion: 1,
+      eventId: randomUUID(),
+      type: "error",
+      timestamp: new Date().toISOString(),
+      payload: { code, message, recoverable: true },
+    } satisfies LocalServerEvent),
   );
 }

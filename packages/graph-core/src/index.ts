@@ -118,6 +118,7 @@ function stableSerialize(value: unknown): string {
 export class InMemoryGraphStore {
   private workspaceIdValue: string;
   private revisionValue = 0;
+  private sourceTruncatedValue = false;
   private nodes = new Map<string, GraphNode>();
   private edges = new Map<string, GraphEdge>();
   private outbound = new Map<string, Set<string>>();
@@ -162,6 +163,7 @@ export class InMemoryGraphStore {
     this.assertIntegrity(snapshot.nodes, snapshot.edges);
     this.workspaceIdValue = snapshot.workspaceId;
     this.revisionValue = snapshot.revision;
+    this.sourceTruncatedValue = snapshot.truncated;
     this.nodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
     this.edges = new Map(snapshot.edges.map((edge) => [edge.id, edge]));
     this.rebuildAdjacency();
@@ -204,19 +206,38 @@ export class InMemoryGraphStore {
       .filter((edge) => included.has(edge.source) && included.has(edge.target))
       .sort((left, right) => left.id.localeCompare(right.id));
     const nextOffset = offset + nodes.length;
+    const hasMoreNodes = nextOffset < ordered.length;
     return GraphSnapshotSchema.parse({
       protocolVersion: PROTOCOL_VERSION,
       workspaceId: this.workspaceIdValue,
       revision: this.revisionValue,
       nodes,
       edges,
-      truncated: nextOffset < ordered.length,
-      ...(nextOffset < ordered.length ? { cursor: `v1:${nextOffset}` } : {})
+      truncated: this.sourceTruncatedValue || hasMoreNodes,
+      ...(hasMoreNodes ? { cursor: `v1:${nextOffset}` } : {})
     });
   }
 
   query(input: GraphQuery): GraphSnapshot {
     const query = GraphQuerySchema.parse(input);
+    if (
+      query.rootIds.length === 0 &&
+      query.relations.length === 0 &&
+      query.nodeKinds.length === 0 &&
+      !query.search
+    ) {
+      const page = this.snapshot(query.limit, query.cursor);
+      const pageNodeIds = new Set(page.nodes.map((node) => node.id));
+      return GraphSnapshotSchema.parse({
+        ...page,
+        edges: [...this.edges.values()]
+          .filter(
+            (edge) =>
+              pageNodeIds.has(edge.source) || pageNodeIds.has(edge.target),
+          )
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      });
+    }
     const relationSet = new Set(query.relations);
     const roots = query.rootIds.length > 0
       ? query.rootIds.filter((id) => this.nodes.has(id))
@@ -272,14 +293,15 @@ export class InMemoryGraphStore {
       .filter((edge): edge is GraphEdge => edge !== undefined && included.has(edge.source) && included.has(edge.target))
       .sort((left, right) => left.id.localeCompare(right.id));
     const nextOffset = offset + page.length;
+    const hasMoreNodes = nextOffset < pageable.length;
     return GraphSnapshotSchema.parse({
       protocolVersion: PROTOCOL_VERSION,
       workspaceId: this.workspaceIdValue,
       revision: this.revisionValue,
       nodes,
       edges,
-      truncated: nextOffset < pageable.length,
-      ...(nextOffset < pageable.length ? { cursor: `v1:${nextOffset}` } : {})
+      truncated: this.sourceTruncatedValue || hasMoreNodes,
+      ...(hasMoreNodes ? { cursor: `v1:${nextOffset}` } : {})
     });
   }
 

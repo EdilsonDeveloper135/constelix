@@ -26,6 +26,7 @@ import {
   editorDraftIsDirty,
   getEditorDraft,
   getOrCreateEditorDraft,
+  markEditorDraftPersisted,
   updateEditorDraft,
   type EditorDraft,
 } from "../../lib/editorDrafts";
@@ -281,16 +282,18 @@ export const EditorPanel = memo(function EditorPanel({
         current.contentHash,
       );
       const latest = getEditorDraft(relativePath);
-      const savedContent = latest?.content ?? current.content;
-      patchDraft(relativePath, {
-        contentHash: result.contentHash,
-        savedContent,
-        status: "saved",
-      });
-      updateEditorPanel({
-        contentHash: result.contentHash,
-        preview: savedContent,
-      });
+      const persisted = markEditorDraftPersisted(
+        relativePath,
+        current.content,
+        result.contentHash,
+      );
+      if (pathRef.current === relativePath) {
+        setDraft(persisted);
+        updateEditorPanel({
+          contentHash: result.contentHash,
+          preview: latest?.content ?? current.content,
+        });
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message.toLowerCase() : "";
@@ -342,16 +345,18 @@ export const EditorPanel = memo(function EditorPanel({
         disk.contentHash,
       );
       const latest = getEditorDraft(relativePath);
-      const savedContent = latest?.content ?? current.content;
-      patchDraft(relativePath, {
-        savedContent,
-        contentHash: result.contentHash,
-        status: "saved",
-      });
-      updateEditorPanel({
-        preview: savedContent,
-        contentHash: result.contentHash,
-      });
+      const persisted = markEditorDraftPersisted(
+        relativePath,
+        current.content,
+        result.contentHash,
+      );
+      if (pathRef.current === relativePath) {
+        setDraft(persisted);
+        updateEditorPanel({
+          preview: latest?.content ?? current.content,
+          contentHash: result.contentHash,
+        });
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message.toLowerCase() : "";

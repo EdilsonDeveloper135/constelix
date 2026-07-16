@@ -11,6 +11,7 @@ import {
 const FILE_COUNT = 10_000;
 const COLD_BUDGET_MS = 90_000;
 const INCREMENTAL_BUDGET_MS = 1_000;
+const INCREMENTAL_SAMPLES = 20;
 const fixture = await generateBenchmarkFixture(FILE_COUNT);
 const stateDirectory = await mkdtemp(join(tmpdir(), "constelix-benchmark-state-"));
 const startedAt = performance.now();
@@ -31,57 +32,77 @@ try {
     host: `127.0.0.1:${server.port}`,
     "content-type": "application/json",
   };
-  const read = await server.app.inject({
-    method: "POST",
-    url: "/api/v1/files/read",
-    headers,
-    payload: { protocolVersion: 1, relativePath: "src/module-5000.js" },
-  });
-  if (read.statusCode !== 200) {
-    throw new Error(`Benchmark editor read failed with HTTP ${read.statusCode}: ${read.body}`);
+  const incrementalSamplesMs: number[] = [];
+  let latestRevision = coldStatus.revision;
+  for (let sample = 0; sample < INCREMENTAL_SAMPLES; sample += 1) {
+    const relativePath = `src/module-${5_000 + sample}.js`;
+    const read = await server.app.inject({
+      method: "POST",
+      url: "/api/v1/files/read",
+      headers,
+      payload: { protocolVersion: 1, relativePath },
+    });
+    if (read.statusCode !== 200) {
+      throw new Error(`Benchmark editor read failed with HTTP ${read.statusCode}: ${read.body}`);
+    }
+    const opened = read.json<{ content: string; contentHash: string }>();
+    const incrementalStartedAt = performance.now();
+    const write = await server.app.inject({
+      method: "PUT",
+      url: "/api/v1/files/write",
+      headers,
+      payload: {
+        protocolVersion: 1,
+        relativePath,
+        content: `${opened.content}\nexport const benchmarkChange${sample} = true;\n`,
+        expectedContentHash: opened.contentHash,
+      },
+    });
+    if (write.statusCode !== 200) {
+      throw new Error(`Benchmark editor write failed with HTTP ${write.statusCode}: ${write.body}`);
+    }
+    const incrementalStatus = await waitForReady(
+      server,
+      latestRevision,
+      Math.max(5_000, INCREMENTAL_BUDGET_MS * 3),
+    );
+    incrementalSamplesMs.push(performance.now() - incrementalStartedAt);
+    latestRevision = incrementalStatus.revision;
   }
-  const opened = read.json<{ content: string; contentHash: string }>();
-  const incrementalStartedAt = performance.now();
-  const write = await server.app.inject({
-    method: "PUT",
-    url: "/api/v1/files/write",
-    headers,
-    payload: {
-      protocolVersion: 1,
-      relativePath: "src/module-5000.js",
-      content: `${opened.content}\nexport const benchmarkChange = true;\n`,
-      expectedContentHash: opened.contentHash,
-    },
-  });
-  if (write.statusCode !== 200) {
-    throw new Error(`Benchmark editor write failed with HTTP ${write.statusCode}: ${write.body}`);
-  }
-  const incrementalStatus = await waitForReady(
-    server,
-    coldStatus.revision,
-    Math.max(5_000, INCREMENTAL_BUDGET_MS * 3)
-  );
-  const incrementalMs = performance.now() - incrementalStartedAt;
+  const incrementalP95Ms = percentile(incrementalSamplesMs, 0.95);
   const result = {
     files: coldStatus.total,
     lines: FILE_COUNT * LINES_PER_BENCHMARK_FILE,
     coldMs: Math.round(coldMs),
     coldBudgetMs: COLD_BUDGET_MS,
-    incrementalMs: Math.round(incrementalMs),
+    incrementalSamplesMs: incrementalSamplesMs.map(Math.round),
+    incrementalP95Ms: Math.round(incrementalP95Ms),
     incrementalBudgetMs: INCREMENTAL_BUDGET_MS,
-    revisions: { cold: coldStatus.revision, incremental: incrementalStatus.revision },
-    passed: coldMs <= COLD_BUDGET_MS && incrementalMs <= INCREMENTAL_BUDGET_MS
+    revisions: { cold: coldStatus.revision, incremental: latestRevision },
+    passed: coldMs <= COLD_BUDGET_MS && incrementalP95Ms <= INCREMENTAL_BUDGET_MS
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (coldStatus.total !== FILE_COUNT) throw new Error(`Expected ${FILE_COUNT} indexed files, received ${coldStatus.total}.`);
   if (coldMs > COLD_BUDGET_MS) throw new Error(`Cold index exceeded ${COLD_BUDGET_MS} ms.`);
-  if (incrementalMs > INCREMENTAL_BUDGET_MS) throw new Error(`Incremental index exceeded ${INCREMENTAL_BUDGET_MS} ms.`);
+  if (incrementalP95Ms > INCREMENTAL_BUDGET_MS) {
+    throw new Error(`Incremental index p95 exceeded ${INCREMENTAL_BUDGET_MS} ms.`);
+  }
 } finally {
   await server.close();
   await Promise.all([
     rm(fixture, { recursive: true, force: true }),
     rm(stateDirectory, { recursive: true, force: true })
   ]);
+}
+
+function percentile(values: readonly number[], quantile: number): number {
+  if (values.length === 0) throw new Error("A percentile requires at least one sample.");
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(
+    0,
+    Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1),
+  );
+  return sorted[index]!;
 }
 
 interface HealthPayload {

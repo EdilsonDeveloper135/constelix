@@ -4,6 +4,7 @@ import type { GraphDelta, GraphEdge, GraphNode } from "@constelix/contracts";
 import {
   applySemanticViewState,
   MAX_VISIBLE_SEMANTIC_NODES,
+  mergeGraphSnapshotPage,
   mergeRevisionedGraphDelta,
 } from "./workspaceGraph";
 import { graphRecordsToFlowEdges, graphRecordsToFlowNodes } from "./graph";
@@ -62,6 +63,22 @@ describe("revisioned frontend graph", () => {
     if (first.kind !== "applied") return;
     const duplicate = mergeRevisionedGraphDelta(first.nodes, first.edges, first.revision, change);
     expect(duplicate.nodes.filter((item) => item.id === "two")).toHaveLength(1);
+  });
+
+  it("accumulates graph pages and retains cross-page edges", () => {
+    const firstNodes = graphRecordsToFlowNodes([node("one")]);
+    const result = mergeGraphSnapshotPage(firstNodes, [], {
+      protocolVersion: 1,
+      workspaceId: "workspace",
+      revision: 1,
+      nodes: [node("two")],
+      edges: [edge("one-to-two", "one", "two")],
+      truncated: false,
+    });
+
+    expect(result.nodes.map((item) => item.id)).toEqual(["one", "two"]);
+    expect(result.edges.map((item) => item.id)).toEqual(["one-to-two"]);
+    expect([...result.addedNodeIds]).toEqual(["two"]);
   });
 
   it("caps visible semantic nodes and collapses contains descendants", () => {

@@ -1,4 +1,4 @@
-import type { GraphDelta } from "@constelix/contracts";
+import type { GraphDelta, GraphSnapshot } from "@constelix/contracts";
 
 import { graphRecordsToFlowEdges, graphRecordsToFlowNodes } from "./graph";
 import type { WorkspaceEdge, WorkspaceNode } from "../types";
@@ -9,6 +9,56 @@ export type GraphDeltaMergeResult =
   | { kind: "duplicate"; revision: number; nodes: WorkspaceNode[]; edges: WorkspaceEdge[] }
   | { kind: "gap"; revision: number; nodes: WorkspaceNode[]; edges: WorkspaceEdge[] }
   | { kind: "applied"; revision: number; nodes: WorkspaceNode[]; edges: WorkspaceEdge[] };
+
+export interface GraphPageMergeResult {
+  nodes: WorkspaceNode[];
+  edges: WorkspaceEdge[];
+  addedNodeIds: Set<string>;
+}
+
+export function mergeGraphSnapshotPage(
+  nodes: readonly WorkspaceNode[],
+  edges: readonly WorkspaceEdge[],
+  snapshot: GraphSnapshot,
+): GraphPageMergeResult {
+  const incomingNodes = new Map(
+    graphRecordsToFlowNodes(snapshot.nodes).map((node) => [node.id, node]),
+  );
+  const mergedNodes = nodes.map((node) => {
+    const incoming = incomingNodes.get(node.id);
+    if (!incoming || node.type !== "semantic" || incoming.type !== "semantic") {
+      return node;
+    }
+    incomingNodes.delete(node.id);
+    return {
+      ...incoming,
+      position: node.position,
+      ...(node.hidden !== undefined ? { hidden: node.hidden } : {}),
+      data: {
+        ...incoming.data,
+        ...node.data,
+      },
+    } satisfies WorkspaceNode;
+  });
+  const addedNodeIds = new Set(incomingNodes.keys());
+  mergedNodes.push(...incomingNodes.values());
+
+  const edgeMap = new Map(edges.map((edge) => [edge.id, edge]));
+  for (const edge of graphRecordsToFlowEdges(snapshot.edges)) {
+    edgeMap.set(edge.id, edge);
+  }
+  const loadedNodeIds = new Set(mergedNodes.map((node) => node.id));
+  const mergedEdges = [...edgeMap.values()].filter(
+    (edge) =>
+      loadedNodeIds.has(edge.source) && loadedNodeIds.has(edge.target),
+  );
+
+  return {
+    nodes: mergedNodes,
+    edges: mergedEdges,
+    addedNodeIds,
+  };
+}
 
 export function mergeRevisionedGraphDelta(
   nodes: readonly WorkspaceNode[],

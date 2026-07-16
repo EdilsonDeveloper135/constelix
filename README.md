@@ -7,7 +7,7 @@ Constelix is a local-first visual software engineering workspace. It turns a Jav
 - macOS
 - Node.js 24 LTS
 - pnpm 11
-- Codex CLI for **Act** mode
+- Codex CLI 0.144.5 for **Act** mode
 - `OPENAI_API_KEY` in the process environment for **Ask** mode (`.env.local` is loaded only by the development CLI)
 
 Ask defaults to `gpt-5.6-terra`; override it locally with `CONSTELIX_OPENAI_MODEL` when needed.
@@ -26,6 +26,15 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm test:e2e
+pnpm benchmark
+pnpm smoke:package
+```
+
+The real Codex sandbox smoke is opt-in because it starts an approved local
+agent turn:
+
+```bash
+CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```
 
 ## Production CLI
@@ -33,7 +42,7 @@ pnpm test:e2e
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.1.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.2.tgz
 constelix /absolute/path/to/a/project
 ```
 

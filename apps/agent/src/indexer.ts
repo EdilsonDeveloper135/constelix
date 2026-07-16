@@ -1,5 +1,6 @@
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { watch, type ChokidarOptions, type FSWatcher } from "chokidar";
+import type { TypeScriptResolutionOptions } from "@constelix/analyzers";
 import {
   GraphSnapshotSchema,
   PROTOCOL_VERSION,
@@ -20,9 +21,13 @@ import {
   buildIgnoreMatcher,
   detectSupportedLanguage,
   isSecretPath,
+  MAX_WORKSPACE_FILES,
+  MAX_WORKSPACE_SOURCE_BYTES,
   readTypeScriptResolutionOptions,
   scanWorkspace,
+  type ScanProgress,
   type ScanResult,
+  type ScanWorkspaceOptions,
   type ScannedSource,
 } from "./scanner.js";
 
@@ -55,6 +60,7 @@ export interface WorkspaceIndexerOptions {
   watcherFactory?: (path: string, options: ChokidarOptions) => FSWatcher;
   watcherRestartBaseDelayMs?: number;
   watcherRestartMaxDelayMs?: number;
+  scanOptions?: Omit<ScanWorkspaceOptions, "onProgress">;
 }
 
 export class WorkspaceIndexer {
@@ -244,9 +250,13 @@ export class WorkspaceIndexer {
     this.#forceFullReason = undefined;
     const changedPaths = [...this.#pendingChanges].sort();
     this.#pendingChanges.clear();
+    const truncatedIndexReason = this.#fullSnapshot.truncated
+      ? "Truncated index changed; rebuilding within scanner limits"
+      : undefined;
+    const fullReason = forceFullReason ?? truncatedIndexReason;
     const operation =
-      forceFullReason !== undefined || this.#fullSnapshot.revision === 0
-        ? this.reindex(forceFullReason ?? "Initial index")
+      fullReason !== undefined || this.#fullSnapshot.revision === 0
+        ? this.reindex(fullReason ?? "Initial index")
         : this.reindexIncrementally(changedPaths);
     const tracked = operation.finally(() => {
       if (this.#active === tracked) this.#active = undefined;
@@ -269,8 +279,7 @@ export class WorkspaceIndexer {
     try {
       const scanStartedBeforeWatcherReady = !this.#watcherReady;
       this.publishStatus("scanning", 0, 0, reason);
-      let scan = await scanWorkspace(this.workspaceId, this.workspaceRoot);
-      this.publishProvisionalScan(scan);
+      let scan = await this.scanWorkspaceProgressively();
       let normalized = await this.analyzeScan(scan, revision);
 
       if (scanStartedBeforeWatcherReady) {
@@ -279,12 +288,12 @@ export class WorkspaceIndexer {
           scan.files.length,
           scan.files.length,
           "Synchronizing filesystem watcher",
+          { filesIndexed: scan.files.length },
         );
         await this.waitForWatcherReady();
-        const reconciledScan = await scanWorkspace(this.workspaceId, this.workspaceRoot);
+        const reconciledScan = await this.scanWorkspaceProgressively();
         if (!scansMatch(scan, reconciledScan)) {
           scan = reconciledScan;
-          this.publishProvisionalScan(scan);
           normalized = await this.analyzeScan(scan, revision);
         }
       } else {
@@ -292,7 +301,13 @@ export class WorkspaceIndexer {
       }
 
       const snapshot = GraphSnapshotSchema.parse(normalized.snapshot);
-      this.publishStatus("persisting", scan.files.length, scan.files.length);
+      this.publishStatus(
+        "persisting",
+        scan.files.length,
+        scan.files.length,
+        undefined,
+        { filesIndexed: scan.files.length },
+      );
       this.database.replaceIndexRevision(
         this.workspaceId,
         snapshot,
@@ -303,8 +318,12 @@ export class WorkspaceIndexer {
       for (const file of scan.files) this.#files.set(file.relativePath, toFileRecord(file));
       this.graph.replace(snapshot);
       this.#fullSnapshot = snapshot;
+      const graphPage = this.graph.snapshot(500);
       this.events.publish("graph.snapshot", {
-        graph: this.graph.snapshot(500),
+        graph: GraphSnapshotSchema.parse({
+          ...graphPage,
+          truncated: graphPage.truncated || snapshot.truncated,
+        }),
         provisional: false,
       });
       if (this.#watcherReady) this.#watcherRestartAttempts = 0;
@@ -313,9 +332,19 @@ export class WorkspaceIndexer {
         this.#pendingChanges.size === 0 &&
         this.#forceFullReason === undefined
       ) {
-        this.publishStatus("ready", scan.files.length, scan.files.length, undefined, {
-          lastIndexedAt: new Date().toISOString(),
-        });
+        this.publishStatus(
+          "ready",
+          scan.files.length,
+          scan.files.length,
+          scan.truncated
+            ? scan.diagnostics.findLast((diagnostic) =>
+                /(?:file limit|source-memory limit)/i.test(diagnostic.message),
+              )?.message ?? "Workspace index is truncated by scanner limits."
+            : undefined,
+          {
+            lastIndexedAt: new Date().toISOString(),
+          },
+        );
       }
     } catch (error) {
       if (!this.#closed) {
@@ -333,18 +362,54 @@ export class WorkspaceIndexer {
     }
   }
 
-  private publishProvisionalScan(scan: ScanResult): void {
+  private scanWorkspaceProgressively(): Promise<ScanResult> {
+    const configuredMaximum = this.options.scanOptions?.maxFiles ?? MAX_WORKSPACE_FILES;
+    const maximumFiles = Math.min(
+      Math.max(Math.trunc(configuredMaximum), 1),
+      MAX_WORKSPACE_FILES,
+    );
+    return scanWorkspace(this.workspaceId, this.workspaceRoot, {
+      ...this.options.scanOptions,
+      onProgress: (progress) => {
+        this.publishProvisionalScan(progress);
+        const total = progress.complete ? progress.files.length : maximumFiles;
+        const truncationMessage = progress.truncated
+          ? progress.diagnostics.at(-1)?.message
+          : undefined;
+        this.publishStatus(
+          "scanning",
+          progress.files.length,
+          total,
+          truncationMessage ??
+            (progress.complete
+              ? `Filesystem scan found ${progress.files.length} supported source files`
+              : `Scanning workspace: ${progress.files.length} supported source files discovered`),
+          { filesIndexed: progress.files.length },
+        );
+      },
+    });
+  }
+
+  private publishProvisionalScan(
+    progress: Pick<ScanProgress, "files" | "complete" | "truncated">,
+  ): void {
     if (this.#fullSnapshot.revision !== 0) return;
     const provisional = createFileSystemSnapshot(
       this.workspaceId,
       this.#fullSnapshot.revision,
       basename(this.workspaceRoot),
-      scan.files,
+      progress.files,
       true,
+      progress.truncated,
     );
     this.graph.replace(provisional);
+    const graphPage = this.graph.snapshot(500);
     this.events.publish("graph.snapshot", {
-      graph: this.graph.snapshot(500),
+      graph: GraphSnapshotSchema.parse({
+        ...graphPage,
+        truncated:
+          graphPage.truncated || !progress.complete || progress.truncated,
+      }),
       provisional: true,
     });
   }
@@ -353,7 +418,9 @@ export class WorkspaceIndexer {
     scan: ScanResult,
     revision: number,
   ): Promise<ReturnType<typeof normalizeAnalysisResult>> {
-    this.publishStatus("parsing", 0, scan.files.length);
+    this.publishStatus("parsing", 0, scan.files.length, undefined, {
+      filesIndexed: scan.files.length,
+    });
     const typeScriptResolution = await readTypeScriptResolutionOptions(this.workspaceRoot);
     const analysisResult = await this.#analyzer.analyze(
       scan.files.map((file) => ({
@@ -369,12 +436,19 @@ export class WorkspaceIndexer {
         ...(typeScriptResolution === undefined ? {} : { typeScriptResolution }),
       },
     );
-    this.publishStatus("resolving", scan.files.length, scan.files.length);
+    this.publishStatus(
+      "resolving",
+      scan.files.length,
+      scan.files.length,
+      undefined,
+      { filesIndexed: scan.files.length },
+    );
     return normalizeAnalysisResult(
       analysisResult,
       this.workspaceId,
       revision,
       scan.files,
+      scan.truncated,
     );
   }
 
@@ -416,6 +490,10 @@ export class WorkspaceIndexer {
       const changedSources = new Map<string, ScannedSource>();
       const removedPaths = new Set<string>();
       const diagnostics: Array<{ relativePath?: string; message: string }> = [];
+      const sourceByteLimit = boundedSourceByteLimit(
+        this.options.scanOptions?.maxTotalBytes,
+      );
+      let affectedSourceBytes = 0;
 
       for (const relativePath of changedPaths) {
         const language = detectSupportedLanguage(relativePath);
@@ -430,6 +508,10 @@ export class WorkspaceIndexer {
         const source = await this.readIncrementalSource(relativePath, diagnostics);
         if (source === undefined) removedPaths.add(relativePath);
         else if (this.#files.get(relativePath)?.contentHash !== source.contentHash) {
+          affectedSourceBytes += source.sizeBytes;
+          if (affectedSourceBytes > sourceByteLimit) {
+            throw incrementalSourceBudgetError(sourceByteLimit);
+          }
           changedSources.set(relativePath, source);
         }
       }
@@ -447,9 +529,13 @@ export class WorkspaceIndexer {
         return;
       }
 
+      const typeScriptResolution = await readTypeScriptResolutionOptions(
+        this.workspaceRoot,
+      );
       const affectedPaths = this.collectAffectedPaths(
         new Set(changedPaths),
         changedSources.values(),
+        typeScriptResolution,
       );
       if (affectedPaths.size > MAX_INCREMENTAL_AFFECTED_FILES) {
         throw new IncrementalFallbackError(
@@ -462,12 +548,17 @@ export class WorkspaceIndexer {
         if (affectedSources.has(relativePath) || removedPaths.has(relativePath)) continue;
         const source = await this.readIncrementalSource(relativePath, diagnostics);
         if (source === undefined) removedPaths.add(relativePath);
-        else affectedSources.set(relativePath, source);
+        else {
+          affectedSourceBytes += source.sizeBytes;
+          if (affectedSourceBytes > sourceByteLimit) {
+            throw incrementalSourceBudgetError(sourceByteLimit);
+          }
+          affectedSources.set(relativePath, source);
+        }
       }
 
       this.publishStatus("parsing", 0, affectedSources.size);
       const sourceFiles = [...affectedSources.values()];
-      const typeScriptResolution = await readTypeScriptResolutionOptions(this.workspaceRoot);
       const analysisResult = await this.#analyzer.analyze(
         sourceFiles.map((file) => ({
           workspaceId: this.workspaceId,
@@ -567,12 +658,31 @@ export class WorkspaceIndexer {
   private collectAffectedPaths(
     changedPaths: ReadonlySet<string>,
     changedSources: Iterable<ScannedSource>,
+    typeScriptResolution?: TypeScriptResolutionOptions,
   ): Set<string> {
     const affected = new Set(changedPaths);
     const nodeById = new Map(this.#fullSnapshot.nodes.map((node) => [node.id, node]));
+    const sources = [...changedSources];
+
+    // A new module can satisfy an import that was previously represented by an
+    // external node. Reanalyze those importers so the edge can be promoted to
+    // the real module. This is intentionally conservative because aliases and
+    // Python package imports cannot be matched reliably from a path alone.
+    if (sources.some((source) => !this.#files.has(source.relativePath))) {
+      for (const edge of this.#fullSnapshot.edges) {
+        if (edge.relation !== "imports") continue;
+        if (nodeById.get(edge.target)?.kind !== "external") continue;
+        const importerPath = nodeById.get(edge.source)?.relativePath;
+        if (importerPath !== undefined && this.#files.has(importerPath)) {
+          affected.add(importerPath);
+          if (affected.size > MAX_INCREMENTAL_AFFECTED_FILES) break;
+        }
+      }
+    }
+
     const changedNodeIds = new Set(
       this.#fullSnapshot.nodes
-        .filter((node) => changedPaths.has(node.relativePath))
+        .filter((node) => affected.has(node.relativePath))
         .map((node) => node.id),
     );
     for (const edge of this.#fullSnapshot.edges) {
@@ -584,11 +694,23 @@ export class WorkspaceIndexer {
     }
 
     const hints = new Set<string>();
-    for (const source of changedSources) {
-      for (const hint of extractReferenceHints(source.source)) hints.add(hint);
+    for (const source of sources) {
+      for (const hint of extractReferenceHints(source.source)) {
+        hints.add(hint);
+        if (hint.startsWith(".")) {
+          hints.add(
+            normalizeReferenceHint(
+              posix.join(posix.dirname(source.relativePath), hint),
+            ),
+          );
+        }
+      }
     }
     if (hints.size > 0) {
-      const referenceHints = [...hints];
+      const referenceHints = expandTypeScriptReferenceHints(
+        hints,
+        typeScriptResolution,
+      );
       for (const relativePath of this.#files.keys()) {
         if (referenceHints.some((hint) => pathMatchesReference(relativePath, hint))) {
           affected.add(relativePath);
@@ -604,7 +726,9 @@ export class WorkspaceIndexer {
     completed: number,
     total: number,
     message?: string,
-    extra: Pick<IndexStatus, "lastIndexedAt"> = {},
+    extra: Pick<IndexStatus, "lastIndexedAt"> & {
+      filesIndexed?: number;
+    } = {},
   ): void {
     this.#status = {
       phase,
@@ -619,15 +743,12 @@ export class WorkspaceIndexer {
       phase: phase === "idle" ? "scanning" : phase,
       completed,
       total,
+      revision: this.#fullSnapshot.revision,
+      progress,
+      filesIndexed: extra.filesIndexed ?? this.#files.size,
+      symbolsIndexed: this.graph.nodeCount,
+      edgesIndexed: this.graph.edgeCount,
       ...(message === undefined ? {} : { message }),
-      index: {
-        phase,
-        progress,
-        filesIndexed: this.#files.size,
-        symbolsIndexed: this.graph.nodeCount,
-        edgesIndexed: this.graph.edgeCount,
-        ...(message === undefined ? {} : { message }),
-      },
     });
   }
 
@@ -654,7 +775,12 @@ function toFileRecord(file: ScannedSource): IndexedFileRecord {
 }
 
 function scansMatch(left: ScanResult, right: ScanResult): boolean {
-  if (left.files.length !== right.files.length) return false;
+  if (
+    left.truncated !== right.truncated ||
+    left.files.length !== right.files.length
+  ) {
+    return false;
+  }
   for (let index = 0; index < left.files.length; index += 1) {
     const leftFile = left.files[index];
     const rightFile = right.files[index];
@@ -675,13 +801,69 @@ function extractReferenceHints(source: string): string[] {
   const javascript =
     /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)["']([^"']+)["']/g;
   const python = /^\s*(?:from|import)\s+([.\w]+)/gm;
-  for (const pattern of [javascript, python]) {
-    for (const match of source.matchAll(pattern)) {
-      const value = match[1]?.replaceAll(".", "/").replace(/^\/+/, "");
-      if (value) hints.add(value);
-    }
+  for (const match of source.matchAll(javascript)) {
+    const value = match[1]?.replaceAll("\\", "/");
+    if (value) hints.add(value);
+  }
+  for (const match of source.matchAll(python)) {
+    const value = match[1]?.replaceAll(".", "/").replace(/^\/+/, "");
+    if (value) hints.add(value);
   }
   return [...hints];
+}
+
+function expandTypeScriptReferenceHints(
+  hints: ReadonlySet<string>,
+  options: TypeScriptResolutionOptions | undefined,
+): string[] {
+  const expanded = new Set(
+    [...hints].map(normalizeReferenceHint).filter(Boolean),
+  );
+  if (options === undefined) return [...expanded];
+
+  for (const hint of hints) {
+    if (!hint.startsWith(".")) {
+      expanded.add(
+        normalizeReferenceHint(posix.join(options.baseUrl, hint)),
+      );
+    }
+    for (const [pattern, targets] of Object.entries(options.paths)) {
+      const wildcard = matchTypeScriptPathPattern(pattern, hint);
+      if (wildcard === undefined) continue;
+      for (const target of targets) {
+        expanded.add(
+          normalizeReferenceHint(
+            posix.join(
+              options.baseUrl,
+              target.replaceAll("*", wildcard),
+            ),
+          ),
+        );
+      }
+    }
+  }
+  return [...expanded].filter(Boolean);
+}
+
+function matchTypeScriptPathPattern(
+  pattern: string,
+  specifier: string,
+): string | undefined {
+  const wildcardIndex = pattern.indexOf("*");
+  if (wildcardIndex === -1) return pattern === specifier ? "" : undefined;
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) {
+    return undefined;
+  }
+  return specifier.slice(prefix.length, specifier.length - suffix.length);
+}
+
+function normalizeReferenceHint(value: string): string {
+  return posix
+    .normalize(value.replaceAll("\\", "/"))
+    .replace(/^\.\//, "")
+    .replace(/^\/+/, "");
 }
 
 function pathMatchesReference(relativePath: string, reference: string): boolean {
@@ -748,8 +930,22 @@ export function mergeIncrementalSnapshot(
     revision,
     nodes: [...nodes.values()],
     edges: [...edges.values()],
-    truncated: false,
+    truncated: previous.truncated || partial.truncated,
   };
+}
+
+function boundedSourceByteLimit(configured: number | undefined): number {
+  const value = configured ?? MAX_WORKSPACE_SOURCE_BYTES;
+  return Math.min(
+    Math.max(Number.isFinite(value) ? Math.trunc(value) : MAX_WORKSPACE_SOURCE_BYTES, 1),
+    MAX_WORKSPACE_SOURCE_BYTES,
+  );
+}
+
+function incrementalSourceBudgetError(limit: number): IncrementalFallbackError {
+  return new IncrementalFallbackError(
+    `Incremental source batch exceeded the ${limit} byte aggregate source-memory limit.`,
+  );
 }
 
 function diffIncrementalSnapshots(previous: GraphSnapshot, next: GraphSnapshot): GraphDelta {
@@ -846,6 +1042,7 @@ function normalizeAnalysisResult(
   workspaceId: string,
   revision: number,
   files: readonly ScannedSource[],
+  sourceTruncated = false,
 ): { snapshot: GraphSnapshot; diagnostics: unknown[] } {
   const candidate = result as { snapshot?: unknown; diagnostics?: unknown[] };
   const snapshotInput = candidate.snapshot ?? result;
@@ -862,7 +1059,7 @@ function normalizeAnalysisResult(
           revision,
           nodes,
           edges,
-          truncated: false,
+          truncated: sourceTruncated,
           cursor: undefined,
         }),
       ),
@@ -872,7 +1069,12 @@ function normalizeAnalysisResult(
 
   // A degraded file graph keeps the dashboard useful if a native parser fails.
   return {
-    snapshot: createFallbackSnapshot(workspaceId, revision, files),
+    snapshot: createFallbackSnapshot(
+      workspaceId,
+      revision,
+      files,
+      sourceTruncated,
+    ),
     diagnostics: sanitizeUnknownStrings([
       ...(candidate.diagnostics ?? []),
       { message: "Language analyzers returned no valid snapshot; file-only graph was used." },
@@ -884,6 +1086,7 @@ function createFallbackSnapshot(
   workspaceId: string,
   revision: number,
   files: readonly ScannedSource[],
+  sourceTruncated = false,
 ): GraphSnapshot {
   return createFileSystemSnapshot(
     workspaceId,
@@ -891,6 +1094,7 @@ function createFallbackSnapshot(
     basename(workspaceId),
     files,
     false,
+    sourceTruncated,
   );
 }
 
@@ -900,6 +1104,7 @@ function createFileSystemSnapshot(
   projectName: string,
   files: readonly ScannedSource[],
   provisional: boolean,
+  sourceTruncated = false,
 ): GraphSnapshot {
   const projectId = stableId("node", workspaceId, "project");
   const project: GraphNode = {
@@ -984,6 +1189,6 @@ function createFileSystemSnapshot(
     revision,
     nodes: [...nodes.values()],
     edges: [...edges.values()],
-    truncated: false,
+    truncated: sourceTruncated,
   }));
 }

@@ -6,6 +6,7 @@ import {
   GraphSnapshotSchema,
   PanelStateSchema,
   ServerEventSchema,
+  TerminalSessionSchema,
   TerminalOutputSnapshotSchema,
   type ActApproveRequest,
   type ActTask as ContractActTask,
@@ -24,6 +25,17 @@ import { readCapabilityToken } from "./auth";
 type EventListener = (event: AgentEvent) => void;
 type SocketConnectionState = "connecting" | "connected" | "disconnected";
 type ConnectionListener = (state: SocketConnectionState) => void;
+const MAX_KEEPALIVE_BODY_BYTES = 60 * 1024;
+
+export class AgentRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "AgentRequestError";
+  }
+}
 
 class ConstelixApiClient {
   private readonly token = readCapabilityToken();
@@ -49,14 +61,20 @@ class ConstelixApiClient {
     const response = await fetch(`/api/v1${path}`, { ...init, headers });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(detail || `El agente respondió ${response.status}`);
+      throw new AgentRequestError(
+        detail || `El agente respondió ${response.status}`,
+        response.status,
+      );
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 
-  async bootstrap(): Promise<BootstrapPayload> {
-    const response = await this.request<unknown>("/bootstrap");
+  async bootstrap(signal?: AbortSignal): Promise<BootstrapPayload> {
+    const response = await this.request<unknown>(
+      "/bootstrap",
+      signal ? { signal } : {},
+    );
     return parseBootstrapPayload(response);
   }
 
@@ -73,6 +91,39 @@ class ConstelixApiClient {
         limit: 200,
         ...(cursor ? { cursor } : {})
       })
+    });
+    return GraphSnapshotSchema.parse(response);
+  }
+
+  async queryGraphPage(cursor?: string): Promise<GraphSnapshot> {
+    const response = await this.request<unknown>("/graph/query", {
+      method: "POST",
+      body: JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        rootIds: [],
+        direction: "outbound",
+        relations: [],
+        nodeKinds: [],
+        depth: 12,
+        limit: 500,
+        ...(cursor ? { cursor } : {}),
+      }),
+    });
+    return GraphSnapshotSchema.parse(response);
+  }
+
+  async queryEvidenceGraph(rootIds: string[]): Promise<GraphSnapshot> {
+    const response = await this.request<unknown>("/graph/query", {
+      method: "POST",
+      body: JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        rootIds,
+        direction: "both",
+        relations: [],
+        nodeKinds: [],
+        depth: 1,
+        limit: 500,
+      }),
     });
     return GraphSnapshotSchema.parse(response);
   }
@@ -96,19 +147,31 @@ class ConstelixApiClient {
     return FileWriteResponseSchema.parse(response);
   }
 
-  saveLayout(layout: PanelState[]): Promise<void> {
+  saveLayout(layout: PanelState[], keepalive = false): Promise<void> {
+    const body = JSON.stringify({
+      protocolVersion: PROTOCOL_VERSION,
+      panels: layout,
+    });
     return this.request("/layout", {
       method: "PUT",
-      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, panels: layout })
+      body,
+      keepalive: keepalive && canUseKeepaliveBody(body),
     });
   }
 
-  createTerminal(cwd: string): Promise<{ id: string; cwd: string; shell: string; createdAt: string }> {
-    const body: TerminalCreateRequest = { protocolVersion: PROTOCOL_VERSION, cwd, columns: 120, rows: 32 };
-    return this.request("/terminals", {
+  async createTerminal(cwd: string, panelId: string) {
+    const body: TerminalCreateRequest = {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd,
+      columns: 120,
+      rows: 32,
+      panelId,
+    };
+    const response = await this.request<unknown>("/terminals", {
       method: "POST",
       body: JSON.stringify(body)
     });
+    return TerminalSessionSchema.parse(response);
   }
 
   deleteTerminal(id: string): Promise<void> {
@@ -126,10 +189,11 @@ class ConstelixApiClient {
     threadId: string,
     prompt: string,
     selectedNodeIds: string[] = [],
+    requestId = crypto.randomUUID(),
   ): Promise<{ turnId: string; requestId: string; accepted: true }> {
     const body: AskTurnRequest = {
       protocolVersion: PROTOCOL_VERSION,
-      requestId: crypto.randomUUID(),
+      requestId,
       threadId,
       prompt,
       selectedNodeIds
@@ -161,11 +225,15 @@ class ConstelixApiClient {
     });
   }
 
-  cancelActTask(id: string): Promise<void> {
-    return this.request(`/act/tasks/${encodeURIComponent(id)}/cancel`, {
+  async cancelActTask(id: string): Promise<ContractActTask> {
+    const response = await this.request<unknown>(
+      `/act/tasks/${encodeURIComponent(id)}/cancel`,
+      {
       method: "POST",
-      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION })
-    });
+        body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }),
+      },
+    );
+    return ActTaskSchema.parse(response);
   }
 
   connect(): () => void {
@@ -205,33 +273,22 @@ class ConstelixApiClient {
     this.socket = socket;
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
-      socket.send(JSON.stringify({ protocolVersion: PROTOCOL_VERSION, type: "auth", token: this.token }));
+      socket.send(JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        type: "authenticate",
+        token: this.token,
+      }));
     });
     socket.addEventListener("message", (message) => {
       if (this.socket !== socket) return;
       try {
         const raw = JSON.parse(String(message.data)) as unknown;
-        const parsed = ServerEventSchema.safeParse(raw);
-        if (parsed.success) {
-          this.listeners.forEach((listener) => listener(parsed.data));
-          return;
-        }
-        const normalizedSnapshot = normalizeGraphSnapshotEvent(raw);
-        if (normalizedSnapshot) {
-          this.listeners.forEach((listener) => listener(normalizedSnapshot));
-          return;
-        }
-        if (
-          typeof raw === "object" &&
-          raw !== null &&
-          "protocolVersion" in raw &&
-          raw.protocolVersion === PROTOCOL_VERSION &&
-          "type" in raw &&
-          raw.type === "connection.ready"
-        ) {
+        const event = parseServerEvent(raw);
+        if (!event) return;
+        if (event.type === "connection.ready") {
           this.publishConnection("connected");
-          this.listeners.forEach((listener) => listener(raw as AgentEvent));
         }
+        this.listeners.forEach((listener) => listener(event));
       } catch {
         // Malformed local-agent events are ignored; the next snapshot reconciles state.
       }
@@ -257,24 +314,16 @@ class ConstelixApiClient {
 
 export const apiClient = new ConstelixApiClient();
 
-function normalizeGraphSnapshotEvent(raw: unknown): AgentEvent | null {
-  if (typeof raw !== "object" || raw === null || !("type" in raw) || raw.type !== "graph.snapshot") {
-    return null;
-  }
-  const candidate = "graph" in raw
-    ? raw.graph
-    : "payload" in raw &&
-        typeof raw.payload === "object" &&
-        raw.payload !== null &&
-        "graph" in raw.payload
-      ? raw.payload.graph
-      : undefined;
-  const graph = GraphSnapshotSchema.safeParse(candidate);
-  if (!graph.success) return null;
-  return { protocolVersion: PROTOCOL_VERSION, type: "graph.snapshot", graph: graph.data };
+export function canUseKeepaliveBody(body: string): boolean {
+  return new TextEncoder().encode(body).byteLength <= MAX_KEEPALIVE_BODY_BYTES;
 }
 
-function parseBootstrapPayload(raw: unknown): BootstrapPayload {
+export function parseServerEvent(raw: unknown): AgentEvent | null {
+  const parsed = ServerEventSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
   const record = requireRecord(raw, "bootstrap");
   if (record.protocolVersion !== PROTOCOL_VERSION) {
     throw new Error("El agente respondió con una versión de protocolo incompatible.");
@@ -345,6 +394,24 @@ function parseBootstrapPayload(raw: unknown): BootstrapPayload {
               : { evidence: EvidencePathSchema.parse(messageRecord.evidence) }),
           };
         });
+  const terminals =
+    record.terminals === undefined
+      ? []
+      : requireArray(record.terminals, "terminals").map((terminal) =>
+          TerminalSessionSchema.parse(terminal),
+        );
+  const activeAskTurnIds = requireArray(
+    record.activeAskTurnIds,
+    "activeAskTurnIds",
+  ).map((turnId, indexValue) =>
+    requireString(turnId, `activeAskTurnIds[${indexValue}]`),
+  );
+  if (record.activeActTask === undefined) {
+    throw new Error("Respuesta inválida del agente: activeActTask.");
+  }
+  const activeActTask = record.activeActTask === null
+    ? null
+    : ActTaskSchema.parse(record.activeActTask);
 
   const capabilities =
     record.capabilities === undefined
@@ -360,6 +427,9 @@ function parseBootstrapPayload(raw: unknown): BootstrapPayload {
     },
     graph,
     index,
+    activeAskTurnIds,
+    activeActTask,
+    terminals,
     ...(layout ? { layout } : {}),
     ...(conversation ? { conversation } : {}),
     ...(capabilities ? { capabilities } : {}),

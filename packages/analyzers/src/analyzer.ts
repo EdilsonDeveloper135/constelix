@@ -371,7 +371,7 @@ function visitNode(node: Parser.SyntaxNode, owner: OwnerContext, context: ParseC
       targetName: importSpecifier,
       evidence: evidenceFor(node, context.relativePath),
       role: "import",
-      confidence: importSpecifier.startsWith(".") ? "resolved" : "extracted"
+      confidence: "extracted"
     });
   }
 
@@ -514,7 +514,7 @@ function resolvePendingRelations(context: ParseContext): void {
     let confidence = pending.confidence ?? "ambiguous";
     if (pending.role !== "import" && candidates.length === 1 && candidates[0] !== undefined) {
       target = candidates[0];
-      confidence = "resolved";
+      confidence = "inferred";
     } else {
       target = makeExternalNode(context, pending.targetName, pending.role);
       if (pending.role === "import") confidence = pending.confidence ?? "extracted";
@@ -542,7 +542,7 @@ function resolvePendingExports(context: ParseContext): void {
         context.moduleNode.id,
         target.id,
         "exports",
-        candidates.length === 1 ? "resolved" : "ambiguous",
+        candidates.length === 1 ? "inferred" : "ambiguous",
         [pending.evidence],
         context.revision
       );
@@ -608,12 +608,12 @@ function resolveCrossFileRelations(
           typeScriptResolution,
         );
       }
-      if (resolved !== undefined) confidence = "resolved";
+      if (resolved !== undefined) confidence = "inferred";
     } else {
       const candidates = symbolsByName.get(simpleName(specifier) ?? specifier) ?? [];
       if (candidates.length === 1) {
         resolved = candidates[0];
-        confidence = "resolved";
+        confidence = "inferred";
       } else if (candidates.length > 1) {
         confidence = "ambiguous";
       }

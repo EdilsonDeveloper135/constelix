@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { opendir, readFile, realpath, stat } from "node:fs/promises";
 import { posix, relative, resolve, sep } from "node:path";
 import createIgnore, { type Ignore } from "ignore";
@@ -7,7 +8,9 @@ import { resolveExistingWorkspacePath } from "./security.js";
 
 export const MAX_WORKSPACE_FILES = 10_000;
 export const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+export const MAX_WORKSPACE_SOURCE_BYTES = 256 * 1024 * 1024;
 const MAX_TYPESCRIPT_CONFIG_BYTES = 1024 * 1024;
+const DEFAULT_PROGRESS_EVERY_FILES = 100;
 
 const DEFAULT_IGNORES = [
   ".git/",
@@ -56,8 +59,25 @@ export interface ScanResult {
   diagnostics: Array<{ relativePath?: string; message: string }>;
 }
 
+export interface ScanProgress {
+  files: readonly ScannedSource[];
+  skipped: number;
+  sourceBytes: number;
+  truncated: boolean;
+  complete: boolean;
+  diagnostics: ReadonlyArray<{ relativePath?: string; message: string }>;
+}
+
+export interface ScanWorkspaceOptions {
+  maxFiles?: number;
+  maxBytes?: number;
+  maxTotalBytes?: number;
+  progressEveryFiles?: number;
+  onProgress?: (progress: ScanProgress) => void;
+}
+
 export async function buildIgnoreMatcher(workspaceRoot: string): Promise<Ignore> {
-  const matcher = createIgnore().add(DEFAULT_IGNORES);
+  const matcher = createIgnore();
   for (const name of [".gitignore", ".constelixignore"]) {
     try {
       const path = await resolveExistingWorkspacePath(workspaceRoot, name);
@@ -66,6 +86,9 @@ export async function buildIgnoreMatcher(workspaceRoot: string): Promise<Ignore>
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
+  // System exclusions are appended last so repository negation rules cannot
+  // re-include dependency trees, generated output, or cache directories.
+  matcher.add(DEFAULT_IGNORES);
   return matcher;
 }
 
@@ -127,13 +150,34 @@ export function isSecretPath(relativePath: string): boolean {
 export async function scanWorkspace(
   workspaceId: string,
   workspaceRoot: string,
-  options: { maxFiles?: number; maxBytes?: number } = {},
+  options: ScanWorkspaceOptions = {},
 ): Promise<ScanResult> {
   const maxFiles = Math.min(Math.max(options.maxFiles ?? MAX_WORKSPACE_FILES, 1), MAX_WORKSPACE_FILES);
   const maxBytes = Math.min(Math.max(options.maxBytes ?? MAX_SOURCE_BYTES, 1), MAX_SOURCE_BYTES);
+  const maxTotalBytes = Math.min(
+    Math.max(options.maxTotalBytes ?? MAX_WORKSPACE_SOURCE_BYTES, 1),
+    MAX_WORKSPACE_SOURCE_BYTES,
+  );
+  const progressEveryFiles = Math.max(
+    1,
+    Math.trunc(options.progressEveryFiles ?? DEFAULT_PROGRESS_EVERY_FILES),
+  );
   const matcher = await buildIgnoreMatcher(workspaceRoot);
   const result: ScanResult = { files: [], skipped: 0, truncated: false, diagnostics: [] };
   const visitedDirectories = new Set<string>();
+  let sourceBytes = 0;
+
+  function publishProgress(complete: boolean): void {
+    if (!options.onProgress) return;
+    options.onProgress({
+      files: [...result.files],
+      skipped: result.skipped,
+      sourceBytes,
+      truncated: result.truncated,
+      complete,
+      diagnostics: [...result.diagnostics],
+    });
+  }
 
   async function walk(absoluteDirectory: string, relativeDirectory = ""): Promise<void> {
     if (result.truncated) return;
@@ -142,12 +186,11 @@ export async function scanWorkspace(
     visitedDirectories.add(canonicalDirectory);
 
     const directory = await opendir(absoluteDirectory);
-    for await (const entry of directory) {
-      if (result.files.length >= maxFiles) {
-        result.truncated = true;
-        result.diagnostics.push({ message: `Workspace scan stopped at the ${maxFiles} file limit.` });
-        break;
-      }
+    const entries: Dirent[] = [];
+    for await (const entry of directory) entries.push(entry);
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (result.truncated) break;
       const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
       const ignoreCandidate = entry.isDirectory() ? `${relativePath}/` : relativePath;
       if (matcher.ignores(ignoreCandidate) || isSecretPath(relativePath)) {
@@ -182,18 +225,41 @@ export async function scanWorkspace(
       result.skipped += 1;
       return;
     }
+    if (result.files.length >= maxFiles) {
+      result.skipped += 1;
+      result.truncated = true;
+      result.diagnostics.push({
+        relativePath,
+        message: `Workspace scan stopped at the ${maxFiles} file limit.`,
+      });
+      return;
+    }
     const info = await stat(absolutePath);
     if (info.size > maxBytes) {
       result.skipped += 1;
       result.diagnostics.push({ relativePath, message: `File exceeds the ${maxBytes} byte source limit.` });
       return;
     }
+    if (sourceBytes + info.size > maxTotalBytes) {
+      truncateForSourceBudget(relativePath);
+      return;
+    }
     const buffer = await readFile(absolutePath);
+    if (buffer.byteLength > maxBytes) {
+      result.skipped += 1;
+      result.diagnostics.push({ relativePath, message: `File exceeds the ${maxBytes} byte source limit.` });
+      return;
+    }
+    if (sourceBytes + buffer.byteLength > maxTotalBytes) {
+      truncateForSourceBudget(relativePath);
+      return;
+    }
     if (buffer.includes(0)) {
       result.skipped += 1;
       result.diagnostics.push({ relativePath, message: "Binary file was skipped." });
       return;
     }
+    sourceBytes += buffer.byteLength;
     result.files.push({
       workspaceId,
       relativePath,
@@ -204,10 +270,27 @@ export async function scanWorkspace(
       mtimeMs: info.mtimeMs,
       contentHash: createHash("sha256").update(buffer).digest("hex"),
     });
+    if (
+      result.files.length === 1 ||
+      result.files.length % progressEveryFiles === 0
+    ) {
+      publishProgress(false);
+    }
+  }
+
+  function truncateForSourceBudget(relativePath: string): void {
+    result.skipped += 1;
+    result.truncated = true;
+    result.diagnostics.push({
+      relativePath,
+      message:
+        `Workspace scan stopped at the ${maxTotalBytes} byte aggregate source-memory limit.`,
+    });
   }
 
   await walk(workspaceRoot);
   result.files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  if (options.onProgress) publishProgress(true);
   return result;
 }
 

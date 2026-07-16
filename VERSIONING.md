@@ -55,12 +55,13 @@ git tag -a vMAJOR.MINOR.PATCH -m "Constelix vMAJOR.MINOR.PATCH"
 
 ## 5. Versión actual
 
-`v0.0.1`
+`v0.0.2`
 
 ## 6. Historial
 
 | Versión | Fecha | Descripción |
 |---|---|---|
+| `v0.0.2` | 2026-07-16 | Cierre del hardening del MVP, recuperación de sesiones y validación completa del release. |
 | `v0.0.1` | 2026-07-16 | Hardening del runtime, sincronización incremental y flujos IA del MVP. |
 | `v0.0.0` | 2026-07-16 | Checkpoint inicial del MVP de Constelix. |
 

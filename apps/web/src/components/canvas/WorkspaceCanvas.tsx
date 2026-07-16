@@ -75,6 +75,7 @@ function CanvasInner() {
   const graphTruncated = useWorkspaceStore((state) => state.graphTruncated);
   const graphCursor = useWorkspaceStore((state) => state.graphCursor);
   const graphReconciling = useWorkspaceStore((state) => state.graphReconciling);
+  const loadNextGraphPage = useWorkspaceStore((state) => state.loadNextGraphPage);
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [locked, setLocked] = useState(false);
   const semanticNodeCount = useMemo(
@@ -248,9 +249,19 @@ function CanvasInner() {
       )}
       {graphTruncated ? (
         <div className="graph-partial-status" role="status">
-          Vista parcial: {visibleSemanticNodeCount.toLocaleString()} de {semanticNodeCount.toLocaleString()} nodos cargados
-          {semanticNodeCount > MAX_VISIBLE_SEMANTIC_NODES ? ` · límite visual ${MAX_VISIBLE_SEMANTIC_NODES}` : ""}
-          {graphCursor ? " · hay más resultados" : ""}
+          <span>
+            Vista parcial: {visibleSemanticNodeCount.toLocaleString()} de {semanticNodeCount.toLocaleString()} nodos cargados
+            {semanticNodeCount > MAX_VISIBLE_SEMANTIC_NODES ? ` · límite visual ${MAX_VISIBLE_SEMANTIC_NODES}` : ""}
+          </span>
+          {graphCursor ? (
+            <button
+              type="button"
+              disabled={graphReconciling}
+              onClick={() => void loadNextGraphPage()}
+            >
+              {graphReconciling ? "Cargando…" : "Siguiente lote"}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </main>

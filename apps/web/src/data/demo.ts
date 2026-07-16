@@ -57,6 +57,7 @@ const semantic = (
 ): SemanticFlowNode => ({
   id,
   type: "semantic",
+  ariaLabel: `${kind}: ${label}`,
   position: { x, y },
   data: {
     kind,
@@ -171,7 +172,7 @@ export const demoEdges: WorkspaceEdge[] = [
   edge("e-index-service", "file-agent-index", "service-agent", "calls"),
   edge("e-service-terminal", "service-agent", "module-terminal", "contains"),
   edge("e-service-indexer", "service-agent", "fn-indexer", "calls"),
-  edge("e-indexer-service", "fn-indexer", "service-agent", "calls", "resolved")
+  edge("e-indexer-service", "fn-indexer", "service-agent", "calls", "inferred")
 ];
 
 export const demoEvidencePath = {

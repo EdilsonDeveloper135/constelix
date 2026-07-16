@@ -45,7 +45,7 @@ export const GraphRelationSchema = z.enum([
   "calls"
 ]);
 
-export const GraphConfidenceSchema = z.enum(["extracted", "resolved", "ambiguous"]);
+export const GraphConfidenceSchema = z.enum(["extracted", "inferred", "ambiguous"]);
 
 export const GraphEvidenceSchema = z.object({
   relativePath: z.string().min(1),
@@ -130,6 +130,16 @@ export const PanelStateSchema = z.object({
   updatedAt: z.string().datetime()
 });
 
+export const LayoutWriteRequestSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  revision: z.number().int().nonnegative().optional(),
+  panels: z.array(PanelStateSchema).max(600)
+});
+
+export const ProtocolOnlyRequestSchema = z.object({
+  protocolVersion: ProtocolVersionSchema
+});
+
 export const FileReadRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
   relativePath: z.string().min(1)
@@ -208,7 +218,12 @@ export const AskStreamEventSchema = z.discriminatedUnion("type", [
     arguments: z.record(z.string(), z.unknown())
   }),
   AskStreamBaseSchema.extend({ type: z.literal("evidence"), path: EvidencePathSchema }),
-  AskStreamBaseSchema.extend({ type: z.literal("completed"), responseId: z.string().optional() }),
+  AskStreamBaseSchema.extend({
+    type: z.literal("completed"),
+    responseId: z.string().optional(),
+    answer: z.string(),
+    evidence: EvidencePathSchema.optional()
+  }),
   AskStreamBaseSchema.extend({ type: z.literal("error"), code: z.string(), message: z.string() })
 ]);
 
@@ -263,7 +278,18 @@ export const TerminalCreateRequestSchema = z.object({
   cwd: z.string().default("."),
   columns: z.number().int().min(2).max(1_000).default(120),
   rows: z.number().int().min(1).max(500).default(32),
-  shell: z.string().optional()
+  shell: z.string().optional(),
+  panelId: z.string().min(1).max(200).optional()
+});
+
+export const TerminalSessionSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  id: z.string().min(1),
+  panelId: z.string().min(1).max(200).optional(),
+  cwd: z.string().min(1),
+  shell: z.string().min(1),
+  createdAt: z.string().datetime(),
+  status: z.enum(["running", "exited"])
 });
 
 export const TerminalOutputChunkSchema = z.object({
@@ -286,13 +312,33 @@ const ServerEventBaseSchema = z.object({
 });
 
 export const ServerEventSchema = z.discriminatedUnion("type", [
+  ServerEventBaseSchema.extend({
+    type: z.literal("authenticated"),
+    payload: z.object({}).strict()
+  }),
+  ServerEventBaseSchema.extend({
+    type: z.literal("connection.ready"),
+    payload: z.object({}).strict()
+  }),
   ServerEventBaseSchema.extend({ type: z.literal("graph.delta"), payload: GraphDeltaSchema }),
+  ServerEventBaseSchema.extend({
+    type: z.literal("graph.snapshot"),
+    payload: z.object({
+      graph: GraphSnapshotSchema,
+      provisional: z.boolean()
+    })
+  }),
   ServerEventBaseSchema.extend({
     type: z.literal("index.progress"),
     payload: z.object({
       phase: z.enum(["scanning", "parsing", "resolving", "persisting", "ready", "error"]),
       completed: z.number().int().nonnegative(),
       total: z.number().int().nonnegative(),
+      revision: z.number().int().nonnegative(),
+      progress: z.number().min(0).max(1),
+      filesIndexed: z.number().int().nonnegative(),
+      symbolsIndexed: z.number().int().nonnegative(),
+      edgesIndexed: z.number().int().nonnegative(),
       message: z.string().optional()
     })
   }),
@@ -301,7 +347,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       terminalId: z.string().min(1),
       data: z.string(),
-      sequence: z.number().int().positive().optional()
+      sequence: z.number().int().positive()
     })
   }),
   ServerEventBaseSchema.extend({
@@ -309,6 +355,15 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     payload: z.object({ terminalId: z.string().min(1), exitCode: z.number().int().nullable(), signal: z.number().int().nullable() })
   }),
   ServerEventBaseSchema.extend({ type: z.literal("ask.event"), payload: AskStreamEventSchema }),
+  ServerEventBaseSchema.extend({
+    type: z.literal("capabilities.updated"),
+    payload: z.object({
+      act: z.boolean(),
+      checking: z.boolean(),
+      codexVersion: z.string().optional(),
+      codexReason: z.string().optional()
+    })
+  }),
   ServerEventBaseSchema.extend({
     type: z.literal("act.event"),
     payload: z.object({
@@ -323,6 +378,33 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     type: z.literal("error"),
     payload: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() })
   })
+]);
+
+export const WebSocketAuthenticationSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  type: z.literal("authenticate"),
+  token: z.string().min(1).max(512)
+}).strict();
+
+export const ClientEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    type: z.literal("terminal.input"),
+    terminalId: z.string().min(1),
+    data: z.string().max(256 * 1024)
+  }).strict(),
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    type: z.literal("terminal.resize"),
+    terminalId: z.string().min(1),
+    cols: z.number().int().min(2).max(1_000),
+    rows: z.number().int().min(1).max(500)
+  }).strict(),
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    type: z.literal("ask.cancel"),
+    turnId: z.string().min(1)
+  }).strict()
 ]);
 
 export type SourcePosition = z.infer<typeof SourcePositionSchema>;
@@ -340,6 +422,8 @@ export type GraphDirection = z.infer<typeof GraphDirectionSchema>;
 export type GraphQuery = z.infer<typeof GraphQuerySchema>;
 export type PanelKind = z.infer<typeof PanelKindSchema>;
 export type PanelState = z.infer<typeof PanelStateSchema>;
+export type LayoutWriteRequest = z.infer<typeof LayoutWriteRequestSchema>;
+export type ProtocolOnlyRequest = z.infer<typeof ProtocolOnlyRequestSchema>;
 export type FileReadRequest = z.infer<typeof FileReadRequestSchema>;
 export type FileReadResponse = z.infer<typeof FileReadResponseSchema>;
 export type FileWriteRequest = z.infer<typeof FileWriteRequestSchema>;
@@ -355,9 +439,12 @@ export type ActTask = z.infer<typeof ActTaskSchema>;
 export type ActTaskRequest = z.infer<typeof ActTaskRequestSchema>;
 export type ActApproveRequest = z.infer<typeof ActApproveRequestSchema>;
 export type TerminalCreateRequest = z.infer<typeof TerminalCreateRequestSchema>;
+export type TerminalSession = z.infer<typeof TerminalSessionSchema>;
 export type TerminalOutputChunk = z.infer<typeof TerminalOutputChunkSchema>;
 export type TerminalOutputSnapshot = z.infer<typeof TerminalOutputSnapshotSchema>;
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
+export type WebSocketAuthentication = z.infer<typeof WebSocketAuthenticationSchema>;
+export type ClientEvent = z.infer<typeof ClientEventSchema>;
 
 const CLEAR_SECRET_PATTERNS = [
   /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|$)/g,

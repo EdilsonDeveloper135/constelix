@@ -103,7 +103,14 @@ export async function writeWorkspaceTextFile(
   try {
     await writeFile(temporary, contentBuffer, { mode: currentMode ?? 0o600, flag: "wx" });
     if (currentMode !== undefined) await chmod(temporary, currentMode);
-    await rename(temporary, target);
+    const revalidatedTarget = await resolveWritableWorkspacePath(
+      workspaceRoot,
+      request.relativePath,
+    );
+    if (revalidatedTarget !== target) {
+      throw new Error("The target path changed while the file was being saved.");
+    }
+    await rename(temporary, revalidatedTarget);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;

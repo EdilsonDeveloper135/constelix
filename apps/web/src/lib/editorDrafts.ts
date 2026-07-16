@@ -44,6 +44,18 @@ export function updateEditorDraft(
   return next;
 }
 
+export function markEditorDraftPersisted(
+  relativePath: string,
+  savedContent: string,
+  contentHash: string,
+): EditorDraft {
+  return updateEditorDraft(relativePath, {
+    savedContent,
+    contentHash,
+    status: "saved",
+  });
+}
+
 export function editorDraftIsDirty(relativePath: string): boolean {
   const draft = drafts.get(relativePath);
   return draft ? draft.content !== draft.savedContent : false;

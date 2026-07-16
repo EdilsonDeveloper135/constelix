@@ -10,6 +10,7 @@ import {
   AskContextBudgetError,
   DEFAULT_ASK_MODEL,
   MAX_ASK_GRAPH_NODES,
+  OpenAIUnavailableError,
   type AIProvider,
   type GraphFacade,
   compactAskContextSegments,
@@ -35,6 +36,13 @@ describe("normalizeOpenAIError", () => {
     expect(normalizeOpenAIError({ code: "invalid_api_key", status: 401, message: "bad sk-secret" })).toEqual({
       code: "INVALID_API_KEY",
       message: "OpenAI rechazó la clave configurada. Revisa OPENAI_API_KEY en el agente local."
+    });
+  });
+
+  it("classifies an unavailable network without exposing transport details", () => {
+    expect(normalizeOpenAIError(new TypeError("fetch failed"))).toEqual({
+      code: "NETWORK_UNAVAILABLE",
+      message: "No se pudo conectar con OpenAI. Revisa la conexión de red y vuelve a intentarlo.",
     });
   });
 });
@@ -118,6 +126,29 @@ describe("Ask context budget", () => {
 });
 
 describe("AskService provider integration", () => {
+  it("stays disabled and rejects turns when no API key is configured", () => {
+    const database = new ConstelixDatabase(":memory:");
+    const events = new EventBus();
+    const ask = new AskService(
+      "workspace",
+      "/tmp/workspace",
+      createGraphFacade([]),
+      database,
+      events,
+      { apiKey: "" },
+    );
+    try {
+      expect(ask.available).toBe(false);
+      expect(() => ask.startTurn("thread", "Explain the project")).toThrow(
+        OpenAIUnavailableError,
+      );
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
+
   it("streams through an injected provider and publishes only a validated evidence path", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-ask-"));
     const source = graphNode("source", "src/source.ts");
@@ -138,7 +169,12 @@ describe("AskService provider integration", () => {
             type: "function_call",
             call_id: "path-call",
             name: "shortest_path",
-            arguments: JSON.stringify({ source: source.id, target: target.id, maxDepth: 8 }),
+            arguments: JSON.stringify({
+              source: source.id,
+              target: target.id,
+              maxDepth: 8,
+              useForAnswer: true,
+            }),
           }],
         },
       }],
@@ -160,8 +196,14 @@ describe("AskService provider integration", () => {
           isRecord(event.payload) &&
           event.payload.type === "completed",
       );
-      fixture.ask.startTurn("thread-1", "Trace the relationship", "request-1", [source.id]);
-      await completed;
+      const turn = fixture.ask.startTurn(
+        "thread-1",
+        "Trace the relationship",
+        "request-1",
+        [source.id],
+      );
+      expect(fixture.ask.activeTurnIds).toContain(turn.turnId);
+      const completedEvent = await completed;
 
       expect(provider.requests).toHaveLength(2);
       expect(provider.requests[0]).toMatchObject({
@@ -183,8 +225,105 @@ describe("AskService provider integration", () => {
         content: "Source reaches target.",
         evidence: path,
       });
+      expect(completedEvent.payload).toMatchObject({
+        type: "completed",
+        answer: "Source reaches target.",
+        evidence: path,
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fixture.ask.activeTurnIds).not.toContain(turn.turnId);
     } finally {
       unsubscribe();
+      fixture.ask.close();
+      fixture.events.close();
+      fixture.database.close();
+    }
+  });
+
+  it("animates only the path explicitly selected for the final answer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-evidence-selection-"));
+    const source = graphNode("source", "src/source.ts");
+    const firstTarget = graphNode("first-target", "src/first-target.ts");
+    const secondTarget = graphNode("second-target", "src/second-target.ts");
+    const selectedPath = {
+      protocolVersion: 1 as const,
+      nodeIds: [source.id, firstTarget.id],
+      edgeIds: ["edge-selected"],
+      evidence: [],
+      complete: true,
+    };
+    const exploratoryPath = {
+      protocolVersion: 1 as const,
+      nodeIds: [source.id, secondTarget.id],
+      edgeIds: ["edge-exploratory"],
+      evidence: [],
+      complete: true,
+    };
+    const provider = new ScriptedProvider([
+      [{
+        type: "response.completed",
+        response: {
+          output: [
+            {
+              type: "function_call",
+              call_id: "selected-path",
+              name: "shortest_path",
+              arguments: JSON.stringify({
+                source: source.id,
+                target: firstTarget.id,
+                maxDepth: 8,
+                useForAnswer: true,
+              }),
+            },
+            {
+              type: "function_call",
+              call_id: "exploratory-path",
+              name: "shortest_path",
+              arguments: JSON.stringify({
+                source: source.id,
+                target: secondTarget.id,
+                maxDepth: 8,
+                useForAnswer: false,
+              }),
+            },
+          ],
+        },
+      }],
+      [
+        { type: "response.output_text.delta", delta: "The first path supports the answer." },
+        { type: "response.completed", response: { output: [] } },
+      ],
+    ]);
+    const paths = [selectedPath, exploratoryPath];
+    const graph: GraphFacade = {
+      ...createGraphFacade([source, firstTarget, secondTarget]),
+      shortestPath: () => paths.shift() ?? null,
+    };
+    const fixture = createAskFixture(root, graph, provider);
+
+    try {
+      const completed = waitForEvent(
+        fixture.events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+      fixture.ask.startTurn(
+        "thread-evidence-selection",
+        "Use the first verified path.",
+        "request-evidence-selection",
+      );
+      const event = await completed;
+
+      expect(event.payload).toMatchObject({
+        type: "completed",
+        evidence: selectedPath,
+      });
+      expect(
+        fixture.database.loadAiMessages("thread-evidence-selection").at(-1),
+      ).toMatchObject({ evidence: selectedPath });
+    } finally {
       fixture.ask.close();
       fixture.events.close();
       fixture.database.close();
@@ -267,7 +406,12 @@ describe("AskService provider integration", () => {
             type: "function_call",
             call_id: "missing-path",
             name: "shortest_path",
-            arguments: JSON.stringify({ source: source.id, target: target.id, maxDepth: 8 }),
+            arguments: JSON.stringify({
+              source: source.id,
+              target: target.id,
+              maxDepth: 8,
+              useForAnswer: false,
+            }),
           }],
         },
       }],

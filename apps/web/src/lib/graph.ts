@@ -36,6 +36,7 @@ export function graphRecordsToFlowNodes(records: GraphNode[]): WorkspaceNode[] {
     return {
       id: record.id,
       type: "semantic" as const,
+      ariaLabel: `${kindMap[record.kind]}: ${record.name}`,
       position: { x: 130 + column * 190, y: 60 + row * 90 },
       data: {
         kind: kindMap[record.kind],
@@ -46,7 +47,8 @@ export function graphRecordsToFlowNodes(records: GraphNode[]): WorkspaceNode[] {
             ? { detail: record.language }
             : {}),
         ...(record.relativePath ? { relativePath: record.relativePath } : {}),
-        ...(record.language ? { language: record.language } : {})
+        ...(record.language ? { language: record.language } : {}),
+        ...(record.range ? { range: record.range } : {}),
       }
     };
   });

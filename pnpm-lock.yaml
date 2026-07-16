@@ -33,7 +33,7 @@ importers:
         specifier: ^11.3.0
         version: 11.3.0
       better-sqlite3:
-        specifier: ^12.11.1
+        specifier: 12.11.1
         version: 12.11.1
       chokidar:
         specifier: ^4.0.3
@@ -51,7 +51,7 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       node-pty:
-        specifier: ^1.1.0
+        specifier: 1.1.0
         version: 1.1.0
       openai:
         specifier: ^6.47.0

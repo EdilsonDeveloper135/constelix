@@ -25,7 +25,7 @@ function edge(source: GraphNode, target: GraphNode, relation: GraphEdge["relatio
     source: source.id,
     target: target.id,
     relation,
-    confidence: "resolved",
+    confidence: "inferred",
     evidence: [],
     revision: 1,
     metadata: {}
@@ -115,6 +115,99 @@ describe("InMemoryGraphStore", () => {
     expect(second.nodes[0]?.id).toBe(root.id);
     expect(first.edges).toHaveLength(1);
     expect(second.edges).toHaveLength(1);
+  });
+
+  it("pages the complete graph when no roots or filters are supplied", () => {
+    const store = new InMemoryGraphStore(snapshot());
+    const first = store.query({
+      protocolVersion: PROTOCOL_VERSION,
+      rootIds: [],
+      direction: "outbound",
+      relations: [],
+      nodeKinds: [],
+      depth: 12,
+      limit: 2,
+    });
+    const second = store.query({
+      protocolVersion: PROTOCOL_VERSION,
+      rootIds: [],
+      direction: "outbound",
+      relations: [],
+      nodeKinds: [],
+      depth: 12,
+      limit: 2,
+      cursor: first.cursor,
+    });
+
+    expect(first.nodes).toHaveLength(2);
+    expect(first.truncated).toBe(true);
+    expect(second.nodes).toHaveLength(2);
+    expect(new Set([...first.nodes, ...second.nodes].map((node) => node.id)).size).toBe(4);
+    expect(
+      second.edges.some((item) => {
+        const firstPageIds = new Set(first.nodes.map((node) => node.id));
+        const secondPageIds = new Set(second.nodes.map((node) => node.id));
+        return (
+          (firstPageIds.has(item.source) && secondPageIds.has(item.target)) ||
+          (firstPageIds.has(item.target) && secondPageIds.has(item.source))
+        );
+      }),
+    ).toBe(true);
+  });
+
+  it("preserves source truncation through snapshots, queries and deltas", () => {
+    const source = { ...snapshot(1), truncated: true };
+    const store = new InMemoryGraphStore(source);
+
+    const first = store.snapshot(2);
+    const last = store.snapshot(2, first.cursor);
+    expect(first).toMatchObject({ truncated: true, cursor: "v1:2" });
+    expect(last.truncated).toBe(true);
+    expect(last.cursor).toBeUndefined();
+
+    const firstQueryPage = store.query({
+      protocolVersion: PROTOCOL_VERSION,
+      rootIds: [],
+      direction: "outbound",
+      relations: [],
+      nodeKinds: [],
+      depth: 4,
+      limit: 2,
+    });
+    const lastQueryPage = store.query({
+      protocolVersion: PROTOCOL_VERSION,
+      rootIds: [],
+      direction: "outbound",
+      relations: [],
+      nodeKinds: [],
+      depth: 4,
+      limit: 2,
+      cursor: firstQueryPage.cursor,
+    });
+    expect(lastQueryPage.truncated).toBe(true);
+    expect(lastQueryPage.cursor).toBeUndefined();
+
+    const root = source.nodes.find((item) => item.kind === "project")!;
+    const query = store.query({
+      protocolVersion: PROTOCOL_VERSION,
+      rootIds: [root.id],
+      direction: "outbound",
+      relations: [],
+      nodeKinds: [],
+      depth: 4,
+      limit: 500,
+    });
+    expect(query.truncated).toBe(true);
+    expect(query.cursor).toBeUndefined();
+
+    store.applyDelta(diffSnapshots(source, { ...snapshot(2), truncated: true }));
+    expect(store.snapshot(500)).toMatchObject({
+      revision: 2,
+      truncated: true,
+    });
+
+    store.replace(snapshot(3));
+    expect(store.snapshot(500).truncated).toBe(false);
   });
 
   it("returns evidence in shortest-path order", () => {

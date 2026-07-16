@@ -31,7 +31,7 @@ describe("Tree-sitter analysis", () => {
     const relations = new Set(result.snapshot.edges.map((edge) => edge.relation));
     expect(kinds).toEqual(expect.objectContaining(new Set(["file", "module", "interface", "class", "method", "function", "external"])));
     expect(relations).toEqual(expect.objectContaining(new Set(["contains", "imports", "exports", "extends", "implements", "calls"])));
-    expect(result.snapshot.edges.find((edge) => edge.relation === "calls" && edge.confidence === "resolved")).toBeDefined();
+    expect(result.snapshot.edges.find((edge) => edge.relation === "calls" && edge.confidence === "inferred")).toBeDefined();
   });
 
   it("extracts Python classes, methods and calls while tolerating syntax errors", () => {
@@ -63,7 +63,7 @@ def helper():
     expect(result.snapshot.nodes.some((node) => node.kind === "project" && node.name === "demo")).toBe(true);
     expect(result.snapshot.nodes.some((node) => node.kind === "folder" && node.relativePath === "src")).toBe(true);
     const importEdge = result.snapshot.edges.find((edge) => edge.relation === "imports");
-    expect(importEdge?.confidence).toBe("resolved");
+    expect(importEdge?.confidence).toBe("inferred");
     expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)?.kind).toBe("module");
   });
 
@@ -74,7 +74,7 @@ def helper():
     ], { workspaceId: "fixture", projectName: "demo" });
 
     const importEdge = result.snapshot.edges.find((edge) => edge.relation === "imports");
-    expect(importEdge?.confidence).toBe("resolved");
+    expect(importEdge?.confidence).toBe("inferred");
     expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)?.qualifiedName).toBe("pkg.service");
   });
 
@@ -103,11 +103,77 @@ def helper():
     const importEdge = result.snapshot.edges.find(
       (edge) => edge.source === apiModule?.id && edge.relation === "imports",
     );
-    expect(importEdge?.confidence).toBe("resolved");
+    expect(importEdge?.confidence).toBe("inferred");
     expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)).toMatchObject({
       kind: "module",
       relativePath: "src/services/service.ts",
     });
+  });
+
+  it("resolves a CommonJS require call to an internal module", () => {
+    const result = analyzeFiles([
+      {
+        relativePath: "src/api.cjs",
+        source: `const service = require("./service.cjs"); module.exports.run = () => service();`,
+      },
+      {
+        relativePath: "src/service.cjs",
+        source: `module.exports = function service() { return 1; };`,
+      },
+    ], { workspaceId: "fixture", projectName: "demo" });
+
+    const apiModule = result.snapshot.nodes.find(
+      (node) => node.kind === "module" && node.relativePath === "src/api.cjs",
+    );
+    const importEdge = result.snapshot.edges.find(
+      (edge) => edge.source === apiModule?.id && edge.relation === "imports",
+    );
+    expect(importEdge?.confidence).toBe("inferred");
+    expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)).toMatchObject({
+      kind: "module",
+      relativePath: "src/service.cjs",
+    });
+  });
+
+  it("marks Python inheritance as inferred and duplicate call targets as ambiguous", () => {
+    const result = analyzeFiles([
+      {
+        relativePath: "pkg/base.py",
+        source: "class Base:\n    pass\n",
+      },
+      {
+        relativePath: "pkg/one.py",
+        source: "def helper():\n    return 1\n",
+      },
+      {
+        relativePath: "pkg/two.py",
+        source: "def helper():\n    return 2\n",
+      },
+      {
+        relativePath: "pkg/service.py",
+        source: "from .base import Base\nclass Service(Base):\n    def run(self):\n        return helper()\n",
+      },
+    ], { workspaceId: "fixture", projectName: "demo" });
+
+    const service = result.snapshot.nodes.find(
+      (node) => node.kind === "class" && node.name === "Service",
+    );
+    expect(
+      result.snapshot.edges.find(
+        (edge) =>
+          edge.source === service?.id &&
+          edge.relation === "extends" &&
+          edge.confidence === "inferred",
+      ),
+    ).toBeDefined();
+    expect(
+      result.snapshot.edges.find(
+        (edge) =>
+          edge.relation === "calls" &&
+          edge.confidence === "ambiguous" &&
+          result.snapshot.nodes.find((node) => node.id === edge.target)?.name === "helper",
+      ),
+    ).toBeDefined();
   });
 
   it("extracts every module in a Python multi-import", () => {
@@ -122,6 +188,18 @@ def helper():
       .map((edge) => result.snapshot.nodes.find((node) => node.id === edge.target)?.qualifiedName)
       .sort();
     expect(imported).toEqual(["pkg.one", "pkg.two"]);
+  });
+
+  it("keeps an unresolved relative import as extracted evidence", () => {
+    const result = analyzeSource({
+      workspaceId: "fixture",
+      relativePath: "src/api.ts",
+      source: `import { missing } from "./missing"; export const api = missing;`,
+    });
+
+    const importEdge = result.snapshot.edges.find((edge) => edge.relation === "imports");
+    expect(importEdge?.confidence).toBe("extracted");
+    expect(result.snapshot.nodes.find((node) => node.id === importEdge?.target)?.kind).toBe("external");
   });
 
   it("produces stable IDs across repeated analysis", () => {

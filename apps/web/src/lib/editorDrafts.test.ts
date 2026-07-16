@@ -5,6 +5,7 @@ import {
   editorDraftIsDirty,
   getEditorDraft,
   getOrCreateEditorDraft,
+  markEditorDraftPersisted,
   updateEditorDraft,
 } from "./editorDrafts";
 
@@ -43,6 +44,27 @@ describe("editor draft lifecycle", () => {
     });
     updateEditorDraft("src/main.ts", { status: "conflict" });
     expect(getEditorDraft("src/main.ts")?.status).toBe("conflict");
+    expect(editorDraftIsDirty("src/main.ts")).toBe(true);
+  });
+
+  it("does not mark edits made during an in-flight save as persisted", () => {
+    getOrCreateEditorDraft("src/main.ts", {
+      content: "sent to disk",
+      savedContent: "original",
+      contentHash: "hash-1",
+      language: "typescript",
+      loaded: true,
+      status: "saving",
+    });
+    updateEditorDraft("src/main.ts", { content: "typed while saving" });
+
+    markEditorDraftPersisted("src/main.ts", "sent to disk", "hash-2");
+
+    expect(getEditorDraft("src/main.ts")).toMatchObject({
+      content: "typed while saving",
+      savedContent: "sent to disk",
+      contentHash: "hash-2",
+    });
     expect(editorDraftIsDirty("src/main.ts")).toBe(true);
   });
 });
