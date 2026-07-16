@@ -1,0 +1,50 @@
+{
+  "name": "@constelix/agent",
+  "version": "0.0.0",
+  "description": "Local-first agent and CLI for the Constelix visual engineering workspace.",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "constelix": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "tsx watch --exclude \"**/node_modules/**\" src/cli.ts -- --dev",
+    "build": "tsup --config tsup.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.0",
+    "@fastify/websocket": "^11.3.0",
+    "better-sqlite3": "^12.11.1",
+    "chokidar": "^4.0.3",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "ignore": "^7.0.6",
+    "nanoid": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "openai": "^6.47.0",
+    "tree-sitter": "0.21.1",
+    "tree-sitter-javascript": "0.23.1",
+    "tree-sitter-python": "0.23.2",
+    "tree-sitter-typescript": "0.23.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@constelix/analyzers": "workspace:*",
+    "@constelix/contracts": "workspace:*",
+    "@constelix/graph-core": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "tsup": "^8.5.1"
+  }
+}

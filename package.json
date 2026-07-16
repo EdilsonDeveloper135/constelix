@@ -1,0 +1,32 @@
+{
+  "name": "constelix",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A local-first visual software engineering workspace.",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @constelix/agent --filter @constelix/web dev",
+    "dev:agent": "pnpm --filter @constelix/agent dev",
+    "dev:web": "pnpm --filter @constelix/web dev",
+    "build": "pnpm -r build && pnpm package:cli",
+    "package:cli": "tsx scripts/package-cli.ts",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "benchmark": "tsx scripts/run-benchmark.ts",
+    "benchmark:fixture": "tsx scripts/generate-benchmark.ts",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}
