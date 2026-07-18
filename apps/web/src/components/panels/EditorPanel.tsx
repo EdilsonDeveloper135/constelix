@@ -98,6 +98,7 @@ const demoFileTree: FileTreeItem[] = [
 
 function buildFileTree(
   nodes: WorkspaceNode[],
+  workspaceId: string,
   workspaceName: string,
   activePath: string,
 ): FileTreeItem[] {
@@ -132,7 +133,8 @@ function buildFileTree(
           relativePath: path,
           open: !leafIsFile,
           active: leafIsFile && path === activePath,
-          dirty: leafIsFile && editorDraftIsDirty(path),
+          dirty:
+            leafIsFile && editorDraftIsDirty(workspaceId, path),
         });
       }
     }
@@ -157,8 +159,12 @@ function languageFromPath(path: string): string {
   return "typescript";
 }
 
-function initialDraft(data: EditorFlowNode["data"], demoMode: boolean): EditorDraft {
-  return getOrCreateEditorDraft(data.relativePath, {
+function initialDraft(
+  workspaceId: string,
+  data: EditorFlowNode["data"],
+  demoMode: boolean,
+): EditorDraft {
+  return getOrCreateEditorDraft(workspaceId, data.relativePath, {
     content: data.preview,
     savedContent: data.preview,
     ...(data.contentHash ? { contentHash: data.contentHash } : {}),
@@ -175,13 +181,17 @@ export const EditorPanel = memo(function EditorPanel({
 }: NodeProps<EditorFlowNode>) {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const remoteHydrated = useWorkspaceStore((state) => state.remoteHydrated);
+  const workspaceId = useWorkspaceStore((state) => state.workspaceId);
+  const workspaceMode = useWorkspaceStore((state) => state.workspaceMode);
   const workspaceName = useWorkspaceStore((state) => state.workspaceName);
-  const workspaceNodes = useWorkspaceStore((state) => state.nodes);
+  const semanticVersion = useWorkspaceStore((state) => state.semanticVersion);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const updateEditorPanel = useWorkspaceStore(
     (state) => state.updateEditorPanel,
   );
-  const [draft, setDraft] = useState(() => initialDraft(data, demoMode));
+  const [draft, setDraft] = useState(() =>
+    initialDraft(workspaceId, data, demoMode),
+  );
   const pathRef = useRef(data.relativePath);
   const saveRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -191,33 +201,39 @@ export const EditorPanel = memo(function EditorPanel({
     () =>
       demoMode
         ? demoFileTree
-        : buildFileTree(workspaceNodes, workspaceName, data.relativePath),
+        : buildFileTree(
+            useWorkspaceStore.getState().nodes,
+            workspaceId,
+            workspaceName,
+            data.relativePath,
+          ),
     [
       data.relativePath,
       demoMode,
       draft.content,
       draft.savedContent,
+      semanticVersion,
+      workspaceId,
       workspaceName,
-      workspaceNodes,
     ],
   );
 
   const patchDraft = useCallback(
     (
       relativePath: string,
-      patch: Partial<Omit<EditorDraft, "relativePath">>,
+      patch: Partial<Omit<EditorDraft, "workspaceId" | "relativePath">>,
     ) => {
-      const next = updateEditorDraft(relativePath, patch);
+      const next = updateEditorDraft(workspaceId, relativePath, patch);
       if (pathRef.current === relativePath) setDraft(next);
       return next;
     },
-    [],
+    [workspaceId],
   );
 
   useEffect(() => {
     let active = true;
     const relativePath = data.relativePath;
-    const cached = initialDraft(data, demoMode);
+    const cached = initialDraft(workspaceId, data, demoMode);
     setDraft(cached);
 
     if (demoMode) return;
@@ -246,7 +262,12 @@ export const EditorPanel = memo(function EditorPanel({
         });
       })
       .catch(() => {
-        if (active) patchDraft(relativePath, { status: "error" });
+        if (active) {
+          patchDraft(relativePath, {
+            status: "error",
+            errorMessage: "No se pudo leer el archivo desde el agente local.",
+          });
+        }
       });
     return () => {
       active = false;
@@ -257,12 +278,20 @@ export const EditorPanel = memo(function EditorPanel({
     patchDraft,
     remoteHydrated,
     updateEditorPanel,
+    workspaceId,
   ]);
 
   const save = useCallback(async () => {
     const relativePath = pathRef.current;
-    const current = getEditorDraft(relativePath);
+    const current = getEditorDraft(workspaceId, relativePath);
     if (!current || current.status === "saving") return;
+    if (workspaceMode === "read") {
+      patchDraft(relativePath, {
+        status: "error",
+        errorMessage: "El workspace está abierto en Modo Lectura.",
+      });
+      return;
+    }
     if (demoMode) {
       patchDraft(relativePath, {
         savedContent: current.content,
@@ -271,7 +300,10 @@ export const EditorPanel = memo(function EditorPanel({
       return;
     }
     if (!current.contentHash) {
-      patchDraft(relativePath, { status: "error" });
+      patchDraft(relativePath, {
+        status: "error",
+        errorMessage: "No se puede guardar sin una versión base del archivo.",
+      });
       return;
     }
     patchDraft(relativePath, { status: "saving" });
@@ -281,8 +313,9 @@ export const EditorPanel = memo(function EditorPanel({
         current.content,
         current.contentHash,
       );
-      const latest = getEditorDraft(relativePath);
+      const latest = getEditorDraft(workspaceId, relativePath);
       const persisted = markEditorDraftPersisted(
+        workspaceId,
         relativePath,
         current.content,
         result.contentHash,
@@ -302,9 +335,17 @@ export const EditorPanel = memo(function EditorPanel({
           message.includes("conflict") || message.includes("hash")
             ? "conflict"
             : "error",
+        errorMessage:
+          error instanceof Error ? error.message : "No se pudo guardar.",
       });
     }
-  }, [demoMode, patchDraft, updateEditorPanel]);
+  }, [
+    demoMode,
+    patchDraft,
+    updateEditorPanel,
+    workspaceId,
+    workspaceMode,
+  ]);
   saveRef.current = save;
 
   const reloadFromDisk = useCallback(async () => {
@@ -328,14 +369,18 @@ export const EditorPanel = memo(function EditorPanel({
         language,
       });
     } catch {
-      patchDraft(relativePath, { status: "error" });
+      patchDraft(relativePath, {
+        status: "error",
+        errorMessage: "No se pudo recargar el archivo.",
+      });
     }
   }, [patchDraft, updateEditorPanel]);
 
   const overwriteDisk = useCallback(async () => {
     const relativePath = pathRef.current;
-    const current = getEditorDraft(relativePath);
+    const current = getEditorDraft(workspaceId, relativePath);
     if (!current) return;
+    if (workspaceMode === "read") return;
     patchDraft(relativePath, { status: "saving" });
     try {
       const disk = await apiClient.readFile(relativePath);
@@ -344,8 +389,9 @@ export const EditorPanel = memo(function EditorPanel({
         current.content,
         disk.contentHash,
       );
-      const latest = getEditorDraft(relativePath);
+      const latest = getEditorDraft(workspaceId, relativePath);
       const persisted = markEditorDraftPersisted(
+        workspaceId,
         relativePath,
         current.content,
         result.contentHash,
@@ -365,12 +411,21 @@ export const EditorPanel = memo(function EditorPanel({
           message.includes("conflict") || message.includes("hash")
             ? "conflict"
             : "error",
+        errorMessage:
+          error instanceof Error ? error.message : "No se pudo sobrescribir.",
       });
     }
-  }, [patchDraft, updateEditorPanel]);
+  }, [
+    patchDraft,
+    updateEditorPanel,
+    workspaceId,
+    workspaceMode,
+  ]);
 
   const statusLabel =
-    draft.status === "conflict"
+    workspaceMode === "read"
+      ? "Solo lectura"
+      : draft.status === "conflict"
       ? "Conflicto externo"
       : draft.status === "error"
         ? "Sin conexión"
@@ -402,7 +457,12 @@ export const EditorPanel = memo(function EditorPanel({
             type="button"
             aria-label="Guardar archivo"
             onClick={() => void save()}
-            disabled={!dirty || draft.status === "loading" || draft.status === "saving"}
+            disabled={
+              workspaceMode === "read" ||
+              !dirty ||
+              draft.status === "loading" ||
+              draft.status === "saving"
+            }
           >
             <Save aria-hidden="true" size={13} />
           </button>
@@ -434,14 +494,21 @@ export const EditorPanel = memo(function EditorPanel({
             <button type="button" onClick={() => void reloadFromDisk()}>
               <RefreshCcw aria-hidden="true" size={12} /> Recargar disco
             </button>
-            <button
-              className="editor-conflict-overwrite"
-              type="button"
-              onClick={() => void overwriteDisk()}
-            >
-              <Upload aria-hidden="true" size={12} /> Sobrescribir
-            </button>
+            {workspaceMode === "edit" ? (
+              <button
+                className="editor-conflict-overwrite"
+                type="button"
+                onClick={() => void overwriteDisk()}
+              >
+                <Upload aria-hidden="true" size={12} /> Sobrescribir
+              </button>
+            ) : null}
           </div>
+        </div>
+      ) : null}
+      {draft.status === "error" && draft.errorMessage ? (
+        <div className="editor-operation-error" role="alert">
+          {draft.errorMessage}
         </div>
       ) : null}
       <div className="editor-workspace" data-testid="editor-panel">
@@ -502,8 +569,8 @@ export const EditorPanel = memo(function EditorPanel({
             }
           >
             <MonacoEditor
-              key={`${data.relativePath}:${data.revealLine ?? 0}`}
-              path={`file:///${data.relativePath}`}
+              key={`${workspaceId}:${data.relativePath}:${data.revealLine ?? 0}`}
+              path={`constelix://${workspaceId}/${encodeURI(data.relativePath)}`}
               language={draft.language || languageFromPath(data.relativePath)}
               value={draft.content}
               onChange={(value) => {
@@ -558,7 +625,14 @@ export const EditorPanel = memo(function EditorPanel({
                 lineHeight: 20,
                 minimap: { enabled: false },
                 padding: { top: 10 },
-                readOnly: draft.status === "loading",
+                readOnly:
+                  workspaceMode === "read" || draft.status === "loading",
+                readOnlyMessage: {
+                  value:
+                    workspaceMode === "read"
+                      ? "Constelix abrió este workspace en Modo Lectura."
+                      : "El archivo todavía está cargando.",
+                },
                 renderLineHighlight: "all",
                 scrollBeyondLastLine: false,
                 smoothScrolling: true,

@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { access, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 
 const SENSITIVE_PATH_PATTERNS = [
   /(?:^|\/)\.env(?:\..+)?$/i,
@@ -55,18 +57,184 @@ export class PathSecurityError extends Error {
   }
 }
 
-export async function canonicalizeWorkspace(inputPath: string): Promise<string> {
+export class WorkspaceValidationError extends Error {
+  constructor(
+    readonly code:
+      | "WORKSPACE_NOT_FOUND"
+      | "WORKSPACE_NOT_DIRECTORY"
+      | "WORKSPACE_PERMISSION_DENIED"
+      | "WORKSPACE_VALIDATION_FAILED",
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkspaceValidationError";
+  }
+}
+
+export class WorkspaceIdentityError extends Error {
+  readonly code = "WORKSPACE_ROOT_CHANGED";
+
+  constructor() {
+    super("La raíz del workspace cambió durante la ejecución. Constelix detuvo el acceso.");
+    this.name = "WorkspaceIdentityError";
+  }
+}
+
+export class WorkspaceReadOnlyError extends Error {
+  readonly code = "WORKSPACE_READ_ONLY";
+
+  constructor() {
+    super("El workspace está abierto en Modo Lectura.");
+    this.name = "WorkspaceReadOnlyError";
+  }
+}
+
+export interface WorkspaceIdentity {
+  dev: number;
+  ino: number;
+}
+
+export interface WorkspaceDescriptor {
+  canonicalRoot: string;
+  workspaceId: string;
+  mode: "read" | "edit";
+  readOnly: boolean;
+  identity: WorkspaceIdentity;
+}
+
+export interface InspectWorkspaceOptions {
+  forceReadOnly?: boolean | undefined;
+}
+
+export type WorkspaceReference = string | WorkspaceDescriptor;
+
+export async function inspectWorkspace(
+  inputPath: string,
+  options: InspectWorkspaceOptions = {},
+): Promise<WorkspaceDescriptor> {
   if (inputPath.includes("\0")) {
     throw new PathSecurityError("Workspace paths cannot contain NUL bytes.");
   }
 
-  const canonical = await realpath(resolve(inputPath));
-  const stats = await lstat(canonical);
-  if (!stats.isDirectory()) {
-    throw new PathSecurityError("The workspace path must be a directory.");
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await realpath(resolve(inputPath));
+  } catch (error) {
+    throw mapWorkspaceValidationError(error);
   }
-  await access(canonical, constants.R_OK);
-  return canonical;
+
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(canonicalRoot);
+  } catch (error) {
+    throw mapWorkspaceValidationError(error);
+  }
+  if (!info.isDirectory()) {
+    throw new WorkspaceValidationError(
+      "WORKSPACE_NOT_DIRECTORY",
+      "La ruta del workspace debe ser un directorio.",
+    );
+  }
+
+  try {
+    await access(canonicalRoot, constants.R_OK);
+  } catch {
+    throw new WorkspaceValidationError(
+      "WORKSPACE_PERMISSION_DENIED",
+      "Constelix no tiene permisos de lectura sobre el workspace.",
+    );
+  }
+
+  let writable = true;
+  try {
+    await access(canonicalRoot, constants.W_OK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM" && code !== "EROFS") {
+      throw mapWorkspaceValidationError(error);
+    }
+    writable = false;
+  }
+  const readOnly = options.forceReadOnly === true || !writable;
+
+  return {
+    canonicalRoot,
+    workspaceId: createWorkspaceId(canonicalRoot),
+    mode: readOnly ? "read" : "edit",
+    readOnly,
+    identity: { dev: info.dev, ino: info.ino },
+  };
+}
+
+export async function canonicalizeWorkspace(inputPath: string): Promise<string> {
+  return (await inspectWorkspace(inputPath)).canonicalRoot;
+}
+
+export function createWorkspaceId(canonicalRoot: string): string {
+  return createHash("sha256").update(canonicalRoot).digest("hex").slice(0, 24);
+}
+
+export async function assertWorkspaceIdentity(
+  workspace: WorkspaceDescriptor,
+): Promise<void> {
+  try {
+    const canonicalRoot = await realpath(workspace.canonicalRoot);
+    if (canonicalRoot !== workspace.canonicalRoot) throw new WorkspaceIdentityError();
+    const info = await stat(canonicalRoot);
+    if (
+      !info.isDirectory() ||
+      info.dev !== workspace.identity.dev ||
+      info.ino !== workspace.identity.ino
+    ) {
+      throw new WorkspaceIdentityError();
+    }
+    await access(canonicalRoot, constants.R_OK);
+  } catch (error) {
+    if (error instanceof WorkspaceIdentityError) throw error;
+    throw new WorkspaceIdentityError();
+  }
+}
+
+export async function assertWorkspaceReferenceIdentity(
+  workspace: WorkspaceReference,
+): Promise<void> {
+  if (typeof workspace !== "string") {
+    await assertWorkspaceIdentity(workspace);
+  }
+}
+
+export function assertWorkspaceWritable(workspace: WorkspaceReference): void {
+  if (typeof workspace !== "string" && workspace.readOnly) {
+    throw new WorkspaceReadOnlyError();
+  }
+}
+
+export function workspaceRootOf(workspace: WorkspaceReference): string {
+  return typeof workspace === "string" ? workspace : workspace.canonicalRoot;
+}
+
+export function summarizeWorkspacePath(
+  canonicalRoot: string,
+  userHome = homedir(),
+): string {
+  if (canonicalRoot === userHome) return "~";
+  const name = basename(canonicalRoot) || "workspace";
+  return isPathWithin(userHome, canonicalRoot) ? `~/…/${name}` : `…/${name}`;
+}
+
+export function redactLocalPaths(
+  value: string,
+  workspaceRoot?: string,
+  userHome = homedir(),
+): string {
+  let redacted = value;
+  for (const alias of localPathAliases(workspaceRoot)) {
+    redacted = replaceAllLiteral(redacted, alias, "<workspace>");
+  }
+  for (const alias of localPathAliases(userHome)) {
+    redacted = replaceAllLiteral(redacted, alias, "~");
+  }
+  return redacted;
 }
 
 export function normalizeRelativePath(inputPath: string): string {
@@ -103,10 +271,10 @@ function assertContained(workspaceRoot: string, candidate: string): void {
  * workspace. API consumers must only expose the returned canonical path.
  */
 export async function resolveExistingWorkspacePath(
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
   relativePath: string,
 ): Promise<string> {
-  const canonicalRoot = await realpath(workspaceRoot);
+  const canonicalRoot = await canonicalWorkspaceRoot(workspace);
   const normalized = normalizeRelativePath(relativePath);
   const candidate = resolve(canonicalRoot, normalized);
   assertContained(canonicalRoot, candidate);
@@ -120,10 +288,11 @@ export async function resolveExistingWorkspacePath(
  * stay inside the workspace, preventing writes through escaping symlinks.
  */
 export async function resolveWritableWorkspacePath(
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
   relativePath: string,
 ): Promise<string> {
-  const canonicalRoot = await realpath(workspaceRoot);
+  assertWorkspaceWritable(workspace);
+  const canonicalRoot = await canonicalWorkspaceRoot(workspace);
   const normalized = normalizeRelativePath(relativePath);
   if (normalized === ".") {
     throw new PathSecurityError("The workspace root cannot be written as a file.");
@@ -212,4 +381,64 @@ export function createSafeChildEnvironment(
     if (permitted.has(key) && value !== undefined) result[key] = value;
   }
   return result;
+}
+
+async function canonicalWorkspaceRoot(workspace: WorkspaceReference): Promise<string> {
+  if (typeof workspace === "string") return realpath(workspace);
+  await assertWorkspaceIdentity(workspace);
+  return workspace.canonicalRoot;
+}
+
+function mapWorkspaceValidationError(error: unknown): WorkspaceValidationError {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") {
+    return new WorkspaceValidationError(
+      "WORKSPACE_NOT_FOUND",
+      "La ruta del workspace no existe.",
+    );
+  }
+  if (code === "ENOTDIR") {
+    return new WorkspaceValidationError(
+      "WORKSPACE_NOT_DIRECTORY",
+      "La ruta del workspace debe ser un directorio.",
+    );
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return new WorkspaceValidationError(
+      "WORKSPACE_PERMISSION_DENIED",
+      "Constelix no tiene permisos para abrir el workspace.",
+    );
+  }
+  return new WorkspaceValidationError(
+    "WORKSPACE_VALIDATION_FAILED",
+    "Constelix no pudo validar el workspace.",
+  );
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return (
+    fromRoot === "" ||
+    (!isAbsolute(fromRoot) && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`))
+  );
+}
+
+function replaceAllLiteral(value: string, search: string, replacement: string): string {
+  return search ? value.split(search).join(replacement) : value;
+}
+
+function localPathAliases(path: string | undefined): string[] {
+  if (!path) return [];
+  const aliases = new Set([path]);
+  if (path === "/private/var" || path.startsWith("/private/var/")) {
+    aliases.add(path.slice("/private".length));
+  } else if (path === "/var" || path.startsWith("/var/")) {
+    aliases.add(`/private${path}`);
+  }
+  if (path === "/private/tmp" || path.startsWith("/private/tmp/")) {
+    aliases.add(path.slice("/private".length));
+  } else if (path === "/tmp" || path.startsWith("/tmp/")) {
+    aliases.add(`/private${path}`);
+  }
+  return [...aliases].sort((left, right) => right.length - left.length);
 }

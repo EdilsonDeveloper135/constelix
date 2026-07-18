@@ -1,6 +1,6 @@
 {
   "name": "@constelix/agent",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Local-first agent and CLI for the Constelix visual engineering workspace.",
   "type": "module",
   "files": [

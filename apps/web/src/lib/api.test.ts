@@ -12,6 +12,16 @@ vi.mock("./auth", () => ({
 }));
 
 const timestamp = "2026-07-16T12:00:00.000Z";
+const workspaceSummary = {
+  projectTypes: ["TypeScript"],
+  languages: ["typescript"],
+  estimatedFileCount: 1,
+  indexedFileCount: 1,
+  warnings: [],
+  omittedFiles: [],
+  omittedFileCount: 0,
+  omittedFilesTruncated: false,
+};
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -91,6 +101,7 @@ describe("strict local-agent transport", () => {
           requestId: "request-one",
           threadId: "thread-one",
           type: "completed",
+          mode: "openai",
           responseId: "response-one",
           answer: "Respuesta completa y reconciliable.",
           evidence: {
@@ -129,13 +140,16 @@ describe("strict local-agent transport", () => {
   });
 
   it("requires active Ask turns in the bootstrap payload", () => {
-    const bootstrap = parseBootstrapPayload({
+    const payload = {
       protocolVersion: 1,
       workspace: {
         id: "workspace-one",
         name: "Fixture",
         rootPath: "/tmp/fixture",
+        mode: "edit",
+        readOnly: false,
       },
+      summary: workspaceSummary,
       graph: {
         protocolVersion: 1,
         workspaceId: "workspace-one",
@@ -154,9 +168,17 @@ describe("strict local-agent transport", () => {
       activeAskTurnIds: ["turn-active"],
       activeActTask: null,
       terminals: [],
-    });
+    };
+    const bootstrap = parseBootstrapPayload(payload);
 
     expect(bootstrap.activeAskTurnIds).toEqual(["turn-active"]);
+    expect(bootstrap.workspace.readOnly).toBe(false);
+    expect(() =>
+      parseBootstrapPayload({
+        ...payload,
+        workspace: { ...payload.workspace, mode: "read" },
+      }),
+    ).toThrow(/inconsistente/);
     expect(() =>
       parseBootstrapPayload({
         protocolVersion: 1,
@@ -164,7 +186,10 @@ describe("strict local-agent transport", () => {
           id: "workspace-one",
           name: "Fixture",
           rootPath: "/tmp/fixture",
+          mode: "edit",
+          readOnly: false,
         },
+        summary: workspaceSummary,
         graph: {
           protocolVersion: 1,
           workspaceId: "workspace-one",
@@ -193,7 +218,10 @@ describe("strict local-agent transport", () => {
         id: "workspace-one",
         name: "Fixture",
         rootPath: "/tmp/fixture",
+        mode: "edit",
+        readOnly: false,
       },
+      summary: workspaceSummary,
       graph: {
         protocolVersion: 1,
         workspaceId: "workspace-one",
@@ -230,6 +258,8 @@ describe("strict local-agent transport", () => {
       terminals: [],
       capabilities: {
         ask: true,
+        askMode: "openai",
+        askProviderStatus: "ready",
         act: true,
         terminal: true,
       },

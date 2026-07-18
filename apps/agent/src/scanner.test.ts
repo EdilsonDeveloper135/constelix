@@ -1,13 +1,29 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_WORKSPACE_SOURCE_BYTES,
   readTypeScriptResolutionOptions,
   scanWorkspace,
 } from "./scanner.js";
+import {
+  WorkspaceIdentityError,
+  inspectWorkspace,
+} from "./security.js";
 
 describe("TypeScript resolution configuration", () => {
+  it("keeps the default aggregate source budget at 2 MiB", () => {
+    expect(MAX_WORKSPACE_SOURCE_BYTES).toBe(2 * 1024 * 1024);
+  });
+
   it("reads baseUrl and paths from JSONC tsconfig files", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-tsconfig-"));
     await writeFile(
@@ -52,6 +68,23 @@ describe("TypeScript resolution configuration", () => {
 });
 
 describe("workspace scanner", () => {
+  it("rejects a descriptor whose canonical root was replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-scan-identity-"));
+    const root = join(parent, "workspace");
+    await mkdir(root);
+    await writeFile(join(root, "index.ts"), "export const safe = true;\n");
+    const workspace = await inspectWorkspace(root);
+    try {
+      await rename(root, join(parent, "workspace-original"));
+      await mkdir(root);
+      await expect(
+        scanWorkspace(workspace.workspaceId, workspace),
+      ).rejects.toBeInstanceOf(WorkspaceIdentityError);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("indexes an internal file symlink and skips a symlink that escapes the workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-scan-links-"));
     const outside = await mkdtemp(join(tmpdir(), "constelix-scan-outside-"));
@@ -109,7 +142,14 @@ describe("workspace scanner", () => {
       expect(result.diagnostics).toContainEqual({
         relativePath: "c.ts",
         message:
-          `Workspace scan stopped at the ${Buffer.byteLength(first) + Buffer.byteLength(second)} byte aggregate source-memory limit.`,
+          `Workspace index is limited to ${Buffer.byteLength(first) + Buffer.byteLength(second)} aggregate source bytes.`,
+      });
+      expect(result.summary).toMatchObject({
+        estimatedFileCount: 3,
+        indexedFileCount: 2,
+        omittedFileCount: 1,
+        omittedFiles: [{ relativePath: "c.ts", reason: "source_budget" }],
+        languages: ["typescript"],
       });
       expect(progress).toEqual([
         {
@@ -131,6 +171,29 @@ describe("workspace scanner", () => {
           sourceBytes: Buffer.byteLength(first) + Buffer.byteLength(second),
         },
       ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detects project markers and reports bounded omissions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-scan-summary-"));
+    try {
+      await writeFile(join(root, "package.json"), "{}\n");
+      await writeFile(join(root, "tsconfig.json"), "{}\n");
+      await writeFile(join(root, "a.ts"), "export const a = true;\n");
+      await writeFile(join(root, "b.ts"), "export const b = true;\n");
+      await writeFile(join(root, ".env"), "OPENAI_API_KEY=secret\n");
+
+      const result = await scanWorkspace("workspace", root, { maxFiles: 1 });
+
+      expect(result.summary.projectTypes).toEqual(["Node.js", "TypeScript"]);
+      expect(result.summary.estimatedFileCount).toBe(2);
+      expect(result.summary.indexedFileCount).toBe(1);
+      expect(result.summary.omittedFiles).toEqual(expect.arrayContaining([
+        { relativePath: ".env", reason: "secret" },
+        { relativePath: "b.ts", reason: "file_limit" },
+      ]));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

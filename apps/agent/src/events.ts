@@ -33,13 +33,18 @@ export class EventBus {
   readonly #emitter = new EventEmitter();
   readonly #sockets = new Set<SocketState>();
 
+  constructor(
+    private readonly sanitizePayload: (payload: unknown) => unknown = (payload) => payload,
+  ) {}
+
   publish(type: string, payload: unknown): LocalServerEvent {
+    const safePayload = this.sanitizePayload(payload);
     const event: LocalServerEvent = {
       protocolVersion: 1,
       eventId: randomUUID(),
       type,
       timestamp: new Date().toISOString(),
-      payload,
+      payload: safePayload,
     };
     this.#emitter.emit("event", event);
     const transportEvent = ServerEventSchema.safeParse(event);

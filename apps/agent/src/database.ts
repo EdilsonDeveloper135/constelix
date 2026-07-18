@@ -2,13 +2,16 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type {
+  AskMode,
   GraphDelta,
   GraphEdge,
   GraphNode,
   GraphSnapshot,
+  LocalAskResult,
   PanelState,
 } from "@constelix/contracts";
 import {
+  LocalAskResultSchema,
   sanitizeGraphDelta,
   sanitizeGraphSnapshot,
   sanitizeUnknownStrings,
@@ -25,6 +28,19 @@ export interface IndexedFileRecord {
 export interface IncrementalFileChanges {
   upsert?: readonly IndexedFileRecord[];
   removedPaths?: readonly string[];
+}
+
+export interface AiMessageRecord {
+  role: "user" | "assistant";
+  content: string;
+  mode: AskMode;
+  evidence?: unknown;
+  localResult?: LocalAskResult;
+}
+
+export interface GraphSearchMatch {
+  nodeId: string;
+  rank: number;
 }
 
 const MIGRATIONS = [
@@ -136,6 +152,30 @@ const MIGRATIONS = [
   ALTER TABLE index_revisions
     ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  ALTER TABLE ai_messages
+    ADD COLUMN mode TEXT NOT NULL DEFAULT 'openai';
+  ALTER TABLE ai_messages
+    ADD COLUMN local_result_json TEXT;
+  `,
+  `
+  DELETE FROM graph_search;
+  INSERT INTO graph_search(
+    workspace_id,node_id,name,qualified_name,relative_path,documentation
+  )
+  SELECT
+    workspace_id,
+    id,
+    COALESCE(json_extract(data_json, '$.name'), ''),
+    COALESCE(json_extract(data_json, '$.qualifiedName'), ''),
+    COALESCE(json_extract(data_json, '$.relativePath'), ''),
+    TRIM(
+      COALESCE(json_extract(data_json, '$.metadata.signature'), '') ||
+      CHAR(10) ||
+      COALESCE(json_extract(data_json, '$.metadata.documentation'), '')
+    )
+  FROM graph_nodes;
+  `,
 ] as const;
 
 function json(value: unknown): string {
@@ -151,6 +191,28 @@ function latestPanelUpdatedAt(panels: readonly PanelState[]): string {
     (latest, panel) => panel.updatedAt > latest ? panel.updatedAt : latest,
     "",
   );
+}
+
+function searchableNodeDocumentation(node: GraphNode): string {
+  const signature =
+    typeof node.metadata.signature === "string" ? node.metadata.signature : "";
+  const documentation =
+    typeof node.metadata.documentation === "string"
+      ? node.metadata.documentation
+      : "";
+  return [signature, documentation].filter(Boolean).join("\n");
+}
+
+export function createSafeFtsMatchExpression(text: string): string | undefined {
+  const expanded = text
+    .normalize("NFKC")
+    .replace(/([\p{Ll}\d])(\p{Lu})/gu, "$1 $2");
+  const terms = expanded.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const unique = [...new Set(terms.map((term) => term.toLocaleLowerCase()))]
+    .filter(Boolean)
+    .slice(0, 12);
+  if (unique.length === 0) return undefined;
+  return unique.map((term) => `"${term.replaceAll('"', '""')}"*`).join(" OR ");
 }
 
 export class ConstelixDatabase {
@@ -220,14 +282,13 @@ export class ConstelixDatabase {
       this.raw.prepare("DELETE FROM graph_search WHERE workspace_id = ?").run(workspaceId);
       for (const node of safeSnapshot.nodes) {
         insertNode.run(workspaceId, node.id, revision, json(node));
-        const record = node as GraphNode & { documentation?: string };
         insertSearch.run(
           workspaceId,
           node.id,
           node.name,
           node.qualifiedName ?? "",
           node.relativePath ?? "",
-          record.documentation ?? "",
+          searchableNodeDocumentation(node),
         );
       }
       for (const edge of safeSnapshot.edges) {
@@ -282,14 +343,13 @@ export class ConstelixDatabase {
 
       for (const node of safeSnapshot.nodes) {
         insertNode.run(workspaceId, node.id, revision, json(node));
-        const record = node as GraphNode & { documentation?: string };
         insertSearch.run(
           workspaceId,
           node.id,
           node.name,
           node.qualifiedName ?? "",
           node.relativePath ?? "",
-          record.documentation ?? "",
+          searchableNodeDocumentation(node),
         );
       }
       for (const edge of safeSnapshot.edges) {
@@ -424,14 +484,13 @@ export class ConstelixDatabase {
       for (const node of [...safeDelta.nodesAdded, ...safeDelta.nodesUpdated]) {
         upsertNode.run(workspaceId, node.id, safeDelta.revision, json(node));
         deleteSearch.run(workspaceId, node.id);
-        const record = node as GraphNode & { documentation?: string };
         insertSearch.run(
           workspaceId,
           node.id,
           node.name,
           node.qualifiedName ?? "",
           node.relativePath ?? "",
-          record.documentation ?? "",
+          searchableNodeDocumentation(node),
         );
       }
       for (const edge of [...safeDelta.edgesAdded, ...safeDelta.edgesUpdated]) {
@@ -554,13 +613,35 @@ export class ConstelixDatabase {
   appendAiMessage(
     workspaceId: string,
     threadId: string,
-    message: { id: string; role: "user" | "assistant"; content: string; evidence?: unknown },
+    message: {
+      id: string;
+      role: "user" | "assistant";
+      content: string;
+      mode?: AskMode;
+      evidence?: unknown;
+      localResult?: LocalAskResult;
+    },
   ): void {
     const now = new Date().toISOString();
     const safeContent = sanitizeUnknownStrings(message.content) as string;
     const safeEvidence =
       message.evidence === undefined ? undefined : sanitizeUnknownStrings(message.evidence);
+    const safeLocalResult =
+      message.localResult === undefined
+        ? undefined
+        : LocalAskResultSchema.parse(
+            sanitizeUnknownStrings(message.localResult),
+          );
     this.raw.transaction(() => {
+      const existingThread = this.raw
+        .prepare("SELECT workspace_id FROM ai_threads WHERE id = ?")
+        .get(threadId) as { workspace_id: string } | undefined;
+      if (
+        existingThread !== undefined &&
+        existingThread.workspace_id !== workspaceId
+      ) {
+        throw new Error("AI thread belongs to a different workspace.");
+      }
       this.raw
         .prepare(
           `INSERT INTO ai_threads(id,workspace_id,created_at,updated_at) VALUES (?,?,?,?)
@@ -569,8 +650,9 @@ export class ConstelixDatabase {
         .run(threadId, workspaceId, now, now);
       this.raw
         .prepare(
-          `INSERT OR REPLACE INTO ai_messages(id,thread_id,role,content,evidence_json,created_at)
-           VALUES (?,?,?,?,?,?)`,
+          `INSERT OR REPLACE INTO ai_messages(
+             id,thread_id,role,content,evidence_json,created_at,mode,local_result_json
+           ) VALUES (?,?,?,?,?,?,?,?)`,
         )
         .run(
           message.id,
@@ -579,23 +661,46 @@ export class ConstelixDatabase {
           safeContent,
           safeEvidence === undefined ? null : json(safeEvidence),
           now,
+          message.mode ?? "openai",
+          safeLocalResult === undefined ? null : json(safeLocalResult),
         );
     })();
   }
 
-  loadAiMessages(threadId: string): Array<{ role: "user" | "assistant"; content: string; evidence?: unknown }> {
-    const rows = this.raw
-      .prepare(
-        `SELECT role,content,evidence_json
+  loadAiMessages(threadId: string, workspaceId?: string): AiMessageRecord[] {
+    const query = workspaceId === undefined
+      ? `SELECT role,content,evidence_json,mode,local_result_json
          FROM ai_messages
          WHERE thread_id = ?
-         ORDER BY created_at,rowid`,
-      )
-      .all(threadId) as Array<{ role: "user" | "assistant"; content: string; evidence_json: string | null }>;
+         ORDER BY created_at,rowid`
+      : `SELECT message.role,message.content,message.evidence_json,
+                message.mode,message.local_result_json
+         FROM ai_messages AS message
+         INNER JOIN ai_threads AS thread ON thread.id = message.thread_id
+         WHERE message.thread_id = ? AND thread.workspace_id = ?
+         ORDER BY message.created_at,message.rowid`;
+    const statement = this.raw.prepare(query);
+    const rows = (workspaceId === undefined
+      ? statement.all(threadId)
+      : statement.all(threadId, workspaceId)) as Array<{
+        role: "user" | "assistant";
+        content: string;
+        evidence_json: string | null;
+        mode: string;
+        local_result_json: string | null;
+      }>;
     return rows.map((row) => ({
       role: row.role,
       content: row.content,
-      ...(row.evidence_json === null ? {} : { evidence: parseJson(row.evidence_json) })
+      mode: row.mode === "local" ? "local" : "openai",
+      ...(row.evidence_json === null ? {} : { evidence: parseJson(row.evidence_json) }),
+      ...(row.local_result_json === null
+        ? {}
+        : {
+            localResult: LocalAskResultSchema.parse(
+              parseJson<LocalAskResult>(row.local_result_json),
+            ),
+          }),
     }));
   }
 
@@ -653,16 +758,34 @@ export class ConstelixDatabase {
   }
 
   search(workspaceId: string, text: string, limit = 20): string[] {
+    return this.searchDetailed(workspaceId, text, limit).map((row) => row.nodeId);
+  }
+
+  searchDetailed(
+    workspaceId: string,
+    text: string,
+    limit = 20,
+  ): GraphSearchMatch[] {
     const safeLimit = Math.min(Math.max(limit, 1), 120);
+    const expression = createSafeFtsMatchExpression(text);
+    if (!expression) return [];
     const rows = this.raw
       .prepare(
-        `SELECT node_id FROM graph_search WHERE workspace_id = ? AND graph_search MATCH ?
-         ORDER BY rank LIMIT ?`,
+        `SELECT node_id,
+                bm25(graph_search, 0.0, 0.0, 8.0, 6.0, 4.0, 3.0) AS match_rank
+         FROM graph_search
+         WHERE workspace_id = ? AND graph_search MATCH ?
+         ORDER BY match_rank, node_id
+         LIMIT ?`,
       )
-      .all(workspaceId, text.replace(/["']/g, " ").trim(), safeLimit) as Array<{
+      .all(workspaceId, expression, safeLimit) as Array<{
       node_id: string;
+      match_rank: number;
     }>;
-    return rows.map((row) => row.node_id);
+    return rows.map((row) => ({
+      nodeId: row.node_id,
+      rank: Number.isFinite(row.match_rank) ? row.match_rank : 0,
+    }));
   }
 
   close(): void {

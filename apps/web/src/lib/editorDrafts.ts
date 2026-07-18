@@ -7,6 +7,7 @@ export type EditorDraftStatus =
   | "error";
 
 export interface EditorDraft {
+  workspaceId: string;
   relativePath: string;
   content: string;
   savedContent: string;
@@ -14,51 +15,77 @@ export interface EditorDraft {
   language: string;
   loaded: boolean;
   status: EditorDraftStatus;
+  errorMessage?: string;
 }
 
 const drafts = new Map<string, EditorDraft>();
 
-export function getOrCreateEditorDraft(
+export function editorResourceKey(
+  workspaceId: string,
   relativePath: string,
-  fallback: Omit<EditorDraft, "relativePath">,
+): string {
+  return `${workspaceId}\u0000${relativePath}`;
+}
+
+export function getOrCreateEditorDraft(
+  workspaceId: string,
+  relativePath: string,
+  fallback: Omit<EditorDraft, "workspaceId" | "relativePath">,
 ): EditorDraft {
-  const existing = drafts.get(relativePath);
+  const key = editorResourceKey(workspaceId, relativePath);
+  const existing = drafts.get(key);
   if (existing) return existing;
-  const draft = { relativePath, ...fallback };
-  drafts.set(relativePath, draft);
+  const draft = { workspaceId, relativePath, ...fallback };
+  drafts.set(key, draft);
   return draft;
 }
 
-export function getEditorDraft(relativePath: string): EditorDraft | undefined {
-  return drafts.get(relativePath);
+export function getEditorDraft(
+  workspaceId: string,
+  relativePath: string,
+): EditorDraft | undefined {
+  return drafts.get(editorResourceKey(workspaceId, relativePath));
 }
 
 export function updateEditorDraft(
+  workspaceId: string,
   relativePath: string,
-  patch: Partial<Omit<EditorDraft, "relativePath">>,
+  patch: Partial<Omit<EditorDraft, "workspaceId" | "relativePath">>,
 ): EditorDraft {
-  const current = drafts.get(relativePath);
+  const key = editorResourceKey(workspaceId, relativePath);
+  const current = drafts.get(key);
   if (!current) throw new Error(`Editor draft is not initialized: ${relativePath}`);
   const next = { ...current, ...patch };
-  drafts.set(relativePath, next);
+  drafts.set(key, next);
   return next;
 }
 
 export function markEditorDraftPersisted(
+  workspaceId: string,
   relativePath: string,
   savedContent: string,
   contentHash: string,
 ): EditorDraft {
-  return updateEditorDraft(relativePath, {
+  return updateEditorDraft(workspaceId, relativePath, {
     savedContent,
     contentHash,
     status: "saved",
   });
 }
 
-export function editorDraftIsDirty(relativePath: string): boolean {
-  const draft = drafts.get(relativePath);
+export function editorDraftIsDirty(
+  workspaceId: string,
+  relativePath: string,
+): boolean {
+  const draft = getEditorDraft(workspaceId, relativePath);
   return draft ? draft.content !== draft.savedContent : false;
+}
+
+export function clearEditorDraftsForWorkspace(workspaceId: string): void {
+  const prefix = `${workspaceId}\u0000`;
+  for (const key of drafts.keys()) {
+    if (key.startsWith(prefix)) drafts.delete(key);
+  }
 }
 
 export function clearEditorDraftsForTests(): void {

@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConstelixDatabase } from "./database.js";
+import {
+  ConstelixDatabase,
+  createSafeFtsMatchExpression,
+} from "./database.js";
 import type { GraphSnapshot, PanelState } from "@constelix/contracts";
 import { diffSnapshots } from "@constelix/graph-core";
 
@@ -70,8 +73,16 @@ describe("ConstelixDatabase", () => {
       content: "Where is main?",
     });
     expect(database.loadAiMessages("thread")).toEqual([
-      { role: "user", content: "Where is main?" },
+      { role: "user", content: "Where is main?", mode: "openai" },
     ]);
+    expect(database.loadAiMessages("thread", "ws")).toHaveLength(1);
+    expect(database.loadAiMessages("thread", "other-workspace")).toEqual([]);
+    database.upsertWorkspace("other-workspace", "/tmp/other-workspace");
+    expect(() => database.appendAiMessage("other-workspace", "thread", {
+      id: "cross-workspace-message",
+      role: "user",
+      content: "This must not cross workspaces.",
+    })).toThrow("different workspace");
     database.close();
   });
 
@@ -237,7 +248,45 @@ describe("ConstelixDatabase", () => {
       );
       INSERT INTO index_revisions(workspace_id, revision, created_at)
         VALUES ('ws', 1, '2026-07-16T00:00:00.000Z');
+      CREATE TABLE ai_messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        evidence_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE graph_nodes (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        data_json TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, id)
+      );
+      CREATE VIRTUAL TABLE graph_search USING fts5(
+        workspace_id UNINDEXED,
+        node_id UNINDEXED,
+        name,
+        qualified_name,
+        relative_path,
+        documentation
+      );
     `);
+    legacy
+      .prepare(
+        "INSERT INTO graph_nodes(workspace_id,id,revision,data_json) VALUES (?,?,?,?)",
+      )
+      .run(
+        "ws",
+        "legacy-runner",
+        1,
+        JSON.stringify({
+          name: "execute",
+          qualifiedName: "src.runner.execute",
+          relativePath: "src/runner.ts",
+          metadata: { signature: "function legacyWorkspaceRunner()" },
+        }),
+      );
     legacy.close();
 
     const database = new ConstelixDatabase(databasePath);
@@ -246,11 +295,20 @@ describe("ConstelixDatabase", () => {
         name: string;
       }>;
       expect(columns.map((column) => column.name)).toContain("truncated");
+      const aiMessageColumns = database.raw.pragma(
+        "table_info(ai_messages)",
+      ) as Array<{ name: string }>;
+      expect(aiMessageColumns.map((column) => column.name)).toEqual(
+        expect.arrayContaining(["mode", "local_result_json"]),
+      );
       expect(
         database.raw
           .prepare("SELECT truncated FROM index_revisions WHERE workspace_id = ?")
           .get("ws"),
       ).toEqual({ truncated: 0 });
+      expect(database.search("ws", "legacyWorkspaceRunner")).toEqual([
+        "legacy-runner",
+      ]);
     } finally {
       database.close();
       rmSync(directory, { recursive: true, force: true });
@@ -357,6 +415,80 @@ describe("ConstelixDatabase", () => {
     expect(node.data_json).not.toContain(secret);
     expect(revision.diagnostics_json).not.toContain(secret);
     expect(node.data_json).toContain("[REDACTED]");
+    database.close();
+  });
+
+  it("indexes sanitized signatures and escapes punctuation in FTS queries", () => {
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("ws", "/tmp/workspace");
+    const snapshot: GraphSnapshot = {
+      protocolVersion: 1,
+      workspaceId: "ws",
+      revision: 1,
+      nodes: [{
+        protocolVersion: 1,
+        id: "runner",
+        kind: "function",
+        name: "execute",
+        qualifiedName: "src.runner.execute",
+        relativePath: "src/runner.ts",
+        language: "typescript",
+        revision: 1,
+        metadata: {
+          signature: "export async function runWorkspace(projectPath: string)",
+        },
+      }],
+      edges: [],
+      truncated: false,
+    };
+    database.replaceGraph("ws", snapshot);
+
+    expect(database.search("ws", "runWorkspace")).toEqual(["runner"]);
+    expect(database.search("ws", "\"runWorkspace\" OR * (projectPath)")).toEqual([
+      "runner",
+    ]);
+    expect(database.search("ws", "!!!")).toEqual([]);
+    expect(createSafeFtsMatchExpression("runWorkspace projectPath")).toBe(
+      "\"run\"* OR \"workspace\"* OR \"project\"* OR \"path\"*",
+    );
+    database.close();
+  });
+
+  it("persists and restores typed local Ask results", () => {
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("ws", "/tmp/workspace");
+    const localResult = {
+      query: "runner",
+      revision: 1,
+      hits: [{
+        nodeId: "runner",
+        kind: "function" as const,
+        name: "runWorkspace",
+        qualifiedName: "src.runner.runWorkspace",
+        relativePath: "src/runner.ts",
+        language: "typescript" as const,
+        signature: "function runWorkspace()",
+        score: 100,
+        matchedFields: ["name" as const, "signature" as const],
+        relations: [],
+      }],
+      truncated: false,
+      limitations: ["Búsqueda local estructural."],
+    };
+    database.appendAiMessage("ws", "thread-local", {
+      id: "local-answer",
+      role: "assistant",
+      content: "Ask Local encontró 1 coincidencia estructural.",
+      mode: "local",
+      localResult,
+    });
+
+    expect(database.loadAiMessages("thread-local")).toEqual([{
+      role: "assistant",
+      content: "Ask Local encontró 1 coincidencia estructural.",
+      mode: "local",
+      localResult,
+    }]);
     database.close();
   });
 

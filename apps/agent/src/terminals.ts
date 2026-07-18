@@ -6,7 +6,14 @@ import { dirname, resolve } from "node:path";
 import * as pty from "node-pty";
 import type { TerminalSession as TerminalSessionContract } from "@constelix/contracts";
 import type { EventBus } from "./events.js";
-import { resolveExistingWorkspacePath } from "./security.js";
+import {
+  assertWorkspaceReferenceIdentity,
+  createSafeChildEnvironment,
+  resolveExistingWorkspacePath,
+  toWorkspaceRelative,
+  type WorkspaceDescriptor,
+  type WorkspaceReference,
+} from "./security.js";
 
 interface TerminalSessionState {
   id: string;
@@ -27,13 +34,67 @@ interface TerminalOutputChunk {
 }
 
 const MAX_OUTPUT_HISTORY_BYTES = 256 * 1024;
+const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
+const READ_ONLY_SANDBOX_PROFILE = [
+  "(version 1)",
+  "(allow default)",
+  "(deny file-write*)",
+  '(allow file-write* (subpath "/dev"))',
+].join("");
+
+export class ReadOnlyTerminalUnavailableError extends Error {
+  readonly code = "READ_ONLY_TERMINAL_UNAVAILABLE";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ReadOnlyTerminalUnavailableError";
+  }
+}
+
+export interface TerminalLaunchCommand {
+  executable: string;
+  args: string[];
+}
+
+export interface ReadOnlyTerminalLaunchOptions {
+  platform?: NodeJS.Platform;
+  sandboxExecutable?: string;
+  ensureExecutable?: (path: string) => Promise<void>;
+}
+
+export async function createTerminalLaunchCommand(
+  shell: string,
+  readOnly: boolean,
+  options: ReadOnlyTerminalLaunchOptions = {},
+): Promise<TerminalLaunchCommand> {
+  if (!readOnly) return { executable: shell, args: [] };
+  if ((options.platform ?? process.platform) !== "darwin") {
+    throw new ReadOnlyTerminalUnavailableError(
+      "La terminal segura de Modo Lectura solo está disponible en macOS.",
+    );
+  }
+
+  const sandboxExecutable =
+    options.sandboxExecutable ?? DEFAULT_SANDBOX_EXECUTABLE;
+  try {
+    await (options.ensureExecutable ?? ensureExecutable)(sandboxExecutable);
+  } catch {
+    throw new ReadOnlyTerminalUnavailableError(
+      "Constelix no pudo iniciar una terminal de solo lectura porque sandbox-exec no está disponible.",
+    );
+  }
+  return {
+    executable: sandboxExecutable,
+    args: ["-p", READ_ONLY_SANDBOX_PROFILE, shell],
+  };
+}
 
 export class TerminalManager {
   readonly #sessions = new Map<string, TerminalSessionState>();
   readonly #unsubscribe: () => void;
 
   constructor(
-    private readonly workspaceRoot: string,
+    private readonly workspace: WorkspaceReference,
     private readonly events: EventBus,
   ) {
     this.#unsubscribe = events.onClientMessage((message) => {
@@ -59,26 +120,31 @@ export class TerminalManager {
     createdAt: string;
     status: "running";
   }> {
-    await ensureNodePtyHelper();
-    const cwd = options.cwd
-      ? await resolveExistingWorkspacePath(this.workspaceRoot, options.cwd)
-      : this.workspaceRoot;
+    const workspaceRoot = await resolveExistingWorkspacePath(this.workspace, ".");
+    const absoluteCwd = options.cwd
+      ? await resolveExistingWorkspacePath(this.workspace, options.cwd)
+      : workspaceRoot;
+    const cwd = toTerminalSessionCwd(workspaceRoot, absoluteCwd);
     const shell = options.shell ?? process.env.SHELL ?? (process.platform === "win32" ? "powershell.exe" : "/bin/zsh");
-    const terminalEnvironment = { ...process.env };
-    delete terminalEnvironment.OPENAI_API_KEY;
-    delete terminalEnvironment.CONSTELIX_CAPABILITY_TOKEN;
+    const launch = await createTerminalLaunchCommand(
+      shell,
+      isReadOnlyWorkspace(this.workspace),
+    );
+    await ensureNodePtyHelper();
+    const terminalEnvironment = createSafeChildEnvironment();
     const id = randomUUID();
     const createdAt = new Date().toISOString();
-    const child = pty.spawn(shell, [], {
+    await assertWorkspaceReferenceIdentity(this.workspace);
+    const child = pty.spawn(launch.executable, launch.args, {
       name: "xterm-256color",
       cols: clamp(options.cols ?? 100, 20, 500),
       rows: clamp(options.rows ?? 30, 5, 200),
-      cwd,
+      cwd: absoluteCwd,
       env: {
         ...terminalEnvironment,
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
-        CONSTELIX_WORKSPACE: this.workspaceRoot,
+        CONSTELIX_WORKSPACE: workspaceRoot,
       } as Record<string, string>,
       encoding: "utf8",
     });
@@ -206,4 +272,21 @@ async function ensureNodePtyHelper(): Promise<void> {
     // Restoring it is required before macOS can create a PTY.
     await chmod(helper, 0o755);
   }
+}
+
+async function ensureExecutable(path: string): Promise<void> {
+  await access(path, constants.X_OK);
+}
+
+function isReadOnlyWorkspace(
+  workspace: WorkspaceReference,
+): workspace is WorkspaceDescriptor {
+  return typeof workspace !== "string" && workspace.readOnly;
+}
+
+export function toTerminalSessionCwd(
+  workspaceRoot: string,
+  absoluteCwd: string,
+): string {
+  return toWorkspaceRelative(workspaceRoot, absoluteCwd);
 }

@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +13,10 @@ import {
 } from "./codex.js";
 import { EventBus, type LocalServerEvent } from "./events.js";
 import type { ConstelixDatabase } from "./database.js";
+import {
+  WorkspaceIdentityError,
+  inspectWorkspace,
+} from "./security.js";
 
 interface RpcMessage {
   id?: number | string;
@@ -256,6 +263,47 @@ describe("createCodexSandboxPolicy", () => {
 });
 
 describe("CodexManager App Server protocol", () => {
+  it("refuses approval after the canonical workspace root is replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-codex-identity-"));
+    const root = join(parent, "workspace");
+    await mkdir(root);
+    const workspace = await inspectWorkspace(root);
+    const database = {
+      saveCodexTask: () => undefined,
+      audit: () => undefined,
+      loadLatestCodexThreadId: () => undefined,
+    } as unknown as ConstelixDatabase;
+    const events = new EventBus();
+    const spawnAppServer = vi.fn(
+      () => new FakeCodexAppServer() as unknown as SpawnedCodexProcess,
+    );
+    const manager = new CodexManager(
+      workspace.workspaceId,
+      workspace,
+      events,
+      database,
+      {
+        getCodexVersion: async () => TESTED_CODEX_VERSION,
+        spawnAppServer,
+      },
+    );
+    try {
+      const task = manager.createTask("Inspect the workspace.");
+      await rename(root, join(parent, "workspace-original"));
+      await mkdir(root);
+
+      await expect(manager.approve(task.id)).rejects.toBeInstanceOf(
+        WorkspaceIdentityError,
+      );
+      expect(manager.getTask(task.id)?.status).toBe("pending_approval");
+      expect(spawnAppServer).not.toHaveBeenCalled();
+    } finally {
+      manager.close();
+      events.close();
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("disables Act when Codex is absent or incompatible", async () => {
     const database = {
       saveCodexTask: () => undefined,

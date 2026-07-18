@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const ProtocolVersionSchema = z.literal(PROTOCOL_VERSION);
+export const WorkspaceIdSchema = z.string().regex(/^[a-f0-9]{24}$/);
+export const WorkspaceAccessModeSchema = z.enum(["read", "edit"]);
 
 export const SourcePositionSchema = z.object({
   line: z.number().int().nonnegative(),
@@ -23,6 +25,37 @@ export const LanguageSchema = z.enum([
   "python",
   "unknown"
 ]);
+
+export const WorkspaceWarningSchema = z.object({
+  code: z.string().min(1).max(100),
+  message: z.string().min(1).max(1_000),
+  relativePath: z.string().min(1).optional()
+});
+
+export const WorkspaceOmittedFileSchema = z.object({
+  relativePath: z.string().min(1),
+  reason: z.enum([
+    "ignored",
+    "secret",
+    "unsupported",
+    "too_large",
+    "binary",
+    "outside_workspace",
+    "file_limit",
+    "source_budget"
+  ])
+});
+
+export const WorkspaceSummarySchema = z.object({
+  projectTypes: z.array(z.string().min(1).max(100)).max(20).default([]),
+  languages: z.array(LanguageSchema).max(20).default([]),
+  estimatedFileCount: z.number().int().nonnegative(),
+  indexedFileCount: z.number().int().nonnegative(),
+  warnings: z.array(WorkspaceWarningSchema).max(200).default([]),
+  omittedFiles: z.array(WorkspaceOmittedFileSchema).max(200).default([]),
+  omittedFileCount: z.number().int().nonnegative(),
+  omittedFilesTruncated: z.boolean().default(false)
+});
 
 export const GraphNodeKindSchema = z.enum([
   "project",
@@ -194,6 +227,56 @@ export const AskToolNameSchema = z.enum([
   "read_snippet"
 ]);
 
+export const AskModeSchema = z.enum(["local", "openai"]);
+export const AskProviderStatusSchema = z.enum([
+  "ready",
+  "missing_api_key",
+  "insufficient_quota",
+  "invalid_api_key",
+  "network_unavailable",
+  "rate_limited",
+  "unavailable"
+]);
+
+export const LocalAskRelationSchema = z.object({
+  edgeId: z.string().min(1),
+  relation: GraphRelationSchema,
+  direction: z.enum(["inbound", "outbound"]),
+  targetNodeId: z.string().min(1),
+  confidence: GraphConfidenceSchema
+});
+
+export const LocalAskSnippetSchema = z.object({
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  content: z.string().max(2_000)
+});
+
+export const LocalAskHitSchema = z.object({
+  nodeId: z.string().min(1),
+  kind: GraphNodeKindSchema,
+  name: z.string(),
+  qualifiedName: z.string(),
+  relativePath: z.string(),
+  range: SourceRangeSchema.optional(),
+  language: LanguageSchema,
+  signature: z.string().max(500).optional(),
+  score: z.number().nonnegative(),
+  matchedFields: z.array(
+    z.enum(["name", "qualifiedName", "path", "signature"])
+  ).max(4),
+  relations: z.array(LocalAskRelationSchema).max(24).default([]),
+  snippet: LocalAskSnippetSchema.optional()
+});
+
+export const LocalAskResultSchema = z.object({
+  query: z.string(),
+  revision: z.number().int().nonnegative(),
+  hits: z.array(LocalAskHitSchema).max(20),
+  truncated: z.boolean(),
+  limitations: z.array(z.string().max(500)).max(10).default([])
+});
+
 export const AskTurnRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
   requestId: z.string().min(1),
@@ -209,7 +292,10 @@ const AskStreamBaseSchema = z.object({
 });
 
 export const AskStreamEventSchema = z.discriminatedUnion("type", [
-  AskStreamBaseSchema.extend({ type: z.literal("started") }),
+  AskStreamBaseSchema.extend({
+    type: z.literal("started"),
+    mode: AskModeSchema
+  }),
   AskStreamBaseSchema.extend({ type: z.literal("text_delta"), delta: z.string() }),
   AskStreamBaseSchema.extend({
     type: z.literal("tool_call"),
@@ -219,10 +305,20 @@ export const AskStreamEventSchema = z.discriminatedUnion("type", [
   }),
   AskStreamBaseSchema.extend({ type: z.literal("evidence"), path: EvidencePathSchema }),
   AskStreamBaseSchema.extend({
+    type: z.literal("fallback"),
+    from: z.literal("openai"),
+    to: z.literal("local"),
+    code: z.string().min(1),
+    message: z.string().min(1),
+    discardPartial: z.boolean()
+  }),
+  AskStreamBaseSchema.extend({
     type: z.literal("completed"),
+    mode: AskModeSchema,
     responseId: z.string().optional(),
     answer: z.string(),
-    evidence: EvidencePathSchema.optional()
+    evidence: EvidencePathSchema.optional(),
+    localResult: LocalAskResultSchema.optional()
   }),
   AskStreamBaseSchema.extend({ type: z.literal("error"), code: z.string(), message: z.string() })
 ]);
@@ -339,7 +435,8 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       filesIndexed: z.number().int().nonnegative(),
       symbolsIndexed: z.number().int().nonnegative(),
       edgesIndexed: z.number().int().nonnegative(),
-      message: z.string().optional()
+      message: z.string().optional(),
+      summary: WorkspaceSummarySchema.optional()
     })
   }),
   ServerEventBaseSchema.extend({
@@ -358,8 +455,11 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   ServerEventBaseSchema.extend({
     type: z.literal("capabilities.updated"),
     payload: z.object({
-      act: z.boolean(),
-      checking: z.boolean(),
+      act: z.boolean().optional(),
+      checking: z.boolean().optional(),
+      askMode: AskModeSchema.optional(),
+      askProviderStatus: AskProviderStatusSchema.optional(),
+      askNotice: z.string().nullable().optional(),
       codexVersion: z.string().optional(),
       codexReason: z.string().optional()
     })
@@ -376,7 +476,12 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
   }),
   ServerEventBaseSchema.extend({
     type: z.literal("error"),
-    payload: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() })
+    payload: z.object({
+      code: z.string(),
+      message: z.string(),
+      recoverable: z.boolean(),
+      severity: z.enum(["info", "warning", "error"]).default("error")
+    })
   })
 ]);
 
@@ -409,6 +514,11 @@ export const ClientEventSchema = z.discriminatedUnion("type", [
 
 export type SourcePosition = z.infer<typeof SourcePositionSchema>;
 export type SourceRange = z.infer<typeof SourceRangeSchema>;
+export type WorkspaceId = z.infer<typeof WorkspaceIdSchema>;
+export type WorkspaceAccessMode = z.infer<typeof WorkspaceAccessModeSchema>;
+export type WorkspaceWarning = z.infer<typeof WorkspaceWarningSchema>;
+export type WorkspaceOmittedFile = z.infer<typeof WorkspaceOmittedFileSchema>;
+export type WorkspaceSummary = z.infer<typeof WorkspaceSummarySchema>;
 export type Language = z.infer<typeof LanguageSchema>;
 export type GraphNodeKind = z.infer<typeof GraphNodeKindSchema>;
 export type GraphRelation = z.infer<typeof GraphRelationSchema>;
@@ -430,6 +540,12 @@ export type FileWriteRequest = z.infer<typeof FileWriteRequestSchema>;
 export type FileWriteResponse = z.infer<typeof FileWriteResponseSchema>;
 export type EvidencePath = z.infer<typeof EvidencePathSchema>;
 export type AskToolName = z.infer<typeof AskToolNameSchema>;
+export type AskMode = z.infer<typeof AskModeSchema>;
+export type AskProviderStatus = z.infer<typeof AskProviderStatusSchema>;
+export type LocalAskRelation = z.infer<typeof LocalAskRelationSchema>;
+export type LocalAskSnippet = z.infer<typeof LocalAskSnippetSchema>;
+export type LocalAskHit = z.infer<typeof LocalAskHitSchema>;
+export type LocalAskResult = z.infer<typeof LocalAskResultSchema>;
 export type AskTurnRequest = z.infer<typeof AskTurnRequestSchema>;
 export type AskStreamEvent = z.infer<typeof AskStreamEventSchema>;
 export type ActCapability = z.infer<typeof ActCapabilitySchema>;

@@ -14,6 +14,11 @@ import type {
 } from "@constelix/contracts";
 
 import type { BootstrapPayload, EvidencePath, WorkspaceNode } from "../types";
+import {
+  clearEditorDraftsForTests,
+  getEditorDraft,
+  getOrCreateEditorDraft,
+} from "../lib/editorDrafts";
 
 const apiMock = vi.hoisted(() => ({
   hasToken: true,
@@ -44,6 +49,12 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/layout", () => ({
   layoutSemanticNodes: vi.fn().mockResolvedValue({}),
+  resolveSemanticLayoutCollisions: vi.fn(
+    (
+      _nodes: WorkspaceNode[],
+      proposed: Record<string, { x: number; y: number }>,
+    ) => proposed,
+  ),
 }));
 
 let useWorkspaceStore: typeof import("./useWorkspaceStore")["useWorkspaceStore"];
@@ -88,6 +99,7 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.useRealTimers();
+  clearEditorDraftsForTests();
   for (const mock of Object.values(apiMock)) {
     if (typeof mock === "function" && "mockReset" in mock) {
       mock.mockReset();
@@ -151,6 +163,8 @@ describe("workspace bootstrap reconciliation", () => {
       revision: 4,
       capabilities: {
         ask: true,
+        askMode: "openai",
+        askProviderStatus: "ready",
         act: false,
         terminal: true,
         codexReason: "stale bootstrap",
@@ -164,6 +178,138 @@ describe("workspace bootstrap reconciliation", () => {
     });
   });
 
+  it("updates Ask capabilities without changing Codex and rejects a stale bootstrap", async () => {
+    const pendingBootstrap = deferred<BootstrapPayload>();
+    apiMock.bootstrap.mockReturnValue(pendingBootstrap.promise);
+    useWorkspaceStore.setState({
+      remoteHydrated: true,
+      demoMode: false,
+      connection: "connected",
+      graphRevision: 4,
+      askMode: "openai",
+      askProviderStatus: "ready",
+      actAvailable: true,
+      codexVersion: "0.144.5",
+    });
+
+    const reconciliation = useWorkspaceStore.getState().reconcileGraph();
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "ask-capability-newer",
+      timestamp: "2026-07-16T12:00:00.000Z",
+      type: "capabilities.updated",
+      payload: {
+        askMode: "local",
+        askProviderStatus: "insufficient_quota",
+        askNotice: "OpenAI no tiene cuota; Ask Local permanece disponible.",
+      },
+    });
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      actAvailable: true,
+      codexVersion: "0.144.5",
+    });
+    pendingBootstrap.resolve(bootstrapPayload({ revision: 4 }));
+    await reconciliation;
+
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      askMode: "local",
+      askProviderStatus: "insufficient_quota",
+      askNotice: "OpenAI no tiene cuota; Ask Local permanece disponible.",
+      actAvailable: true,
+    });
+
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "ask-capability-ready",
+      timestamp: "2026-07-16T12:00:01.000Z",
+      type: "capabilities.updated",
+      payload: {
+        askMode: "openai",
+        askProviderStatus: "ready",
+        askNotice: null,
+      },
+    });
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      askMode: "openai",
+      askProviderStatus: "ready",
+      askNotice: undefined,
+      actAvailable: true,
+    });
+  });
+
+  it("destroys all workspace-scoped frontend state when switching from A to B", () => {
+    const workspaceA = bootstrapPayload();
+    workspaceA.workspace = {
+      ...workspaceA.workspace,
+      id: "workspace-a",
+      name: "Project A",
+      rootPath: "…/Project A",
+    };
+    workspaceA.conversation = [
+      { role: "user", content: "Question A", mode: "local" },
+      { role: "assistant", content: "Answer A", mode: "local" },
+    ];
+    workspaceA.activeActTask = contractActTask("task-a", "running");
+    workspaceA.terminals = [{
+      protocolVersion: 1,
+      id: "terminal-a",
+      panelId: "panel-terminal",
+      cwd: ".",
+      shell: "/bin/zsh",
+      createdAt: "2026-07-16T12:00:00.000Z",
+      status: "running",
+    }];
+    useWorkspaceStore.getState().hydrateBootstrap(workspaceA);
+    getOrCreateEditorDraft("workspace-a", "src/a.ts", {
+      content: "changed",
+      savedContent: "original",
+      language: "typescript",
+      loaded: true,
+      status: "idle",
+    });
+    useWorkspaceStore.setState({
+      question: "pending A",
+      answer: "cached A",
+      assistantThinking: true,
+      activeAskTurnId: "turn-a",
+      activeAskRequestId: "request-a",
+      evidencePartial: true,
+      evidenceForcedNodeIds: { "node-a": true },
+    });
+
+    const workspaceB = bootstrapPayload();
+    workspaceB.workspace = {
+      ...workspaceB.workspace,
+      id: "workspace-b",
+      name: "Project B",
+      rootPath: "…/Project B",
+    };
+    workspaceB.conversation = [];
+    workspaceB.activeAskTurnIds = [];
+    workspaceB.activeActTask = null;
+    workspaceB.terminals = [];
+    useWorkspaceStore.getState().hydrateBootstrap(workspaceB);
+
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      workspaceId: "workspace-b",
+      workspaceName: "Project B",
+      askThreadId: "workspace-b:main",
+      conversation: [],
+      question: "",
+      answer: "",
+      assistantThinking: false,
+      activeAskTurnId: null,
+      activeAskRequestId: null,
+      evidencePath: null,
+      evidencePartial: false,
+      evidenceForcedNodeIds: {},
+      actTask: null,
+      terminalRuntimes: {},
+    });
+    expect(getEditorDraft("workspace-a", "src/a.ts")).toBeUndefined();
+    expect(apiMock.deleteTerminal).toHaveBeenCalledWith("terminal-a");
+  });
+
   it("keeps paginated and expanded nodes when reconnecting at the same revision", () => {
     const base = semanticNode("base");
     const paginated = semanticNode("paginated");
@@ -171,6 +317,7 @@ describe("workspace bootstrap reconciliation", () => {
       remoteHydrated: true,
       demoMode: false,
       connection: "degraded",
+      workspaceId: "workspace-one",
       graphRevision: 7,
       nodes: [base, paginated],
       graphCursor: "v1:1000",
@@ -211,6 +358,49 @@ describe("workspace bootstrap reconciliation", () => {
       "base",
       "paginated",
     ]);
+  });
+
+  it("refreshes onboarding metadata from index progress summaries", () => {
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "index-summary",
+      timestamp: "2026-07-16T12:00:00.000Z",
+      type: "index.progress",
+      payload: {
+        phase: "scanning",
+        completed: 2,
+        total: 10,
+        revision: 0,
+        progress: 0.2,
+        filesIndexed: 2,
+        symbolsIndexed: 0,
+        edgesIndexed: 0,
+        summary: {
+          projectTypes: ["Node.js", "TypeScript"],
+          languages: ["typescript"],
+          estimatedFileCount: 7,
+          indexedFileCount: 2,
+          warnings: [{
+            code: "WORKSPACE_FILE_LIMIT",
+            message: "El índice alcanzó su límite.",
+          }],
+          omittedFiles: [{
+            relativePath: "src/omitted.ts",
+            reason: "file_limit",
+          }],
+          omittedFileCount: 1,
+          omittedFilesTruncated: false,
+        },
+      },
+    });
+
+    expect(useWorkspaceStore.getState().workspaceSummary).toMatchObject({
+      projectTypes: ["Node.js", "TypeScript"],
+      languages: ["typescript"],
+      estimatedFileCount: 7,
+      indexedFileCount: 2,
+      omittedFileCount: 1,
+    });
   });
 
   it("recovers missing evidence edges with a bidirectional graph query", async () => {
@@ -326,6 +516,18 @@ function bootstrapPayload(options: {
       id: "workspace-one",
       name: "Fixture",
       rootPath: "/tmp/fixture",
+      mode: "edit",
+      readOnly: false,
+    },
+    summary: {
+      projectTypes: ["TypeScript"],
+      languages: ["typescript"],
+      estimatedFileCount: 1,
+      indexedFileCount: 1,
+      warnings: [],
+      omittedFiles: [],
+      omittedFileCount: 0,
+      omittedFilesTruncated: false,
     },
     graph: {
       protocolVersion: 1,
@@ -348,6 +550,8 @@ function bootstrapPayload(options: {
     terminals: [],
     capabilities: options.capabilities ?? {
       ask: true,
+      askMode: "openai",
+      askProviderStatus: "ready",
       act: true,
       terminal: true,
     },

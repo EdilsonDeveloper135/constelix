@@ -21,6 +21,7 @@ const server = await startAgentServer({
   storageDirectory: stateDirectory,
   databasePath: join(stateDirectory, "benchmark.sqlite"),
   webDistPath: join(stateDirectory, "no-web-assets"),
+  indexerScanOptions: { maxTotalBytes: 256 * 1024 * 1024 },
   port: 0
 });
 

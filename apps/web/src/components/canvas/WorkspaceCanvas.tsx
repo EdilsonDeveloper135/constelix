@@ -16,11 +16,13 @@ import {
 
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import { MAX_VISIBLE_SEMANTIC_NODES } from "../../lib/workspaceGraph";
+import { applyCanvasFilters } from "../../lib/canvasFilters";
 import type { SemanticFlowNode, WorkspaceNode } from "../../types";
 import { AssistantPanel } from "../panels/AssistantPanel";
 import { EditorPanel } from "../panels/EditorPanel";
 import { TerminalPanel } from "../panels/TerminalPanel";
 import { GraphEdge } from "./GraphEdge";
+import { CanvasFilters } from "./CanvasFilters";
 import { Legend } from "./Legend";
 import { SemanticNode } from "./SemanticNode";
 
@@ -70,6 +72,7 @@ function CanvasInner() {
   const saveLayout = useWorkspaceStore((state) => state.saveLayout);
   const evidencePath = useWorkspaceStore((state) => state.evidencePath);
   const evidenceCursor = useWorkspaceStore((state) => state.evidenceCursor);
+  const canvasFilters = useWorkspaceStore((state) => state.canvasFilters);
   const index = useWorkspaceStore((state) => state.index);
   const graphRevision = useWorkspaceStore((state) => state.graphRevision);
   const graphTruncated = useWorkspaceStore((state) => state.graphTruncated);
@@ -86,11 +89,21 @@ function CanvasInner() {
     () => nodes.filter((node) => node.type === "semantic" && !node.hidden).length,
     [nodes],
   );
+  const filteredGraph = useMemo(
+    () =>
+      applyCanvasFilters(
+        nodes,
+        edges,
+        canvasFilters,
+        new Set(evidencePath?.nodeIds ?? []),
+      ),
+    [canvasFilters, edges, evidencePath, nodes],
+  );
 
   const decoratedNodes = useMemo(() => {
-    if (!evidencePath) return nodes;
+    if (!evidencePath) return filteredGraph.nodes;
     const positionById = new Map(evidencePath.nodeIds.map((nodeId, index) => [nodeId, index]));
-    return nodes.map((node) => {
+    return filteredGraph.nodes.map((node) => {
       if (node.type !== "semantic") return node;
       const evidenceIndex = positionById.get(node.id);
       if (evidenceIndex === undefined || evidenceIndex >= evidenceCursor) {
@@ -103,12 +116,12 @@ function CanvasInner() {
         data: { ...node.data, evidenceState: evidenceIndex === evidenceCursor - 1 ? "current" : "visited" }
       } as WorkspaceNode;
     });
-  }, [evidenceCursor, evidencePath, nodes]);
+  }, [evidenceCursor, evidencePath, filteredGraph.nodes]);
 
   const decoratedEdges = useMemo(() => {
-    if (!evidencePath) return edges;
+    if (!evidencePath) return filteredGraph.edges;
     const positionById = new Map(evidencePath.edgeIds.map((edgeId, index) => [edgeId, index]));
-    return edges.map((edge) => {
+    return filteredGraph.edges.map((edge) => {
       const evidenceIndex = positionById.get(edge.id);
       if (evidenceIndex === undefined) return edge;
       return {
@@ -120,7 +133,7 @@ function CanvasInner() {
         }
       };
     });
-  }, [edges, evidenceCursor, evidencePath]);
+  }, [evidenceCursor, evidencePath, filteredGraph.edges]);
 
   useEffect(() => {
     setCanvasZoom(initialZoom);
@@ -128,18 +141,20 @@ function CanvasInner() {
 
   useEffect(() => {
     const focusGraph = () => {
-      const semanticNodes = nodes.filter((node) => node.type === "semantic").map(({ id }) => ({ id }));
+      const semanticNodes = decoratedNodes
+        .filter((node) => node.type === "semantic" && !node.hidden)
+        .map(({ id }) => ({ id }));
       if (semanticNodes.length) void fitView({ nodes: semanticNodes, padding: 0.16, duration: 320, maxZoom: 1 });
     };
     window.addEventListener("constelix:fit-graph", focusGraph);
     return () => window.removeEventListener("constelix:fit-graph", focusGraph);
-  }, [fitView, nodes]);
+  }, [decoratedNodes, fitView]);
 
   useEffect(() => {
     const focusEvidence = (event: Event) => {
       const nodeIds = (event as CustomEvent<string[]>).detail;
       const visibleIds = nodeIds.filter((nodeId) =>
-        nodes.some((node) => node.id === nodeId && !node.hidden),
+        decoratedNodes.some((node) => node.id === nodeId && !node.hidden),
       );
       if (visibleIds.length === 0) return;
       void fitView({
@@ -152,12 +167,12 @@ function CanvasInner() {
     window.addEventListener("constelix:focus-evidence", focusEvidence);
     return () =>
       window.removeEventListener("constelix:focus-evidence", focusEvidence);
-  }, [fitView, nodes]);
+  }, [decoratedNodes, fitView]);
 
   useEffect(() => {
     const activeId = evidencePath?.nodeIds[evidenceCursor - 1];
     if (!activeId) return;
-    const activeNode = nodes.find(
+    const activeNode = decoratedNodes.find(
       (node) => node.id === activeId && !node.hidden,
     );
     if (!activeNode) return;
@@ -167,7 +182,7 @@ function CanvasInner() {
       duration: 260,
       maxZoom: 1,
     });
-  }, [evidenceCursor, evidencePath, fitView, nodes]);
+  }, [decoratedNodes, evidenceCursor, evidencePath, fitView]);
 
   return (
     <main className="workspace-canvas" aria-label="Mapa visual del proyecto" data-testid="workspace-canvas">
@@ -234,6 +249,7 @@ function CanvasInner() {
         </Controls>
       </ReactFlow>
       <Legend />
+      <CanvasFilters evidenceOverrides={filteredGraph.evidenceOverrides} />
       {index.phase !== "ready" || graphReconciling ? (
         <div className={`index-status index-status--${index.phase}`} role="status">
           <span className="index-status-dot" />

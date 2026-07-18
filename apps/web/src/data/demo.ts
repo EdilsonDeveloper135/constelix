@@ -109,6 +109,12 @@ const assistantPanel: AssistantFlowNode = {
   zIndex: 19
 };
 
+export const demoToolPanels: WorkspaceNode[] = [
+  editorPanel,
+  terminalPanel,
+  assistantPanel,
+];
+
 export const demoSemanticNodes: SemanticFlowNode[] = [
   semantic("dir-web", 500, 35, "directory", "apps/web"),
   semantic("dir-src", 355, 125, "directory", "src"),
@@ -134,7 +140,7 @@ export const demoSemanticNodes: SemanticFlowNode[] = [
   semantic("module-terminal", 220, 530, "module", "terminal.gateway", "módulo", "apps/local-agent/src/terminal/gateway.ts")
 ];
 
-export const demoNodes: WorkspaceNode[] = [...demoSemanticNodes, editorPanel, terminalPanel, assistantPanel];
+export const demoNodes: WorkspaceNode[] = [...demoSemanticNodes, ...demoToolPanels];
 
 const edge = (
   id: string,

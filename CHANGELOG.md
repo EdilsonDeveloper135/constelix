@@ -1,5 +1,29 @@
 # Changelog
 
+## [v0.0.3] - 2026-07-17
+
+### Added
+- Apertura canónica de proyectos externos con ID estable, Modo Lectura/Edición, lock exclusivo y estado fuera del repositorio.
+- Onboarding con detección de proyecto/lenguajes, progreso, límites y omisiones; estados visibles de Ask, Codex y acceso.
+- Ask Local offline con resultados estructurados, snippets filtrados y fallback en el mismo turno cuando OpenAI no tiene cuota.
+- Filtros de canvas por tipo/extensión, preservación de evidencia y layout con resolución determinista de colisiones.
+- Fixtures externos, pruebas de aislamiento A/B, sandbox PTY de solo lectura y escenarios Playwright dedicados.
+
+### Fixed
+- Fugas de rutas absolutas mediante tareas Act y alias equivalentes de macOS como `/var` y `/private/var`.
+- Revalidación de la identidad canónica antes de escanear, indexar, consultar snippets, iniciar PTY o aprobar/ejecutar Codex.
+- Cruces potenciales de conversaciones, layouts, terminales y aprobaciones entre workspaces.
+- Onboarding desactualizado durante el escaneo al ignorar resúmenes recibidos por `index.progress`.
+- Estado de Ask desactualizado en la Topbar después de errores de cuota, clave o red.
+- Contrato de bootstrap incompleto: ahora expone y valida conjuntamente `mode` y `readOnly`.
+- El presupuesto agregado predeterminado del escáner ahora coincide con el límite documentado de 2 MiB.
+- El CLI ya no imprime la URL que contiene el token efímero de capacidad.
+
+### Known issues
+- Ask OpenAI depende de una clave y cuota válidas; Ask Local mantiene el workspace operativo cuando no están disponibles.
+- Vite continúa advirtiendo sobre chunks grandes de Monaco y ELK.
+- Permanece una carrera TOCTOU residual frente a otro proceso hostil ejecutado con la misma cuenta de macOS.
+
 ## [v0.0.2] - 2026-07-16
 
 ### Added

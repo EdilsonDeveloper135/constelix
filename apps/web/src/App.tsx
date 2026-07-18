@@ -1,7 +1,9 @@
 import { memo, useEffect } from "react";
 
 import { WorkspaceCanvas } from "./components/canvas/WorkspaceCanvas";
+import { WorkspaceOnboarding } from "./components/onboarding/WorkspaceOnboarding";
 import { CommandPalette } from "./components/shell/CommandPalette";
+import { GlobalNotice } from "./components/shell/GlobalNotice";
 import { Rail } from "./components/shell/Rail";
 import { Topbar } from "./components/shell/Topbar";
 import { useAgentBridge } from "./hooks/useAgentBridge";
@@ -27,6 +29,8 @@ export const App = memo(function App() {
       <Topbar />
       <Rail />
       <WorkspaceCanvas />
+      <GlobalNotice />
+      <WorkspaceOnboarding />
       <CommandPalette />
     </div>
   );

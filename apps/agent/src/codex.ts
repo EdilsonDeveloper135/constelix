@@ -4,7 +4,13 @@ import { promisify } from "node:util";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ConstelixDatabase } from "./database.js";
 import type { EventBus } from "./events.js";
-import { createSafeChildEnvironment, redactSecrets } from "./security.js";
+import {
+  assertWorkspaceReferenceIdentity,
+  createSafeChildEnvironment,
+  redactSecrets,
+  workspaceRootOf,
+  type WorkspaceReference,
+} from "./security.js";
 
 const execFileAsync = promisify(execFile);
 export const TESTED_CODEX_VERSION = "0.144.5";
@@ -151,14 +157,16 @@ export class CodexManager {
   #resumeThreadId: string | undefined;
   #startPromise: Promise<void> | undefined;
   readonly #activityTimers = new Map<string, NodeJS.Timeout>();
+  readonly #workspaceRoot: string;
 
   constructor(
     private readonly workspaceId: string,
-    private readonly workspaceRoot: string,
+    private readonly workspace: WorkspaceReference,
     private readonly events: EventBus,
     private readonly database: ConstelixDatabase,
     private readonly options: CodexManagerOptions = {},
   ) {
+    this.#workspaceRoot = workspaceRootOf(workspace);
     this.#resumeThreadId = database.loadLatestCodexThreadId(workspaceId);
   }
 
@@ -210,13 +218,13 @@ export class CodexManager {
       id: randomUUID(),
       objective: trimmed,
       status: "pending_approval",
-      workspaceRoot: this.workspaceRoot,
+      workspaceRoot: this.#workspaceRoot,
       createdAt: createdAt.toISOString(),
       expiresAt: new Date(createdAt.getTime() + APPROVAL_TTL_MS).toISOString(),
       scope: {
         protocolVersion: 1,
         workspaceId: this.workspaceId,
-        rootPath: this.workspaceRoot,
+        rootPath: this.#workspaceRoot,
         objective: trimmed,
         capabilities: [...capabilities],
         networkEnabled: true,
@@ -271,6 +279,7 @@ export class CodexManager {
     if (activeTask) {
       throw new Error("Another Codex task is already active in this workspace.");
     }
+    await this.assertWorkspace();
     task.status = "approved";
     task.approvedAt = new Date().toISOString();
     this.persist(task);
@@ -299,11 +308,12 @@ export class CodexManager {
 
       let turnId: string;
       try {
+        await this.assertWorkspace();
         const turnResult = (await this.request("turn/start", {
           threadId,
           input: [{ type: "text", text: task.objective }],
           approvalPolicy: "never",
-          sandboxPolicy: createCodexSandboxPolicy(this.workspaceRoot),
+          sandboxPolicy: createCodexSandboxPolicy(this.#workspaceRoot),
         })) as { turn?: { id?: string }; id?: string };
         const receivedTurnId = turnResult.turn?.id ?? turnResult.id;
         if (!receivedTurnId) throw new Error("Codex did not return a turn id.");
@@ -562,12 +572,13 @@ export class CodexManager {
     thread?: { id?: string };
     id?: string;
   }> {
+    await this.assertWorkspace();
     const existingThreadId = this.#resumeThreadId;
     if (existingThreadId) {
       try {
         const resumed = (await this.request("thread/resume", {
           threadId: existingThreadId,
-          cwd: this.workspaceRoot,
+          cwd: this.#workspaceRoot,
           approvalPolicy: "never",
           sandbox: "workspace-write",
           excludeTurns: true,
@@ -588,20 +599,21 @@ export class CodexManager {
     }
 
     return (await this.request("thread/start", {
-      cwd: this.workspaceRoot,
+      cwd: this.#workspaceRoot,
       approvalPolicy: "never",
       sandbox: "workspace-write",
     })) as { thread?: { id?: string }; id?: string };
   }
 
   private async ensureStarted(): Promise<void> {
+    await this.assertWorkspace();
     if (this.#startPromise) return this.#startPromise;
     if (this.#process && !this.#process.killed) return;
     const environment = createSafeChildEnvironment();
     const child = this.options.spawnAppServer
-      ? this.options.spawnAppServer(this.workspaceRoot, environment)
+      ? this.options.spawnAppServer(this.#workspaceRoot, environment)
       : spawn("codex", ["app-server"], {
-          cwd: this.workspaceRoot,
+          cwd: this.#workspaceRoot,
           env: environment,
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -621,7 +633,7 @@ export class CodexManager {
 
       try {
         await this.request("initialize", {
-          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.2" },
+          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.3" },
         });
         this.notify("initialized");
       } catch (error) {
@@ -664,6 +676,10 @@ export class CodexManager {
         reject(new CodexTransportError(method, cause));
       }
     });
+  }
+
+  private async assertWorkspace(): Promise<void> {
+    await assertWorkspaceReferenceIdentity(this.workspace);
   }
 
   private async invalidateAmbiguousSession(

@@ -7,8 +7,121 @@ import { ConstelixDatabase } from "./database.js";
 import { createWorkspaceId, startAgentServer } from "./server.js";
 
 describe("local agent HTTP boundary", () => {
+  it("opens a workspace in read mode without disabling local Ask", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-read-mode-"));
+    const root = join(parent, "workspace");
+    await mkdir(root);
+    await writeFile(join(root, "main.ts"), "export function localSymbol() { return true; }\n");
+    const server = await startAgentServer({
+      workspaceRoot: root,
+      readOnly: true,
+      port: 0,
+      capabilityToken: "read-mode-capability",
+      storageDirectory: join(parent, "state"),
+      databasePath: join(parent, "constelix.sqlite"),
+      webDistPath: join(parent, "missing-web-dist"),
+      askOptions: { apiKey: "" },
+    });
+    const headers = {
+      host: new URL(server.origin).host,
+      authorization: "Bearer read-mode-capability",
+      "content-type": "application/json",
+    };
+    try {
+      const bootstrap = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/bootstrap",
+        headers,
+      });
+      expect(bootstrap.statusCode).toBe(200);
+      expect(bootstrap.json()).toMatchObject({
+        workspace: {
+          id: server.workspaceId,
+          name: "workspace",
+          mode: "read",
+          readOnly: true,
+        },
+        capabilities: {
+          ask: true,
+          askMode: "local",
+          act: false,
+          terminal: true,
+        },
+      });
+      expect(JSON.stringify(bootstrap.json())).not.toContain(root);
+
+      const read = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/files/read",
+        headers,
+        payload: { protocolVersion: 1, relativePath: "main.ts" },
+      });
+      const contentHash = (read.json() as { contentHash: string }).contentHash;
+      const write = await server.app.inject({
+        method: "PUT",
+        url: "/api/v1/files/write",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          relativePath: "main.ts",
+          content: "export const changed = true;\n",
+          expectedContentHash: contentHash,
+        },
+      });
+      expect(write.statusCode).toBe(403);
+      expect(write.json()).toMatchObject({
+        error: { code: "WORKSPACE_READ_ONLY" },
+      });
+
+      const act = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/act/tasks",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          objective: "Change main.ts",
+          capabilities: ["read", "write", "command"],
+        },
+      });
+      expect(act.statusCode).toBe(403);
+      expect(act.json()).toMatchObject({
+        error: { code: "WORKSPACE_READ_ONLY" },
+      });
+
+      const ask = await server.app.inject({
+        method: "POST",
+        url: `/api/v1/ask/threads/${server.workspaceId}:main/turns`,
+        headers,
+        payload: {
+          protocolVersion: 1,
+          requestId: "read-mode-ask",
+          threadId: `${server.workspaceId}:main`,
+          prompt: "localSymbol",
+          selectedNodeIds: [],
+        },
+      });
+      expect(ask.statusCode).toBe(202);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects Constelix state paths inside the opened workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-state-containment-"));
+    await writeFile(join(root, "main.ts"), "export const safe = true;\n");
+
+    await expect(startAgentServer({
+      workspaceRoot: root,
+      port: 0,
+      storageDirectory: join(root, ".constelix"),
+      databasePath: join(root, ".constelix", "constelix.sqlite"),
+      webDistPath: join(root, "missing-web-dist"),
+    })).rejects.toThrow("storageDirectory debe estar fuera del workspace.");
+  });
+
   it("returns bootstrap while Codex compatibility is still being checked", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-codex-bootstrap-"));
+    const stateRoot = await mkdtemp(join(tmpdir(), "constelix-codex-state-"));
     await writeFile(join(root, "main.ts"), "export const ready = true;\n");
     let resolveVersion: ((version: string) => void) | undefined;
     const version = new Promise<string>((resolve) => {
@@ -18,8 +131,8 @@ describe("local agent HTTP boundary", () => {
       workspaceRoot: root,
       port: 0,
       capabilityToken: "codex-bootstrap-capability",
-      storageDirectory: join(root, ".constelix-test-state"),
-      databasePath: join(root, "agent-test.sqlite"),
+      storageDirectory: join(stateRoot, "state"),
+      databasePath: join(stateRoot, "agent-test.sqlite"),
       webDistPath: join(root, "missing-web-dist"),
       codexOptions: {
         getCodexVersion: async () => version,
@@ -81,13 +194,14 @@ describe("local agent HTTP boundary", () => {
 
   it("requires a capability and reads workspace files", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-server-"));
+    const stateRoot = await mkdtemp(join(tmpdir(), "constelix-server-state-"));
     await writeFile(join(root, "main.ts"), "export const answer = 42;\n");
     const server = await startAgentServer({
       workspaceRoot: root,
       port: 0,
       capabilityToken: "test-capability",
-      storageDirectory: join(root, ".constelix-test-state"),
-      databasePath: join(root, "agent-test.sqlite"),
+      storageDirectory: join(stateRoot, "state"),
+      databasePath: join(stateRoot, "agent-test.sqlite"),
       webDistPath: join(root, "missing-web-dist"),
     });
     const host = new URL(server.origin).host;
@@ -275,6 +389,8 @@ describe("local agent HTTP boundary", () => {
         status: "pending_approval",
         scope: { networkEnabled: true, outsideWorkspaceWrites: false },
       });
+      expect(actTask.json()).not.toHaveProperty("workspaceRoot");
+      expect(JSON.stringify(actTask.json())).not.toContain(root);
       const actTaskId = (actTask.json() as { id: string }).id;
       const bootstrapWithActiveTask = await server.app.inject({
         method: "GET",
@@ -295,6 +411,12 @@ describe("local agent HTTP boundary", () => {
           },
         },
       });
+      expect(bootstrapWithActiveTask.json().activeActTask).not.toHaveProperty(
+        "workspaceRoot",
+      );
+      expect(
+        JSON.stringify(bootstrapWithActiveTask.json().activeActTask),
+      ).not.toContain(root);
 
       const approvalWithoutConsent = await server.app.inject({
         method: "POST",
@@ -530,7 +652,7 @@ describe("local agent HTTP boundary", () => {
           databasePath,
           webDistPath: join(parent, "missing-web-dist"),
         }),
-      ).rejects.toThrow(/already running/i);
+      ).rejects.toThrow("El workspace ya está abierto por otra instancia de Constelix.");
 
       const saved = await first.app.inject({
         method: "PUT",

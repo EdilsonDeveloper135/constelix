@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@fixture/*": ["src/*"]
+    },
+    "strict": true
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,12 +1,17 @@
 import type { Edge, Node } from "@xyflow/react";
 import type {
   ActTask as ContractActTask,
+  AskMode,
+  AskProviderStatus,
   EvidencePath as ContractEvidencePath,
   GraphSnapshot as ContractGraphSnapshot,
+  LocalAskResult,
   PanelState,
   ServerEvent,
   SourceRange,
   TerminalSession,
+  WorkspaceAccessMode,
+  WorkspaceSummary,
 } from "@constelix/contracts";
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -51,6 +56,10 @@ export interface SemanticNodeData extends Record<string, unknown> {
   health?: "healthy" | "warning" | "idle";
   evidenceState?: "visited" | "current";
 }
+
+export type WorkspaceMode = WorkspaceAccessMode;
+export type WorkspaceAskMode = AskMode;
+export type WorkspaceAskProviderStatus = AskProviderStatus;
 
 export interface EditorPanelData extends Record<string, unknown> {
   panelType: "editor";
@@ -110,6 +119,8 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   evidence?: EvidencePath;
+  mode?: WorkspaceAskMode;
+  localResult?: LocalAskResult;
 }
 
 export interface IndexStatus {
@@ -127,8 +138,11 @@ export interface BootstrapPayload {
     id: string;
     name: string;
     rootPath: string;
+    mode: WorkspaceMode;
+    readOnly: boolean;
     branch?: string;
   };
+  summary: WorkspaceSummary;
   graph: GraphSnapshot;
   index: IndexStatus;
   layout?: PanelState[];
@@ -138,10 +152,28 @@ export interface BootstrapPayload {
   terminals: TerminalSession[];
   capabilities?: {
     ask: boolean;
+    askMode: WorkspaceAskMode;
+    askProviderStatus: WorkspaceAskProviderStatus;
+    askNotice?: string;
     act: boolean;
     terminal: boolean;
     codexReason?: string;
+    codexChecking?: boolean;
+    codexVersion?: string;
   };
+}
+
+export interface WorkspaceNotice {
+  id: string;
+  code: string;
+  message: string;
+  severity: "info" | "warning" | "error";
+  recoverable: boolean;
+}
+
+export interface CanvasFilters {
+  nodeKind: SemanticNodeKind | "all";
+  extension: string | "all";
 }
 
 export interface TerminalRuntime {

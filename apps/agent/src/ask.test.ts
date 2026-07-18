@@ -1,7 +1,7 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GraphNode } from "@constelix/contracts";
+import type { GraphEdge, GraphNode, GraphSnapshot } from "@constelix/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,8 +9,9 @@ import {
   AskService,
   AskContextBudgetError,
   DEFAULT_ASK_MODEL,
+  LocalAskEngine,
   MAX_ASK_GRAPH_NODES,
-  OpenAIUnavailableError,
+  MAX_LOCAL_ASK_HITS,
   type AIProvider,
   type GraphFacade,
   compactAskContextSegments,
@@ -22,6 +23,10 @@ import {
 } from "./ask.js";
 import { ConstelixDatabase } from "./database.js";
 import { EventBus, type LocalServerEvent } from "./events.js";
+import {
+  WorkspaceIdentityError,
+  inspectWorkspace,
+} from "./security.js";
 
 describe("normalizeOpenAIError", () => {
   it("distinguishes exhausted quota from transient rate limiting", () => {
@@ -126,8 +131,9 @@ describe("Ask context budget", () => {
 });
 
 describe("AskService provider integration", () => {
-  it("stays disabled and rejects turns when no API key is configured", () => {
+  it("accepts turns in local mode when no API key is configured", async () => {
     const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", "/tmp/workspace");
     const events = new EventBus();
     const ask = new AskService(
       "workspace",
@@ -138,10 +144,302 @@ describe("AskService provider integration", () => {
       { apiKey: "" },
     );
     try {
-      expect(ask.available).toBe(false);
-      expect(() => ask.startTurn("thread", "Explain the project")).toThrow(
-        OpenAIUnavailableError,
+      expect(ask.available).toBe(true);
+      expect(ask.mode).toBe("local");
+      expect(ask.providerStatus).toBe("missing_api_key");
+      expect(ask.notice).toMatch(/Ask funciona en modo local/);
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
       );
+      expect(() => ask.startTurn("thread", "Explain the project")).not.toThrow();
+      const event = await completed;
+      expect(event.payload).toMatchObject({
+        type: "completed",
+        mode: "local",
+        localResult: {
+          query: "Explain the project",
+          hits: [],
+        },
+      });
+      expect(database.loadAiMessages("thread")).toHaveLength(2);
+      expect(database.loadAiMessages("thread").at(-1)).toMatchObject({
+        role: "assistant",
+        mode: "local",
+        localResult: { query: "Explain the project" },
+      });
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
+
+  it("returns structured local FTS hits with signatures, relations and filtered snippets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-local-"));
+    await mkdir(join(root, "src"));
+    await writeFile(
+      join(root, "src/runner.ts"),
+      [
+        "export async function runWorkspace(projectPath: string) {",
+        "  return projectPath;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const runner: GraphNode = {
+      ...graphNode("execute", "src/runner.ts"),
+      name: "execute",
+      qualifiedName: "src.runner.execute",
+      range: {
+        start: { line: 0, column: 0 },
+        end: { line: 2, column: 1 },
+      },
+      metadata: {
+        signature: "export async function runWorkspace(projectPath: string)",
+      },
+    };
+    const caller: GraphNode = {
+      ...graphNode("caller", "src/caller.ts"),
+      kind: "module",
+    };
+    const relation = graphEdge("caller-runner", caller.id, runner.id, "calls");
+    const snapshot = graphSnapshot([runner, caller], [relation]);
+    const graph = createGraphFacade([runner, caller], {
+      search: [],
+      neighbors: {
+        nodes: [caller],
+        edges: [relation],
+      },
+      snapshot,
+    });
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    database.replaceGraph("workspace", snapshot);
+    const events = new EventBus();
+    const ask = new AskService("workspace", root, graph, database, events, {
+      apiKey: "",
+    });
+
+    try {
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+      ask.startTurn("thread-local", "runWorkspace", "request-local");
+      const event = await completed;
+
+      expect(event.payload).toMatchObject({
+        type: "completed",
+        mode: "local",
+        localResult: {
+          query: "runWorkspace",
+          revision: 1,
+          truncated: false,
+          hits: [{
+            nodeId: runner.id,
+            signature: "export async function runWorkspace(projectPath: string)",
+            matchedFields: expect.arrayContaining(["signature"]),
+            relations: [{
+              edgeId: relation.id,
+              relation: "calls",
+              direction: "inbound",
+              targetNodeId: caller.id,
+            }],
+            snippet: {
+              startLine: 1,
+              content: expect.stringContaining("runWorkspace"),
+            },
+          }],
+        },
+      });
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
+
+  it("bounds local results to twenty hits and reports truncation", async () => {
+    const nodes = Array.from(
+      { length: MAX_LOCAL_ASK_HITS + 1 },
+      (_, index) => ({
+        ...graphNode(`node-${index}`, `src/node-${index}.ts`),
+        metadata: { signature: `function node${index}()` },
+      }),
+    );
+    const snapshot = graphSnapshot(nodes, []);
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", "/tmp/workspace");
+    database.replaceGraph("workspace", snapshot);
+    const engine = new LocalAskEngine(
+      "workspace",
+      "/tmp/workspace",
+      createGraphFacade(nodes, { snapshot }),
+      database,
+    );
+    try {
+      const result = await engine.search("node");
+      expect(result.hits).toHaveLength(MAX_LOCAL_ASK_HITS);
+      expect(result.truncated).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects local searches after the canonical workspace root is replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-ask-identity-"));
+    const root = join(parent, "workspace");
+    await mkdir(root);
+    const workspace = await inspectWorkspace(root);
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", workspace.canonicalRoot);
+    const engine = new LocalAskEngine(
+      "workspace",
+      workspace,
+      createGraphFacade([]),
+      database,
+    );
+    try {
+      await rename(root, join(parent, "workspace-original"));
+      await mkdir(root);
+      await expect(engine.search("anything")).rejects.toBeInstanceOf(
+        WorkspaceIdentityError,
+      );
+    } finally {
+      database.close();
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back within the same turn on insufficient quota without duplicating the user message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-quota-"));
+    const node = {
+      ...graphNode("workspace-indexer", "indexer.ts"),
+      metadata: { signature: "class WorkspaceIndexer" },
+    };
+    const snapshot = graphSnapshot([node], []);
+    const graph = createGraphFacade([node], { snapshot });
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    database.replaceGraph("workspace", snapshot);
+    const events = new EventBus();
+    const provider = new QuotaProvider();
+    const ask = new AskService("workspace", root, graph, database, events, {
+      provider,
+    });
+    const published: LocalServerEvent[] = [];
+    const unsubscribe = events.subscribe((event) => published.push(event));
+
+    try {
+      const firstCompleted = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+      ask.startTurn("thread-quota", "WorkspaceIndexer", "request-quota");
+      const completed = await firstCompleted;
+
+      expect(completed.payload).toMatchObject({
+        type: "completed",
+        mode: "local",
+        localResult: {
+          hits: [{ nodeId: node.id }],
+        },
+      });
+      expect(published).toContainEqual(expect.objectContaining({
+        type: "ask.event",
+        payload: expect.objectContaining({
+          type: "fallback",
+          from: "openai",
+          to: "local",
+          code: "INSUFFICIENT_QUOTA",
+          discardPartial: true,
+        }),
+      }));
+      expect(published).toContainEqual(expect.objectContaining({
+        type: "capabilities.updated",
+        payload: {
+          askMode: "local",
+          askProviderStatus: "insufficient_quota",
+          askNotice: expect.stringMatching(/cuota/),
+        },
+      }));
+      expect(ask.mode).toBe("local");
+      expect(ask.providerStatus).toBe("insufficient_quota");
+      expect(ask.notice).toMatch(/cuota/);
+      expect(database.loadAiMessages("thread-quota")).toHaveLength(2);
+      expect(database.loadAiMessages("thread-quota").map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+      expect(JSON.stringify(database.loadAiMessages("thread-quota"))).not.toContain(
+        "partial remote answer",
+      );
+
+      const secondCompleted = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed" &&
+          event.payload.requestId === "request-local-after-quota",
+      );
+      ask.startTurn(
+        "thread-quota",
+        "WorkspaceIndexer",
+        "request-local-after-quota",
+      );
+      await secondCompleted;
+      expect(provider.requests).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
+
+  it("keeps non-quota provider failures classified without silently changing modes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-invalid-key-"));
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    const events = new EventBus();
+    const ask = new AskService(
+      "workspace",
+      root,
+      createGraphFacade([]),
+      database,
+      events,
+      { provider: new FailingProvider("invalid_api_key", 401, "bad key") },
+    );
+    try {
+      const failed = waitForEvent(events, (event) => event.type === "ask.turn.error");
+      const capabilitiesUpdated = waitForEvent(
+        events,
+        (event) => event.type === "capabilities.updated",
+      );
+      ask.startTurn("thread-invalid", "Explain", "request-invalid");
+      const event = await failed;
+      await expect(capabilitiesUpdated).resolves.toMatchObject({
+        payload: {
+          askMode: "openai",
+          askProviderStatus: "invalid_api_key",
+          askNotice: expect.stringMatching(/rechazó la clave/),
+        },
+      });
+      expect(event.payload).toMatchObject({ code: "INVALID_API_KEY" });
+      expect(ask.mode).toBe("openai");
+      expect(ask.providerStatus).toBe("invalid_api_key");
+      expect(ask.notice).toMatch(/rechazó la clave/);
     } finally {
       ask.close();
       events.close();
@@ -447,6 +745,7 @@ describe("AskService provider integration", () => {
       expect(fixture.database.loadAiMessages("thread-no-path").at(-1)).toEqual({
         role: "assistant",
         content: "La evidencia disponible es insuficiente.",
+        mode: "openai",
       });
     } finally {
       unsubscribe();
@@ -546,6 +845,48 @@ class BlockingProvider implements AIProvider {
   }
 }
 
+class QuotaProvider implements AIProvider {
+  readonly requests: Array<Record<string, unknown>> = [];
+
+  async stream(
+    request: Record<string, unknown>,
+    _signal: AbortSignal,
+  ): Promise<AsyncIterable<Record<string, unknown>>> {
+    this.requests.push(request);
+    return (async function* () {
+      yield {
+        type: "response.output_text.delta",
+        delta: "partial remote answer",
+      };
+      const error = new Error("current quota exhausted") as Error & {
+        code: string;
+        status: number;
+      };
+      error.code = "insufficient_quota";
+      error.status = 429;
+      throw error;
+    })();
+  }
+}
+
+class FailingProvider implements AIProvider {
+  constructor(
+    private readonly code: string,
+    private readonly status: number,
+    private readonly message: string,
+  ) {}
+
+  async stream(): Promise<AsyncIterable<Record<string, unknown>>> {
+    const error = new Error(this.message) as Error & {
+      code: string;
+      status: number;
+    };
+    error.code = this.code;
+    error.status = this.status;
+    throw error;
+  }
+}
+
 function createAskFixture(root: string, graph: GraphFacade, provider: AIProvider) {
   const database = new ConstelixDatabase(":memory:");
   database.upsertWorkspace("workspace", root);
@@ -560,22 +901,20 @@ function createAskFixture(root: string, graph: GraphFacade, provider: AIProvider
 
 function createGraphFacade(
   nodes: readonly GraphNode[],
-  overrides: { search?: unknown; shortestPath?: unknown } = {},
+  overrides: {
+    search?: unknown;
+    shortestPath?: unknown;
+    neighbors?: unknown;
+    snapshot?: GraphSnapshot;
+  } = {},
 ): GraphFacade {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   return {
     getNode: (id) => byId.get(id),
-    snapshot: () => ({
-      protocolVersion: 1,
-      workspaceId: "workspace",
-      revision: 1,
-      nodes: [...nodes],
-      edges: [],
-      truncated: false,
-    }),
+    snapshot: () => overrides.snapshot ?? graphSnapshot(nodes, []),
     query: () => ({ nodes: [], edges: [] }),
     search: () => overrides.search ?? [],
-    neighbors: () => ({ nodes: [], edges: [] }),
+    neighbors: () => overrides.neighbors ?? { nodes: [], edges: [] },
     shortestPath: () => overrides.shortestPath ?? null,
   };
 }
@@ -591,6 +930,39 @@ function graphNode(id: string, relativePath: string): GraphNode {
     language: "typescript",
     revision: 1,
     metadata: {},
+  };
+}
+
+function graphEdge(
+  id: string,
+  source: string,
+  target: string,
+  relation: GraphEdge["relation"],
+): GraphEdge {
+  return {
+    protocolVersion: 1,
+    id,
+    source,
+    target,
+    relation,
+    confidence: "extracted",
+    evidence: [],
+    revision: 1,
+    metadata: {},
+  };
+}
+
+function graphSnapshot(
+  nodes: readonly GraphNode[],
+  edges: readonly GraphEdge[],
+): GraphSnapshot {
+  return {
+    protocolVersion: 1,
+    workspaceId: "workspace",
+    revision: 1,
+    nodes: [...nodes],
+    edges: [...edges],
+    truncated: false,
   };
 }
 

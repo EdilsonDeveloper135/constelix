@@ -1,0 +1,9 @@
+{
+  "name": "constelix-v003-monorepo-fixture",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

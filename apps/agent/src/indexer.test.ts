@@ -12,6 +12,10 @@ import {
   mergeIncrementalSnapshot,
   type IndexStatus,
 } from "./indexer.js";
+import {
+  WorkspaceIdentityError,
+  inspectWorkspace,
+} from "./security.js";
 
 const temporaryRoots: string[] = [];
 
@@ -52,6 +56,34 @@ describe("mergeIncrementalSnapshot", () => {
 });
 
 describe("WorkspaceIndexer incremental updates", () => {
+  it("refuses to start after the canonical workspace root is replaced", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-index-identity-"));
+    temporaryRoots.push(parent);
+    const root = join(parent, "workspace");
+    await mkdir(root);
+    const workspace = await inspectWorkspace(root);
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", workspace.canonicalRoot);
+    const events = new EventBus();
+    const indexer = new WorkspaceIndexer(
+      "workspace",
+      workspace,
+      database,
+      events,
+    );
+    try {
+      await rename(root, join(parent, "workspace-original"));
+      await mkdir(root);
+      await expect(indexer.start()).rejects.toBeInstanceOf(
+        WorkspaceIdentityError,
+      );
+    } finally {
+      await indexer.close();
+      events.close();
+      database.close();
+    }
+  });
+
   it("does not become ready until the watcher baseline is established and reconciled", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-watcher-ready-"));
     temporaryRoots.push(root);
@@ -557,7 +589,7 @@ describe("WorkspaceIndexer incremental updates", () => {
       ).toBe(false);
       expect(replaceIndexRevision.mock.calls.at(-1)?.[1].truncated).toBe(true);
       expect(indexer.status.message).toContain(
-        `${budget} byte aggregate source-memory limit`,
+        `${budget} aggregate source bytes`,
       );
       const diagnostics = replaceIndexRevision.mock.calls.at(-1)?.[3] as
         | Array<{ relativePath?: string; message?: string }>
@@ -567,7 +599,7 @@ describe("WorkspaceIndexer incremental updates", () => {
           expect.objectContaining({
             relativePath: "c.ts",
             message: expect.stringContaining(
-              "aggregate source-memory limit",
+              "aggregate source bytes",
             ),
           }),
         ]),
@@ -638,7 +670,7 @@ describe("WorkspaceIndexer incremental updates", () => {
       expect(replaceIndexRevision).toHaveBeenCalledTimes(1);
       expect(database.loadGraph("workspace")?.truncated).toBe(true);
       expect(indexer.status.message).toContain(
-        `${budget} byte aggregate source-memory limit`,
+        `${budget} aggregate source bytes`,
       );
       const audit = database.raw
         .prepare(

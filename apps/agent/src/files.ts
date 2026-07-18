@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
+  assertWorkspaceWritable,
   resolveExistingWorkspacePath,
   resolveWritableWorkspacePath,
+  type WorkspaceReference,
 } from "./security.js";
 
 export const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
@@ -42,10 +44,10 @@ export interface ReadTextResult {
 }
 
 export async function readWorkspaceTextFile(
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
   relativePath: string,
 ): Promise<ReadTextResult> {
-  const path = await resolveExistingWorkspacePath(workspaceRoot, relativePath);
+  const path = await resolveExistingWorkspacePath(workspace, relativePath);
   const info = await stat(path);
   if (!info.isFile()) throw new Error("The requested path is not a file.");
   if (info.size > MAX_TEXT_FILE_BYTES) throw new FileTooLargeError(info.size);
@@ -65,9 +67,10 @@ export async function readWorkspaceTextFile(
 }
 
 export async function writeWorkspaceTextFile(
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
   request: { relativePath: string; content: string; expectedContentHash?: string },
 ): Promise<ReadTextResult> {
+  assertWorkspaceWritable(workspace);
   const contentBuffer = Buffer.from(request.content, "utf8");
   if (contentBuffer.byteLength > MAX_TEXT_FILE_BYTES) {
     throw new FileTooLargeError(contentBuffer.byteLength);
@@ -76,7 +79,7 @@ export async function writeWorkspaceTextFile(
     throw new Error("NUL bytes are not accepted by the text editor.");
   }
 
-  const target = await resolveWritableWorkspacePath(workspaceRoot, request.relativePath);
+  const target = await resolveWritableWorkspacePath(workspace, request.relativePath);
   let currentMode: number | undefined;
   let actualHash = "";
   try {
@@ -104,7 +107,7 @@ export async function writeWorkspaceTextFile(
     await writeFile(temporary, contentBuffer, { mode: currentMode ?? 0o600, flag: "wx" });
     if (currentMode !== undefined) await chmod(temporary, currentMode);
     const revalidatedTarget = await resolveWritableWorkspacePath(
-      workspaceRoot,
+      workspace,
       request.relativePath,
     );
     if (revalidatedTarget !== target) {
@@ -116,5 +119,5 @@ export async function writeWorkspaceTextFile(
     throw error;
   }
 
-  return readWorkspaceTextFile(workspaceRoot, request.relativePath);
+  return readWorkspaceTextFile(workspace, request.relativePath);
 }

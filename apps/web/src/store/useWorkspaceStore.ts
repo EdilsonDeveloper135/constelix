@@ -4,12 +4,23 @@ import type {
   ActTask as ContractActTask,
   ActTaskStatus,
   PanelState,
+  WorkspaceSummary,
 } from "@constelix/contracts";
 
-import { demoEdges, demoEvidencePath, demoIndexStatus, demoNodes } from "../data/demo";
+import {
+  demoEdges,
+  demoEvidencePath,
+  demoIndexStatus,
+  demoNodes,
+  demoToolPanels,
+} from "../data/demo";
 import { AgentRequestError, apiClient } from "../lib/api";
+import { clearEditorDraftsForWorkspace } from "../lib/editorDrafts";
 import { graphRecordsToFlowEdges, graphRecordsToFlowNodes } from "../lib/graph";
-import { layoutSemanticNodes } from "../lib/layout";
+import {
+  layoutSemanticNodes,
+  resolveSemanticLayoutCollisions,
+} from "../lib/layout";
 import {
   derivePinnedSemanticNodes,
   serializeWorkspaceLayout,
@@ -28,6 +39,7 @@ import type {
   AgentEvent,
   AssistantMode,
   BootstrapPayload,
+  CanvasFilters,
   ConnectionState,
   ConversationMessage,
   EditorPanelData,
@@ -37,15 +49,24 @@ import type {
   TerminalFlowNode,
   TerminalPanelData,
   TerminalRuntime,
+  WorkspaceAskMode,
+  WorkspaceAskProviderStatus,
   WorkspaceEdge,
+  WorkspaceMode,
   WorkspaceNode,
+  WorkspaceNotice,
 } from "../types";
 
 interface WorkspaceState {
+  workspaceId: string;
   workspaceName: string;
   askThreadId: string;
   rootPath: string;
   branch: string;
+  workspaceMode: WorkspaceMode;
+  workspaceSummary: WorkspaceSummary;
+  onboardingOpen: boolean;
+  notices: WorkspaceNotice[];
   connection: ConnectionState;
   demoMode: boolean;
   activeTool: RailTool;
@@ -62,7 +83,9 @@ interface WorkspaceState {
   expansionCursors: Record<string, string | null>;
   collapsedNodeIds: Record<string, boolean>;
   pinnedSemanticNodeIds: Record<string, boolean>;
+  semanticVersion: number;
   compactMode: boolean;
+  canvasFilters: CanvasFilters;
   terminalRuntimes: Record<string, TerminalRuntime>;
   index: IndexStatus;
   assistantMode: AssistantMode;
@@ -79,8 +102,13 @@ interface WorkspaceState {
   evidenceForcedNodeIds: Record<string, boolean>;
   actTask: ActTask | null;
   askAvailable: boolean;
+  askMode: WorkspaceAskMode;
+  askProviderStatus: WorkspaceAskProviderStatus;
+  askNotice: string | undefined;
   actAvailable: boolean;
   codexReason: string | undefined;
+  codexChecking: boolean;
+  codexVersion: string | undefined;
   onNodesChange: (changes: NodeChange<WorkspaceNode>[]) => void;
   onEdgesChange: (changes: EdgeChange<WorkspaceEdge>[]) => void;
   setConnection: (connection: ConnectionState) => void;
@@ -102,6 +130,11 @@ interface WorkspaceState {
   activateSemanticNode: (nodeId: string) => Promise<void>;
   toggleSemanticCollapse: (nodeId: string) => void;
   setCanvasZoom: (zoom: number) => void;
+  setNodeKindFilter: (kind: CanvasFilters["nodeKind"]) => void;
+  setExtensionFilter: (extension: string) => void;
+  resetCanvasFilters: () => void;
+  acknowledgeOnboarding: () => void;
+  dismissNotice: (id: string) => void;
   setActiveTool: (tool: RailTool) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   togglePanel: (id: string, visible?: boolean) => void;
@@ -131,6 +164,7 @@ interface HydrationGuards {
   preserveTerminals?: boolean;
   preserveConnection?: boolean;
   preserveActCapability?: boolean;
+  preserveAskCapability?: boolean;
 }
 
 let evidenceTimer: number | null = null;
@@ -144,9 +178,52 @@ let indexTransportEpoch = 0;
 let terminalTransportEpoch = 0;
 let connectionTransportEpoch = 0;
 let actCapabilityTransportEpoch = 0;
+let askCapabilityTransportEpoch = 0;
+let layoutRequestEpoch = 0;
 let reconcileAbortController: AbortController | null = null;
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 150, 600] as const;
 const startsInDemoMode = !apiClient.hasToken;
+const emptyWorkspaceSummary: WorkspaceSummary = {
+  projectTypes: [],
+  languages: [],
+  estimatedFileCount: 0,
+  indexedFileCount: 0,
+  warnings: [],
+  omittedFiles: [],
+  omittedFileCount: 0,
+  omittedFilesTruncated: false,
+};
+
+function createConnectedPanelNodes(): WorkspaceNode[] {
+  return demoToolPanels.map((node) => {
+    const cloned = {
+      ...node,
+      position: { ...node.position },
+      data: { ...node.data },
+      ...(node.style ? { style: { ...node.style } } : {}),
+    } as WorkspaceNode;
+    if (cloned.type === "editorPanel") {
+      const { contentHash: _contentHash, ...data } = cloned.data;
+      return {
+        ...cloned,
+        hidden: true,
+        data: {
+          ...data,
+          title: "Editor",
+          relativePath: "",
+          preview: "",
+        },
+      };
+    }
+    if (cloned.type === "terminalPanel") {
+      return {
+        ...cloned,
+        data: { ...cloned.data, title: "Terminal — workspace", cwd: "." },
+      };
+    }
+    return cloned;
+  });
+}
 
 function collapsedSet(collapsedNodeIds: Readonly<Record<string, boolean>>): Set<string> {
   return new Set(
@@ -281,16 +358,29 @@ function visibleGraphState(
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
+  workspaceId: startsInDemoMode ? "demo" : "",
   workspaceName: startsInDemoMode ? "constelix" : "Conectando…",
   askThreadId: startsInDemoMode ? "workspace-main" : "",
   rootPath: startsInDemoMode ? "~/Proyectos/constelix" : "Cargando workspace…",
   branch: startsInDemoMode ? "main" : "—",
+  workspaceMode: "edit",
+  workspaceSummary: startsInDemoMode
+    ? {
+        ...emptyWorkspaceSummary,
+        projectTypes: ["Monorepo pnpm"],
+        languages: ["typescript", "javascript"],
+        estimatedFileCount: demoIndexStatus.filesIndexed,
+        indexedFileCount: demoIndexStatus.filesIndexed,
+      }
+    : emptyWorkspaceSummary,
+  onboardingOpen: false,
+  notices: [],
   connection: "connecting",
   demoMode: startsInDemoMode,
   activeTool: "map",
   commandPaletteOpen: false,
-  nodes: demoNodes,
-  edges: demoEdges,
+  nodes: startsInDemoMode ? demoNodes : createConnectedPanelNodes(),
+  edges: startsInDemoMode ? demoEdges : [],
   graphRevision: 0,
   graphSourceTruncated: false,
   graphTruncated: false,
@@ -301,7 +391,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   expansionCursors: {},
   collapsedNodeIds: {},
   pinnedSemanticNodeIds: {},
+  semanticVersion: startsInDemoMode ? 1 : 0,
   compactMode: false,
+  canvasFilters: { nodeKind: "all", extension: "all" },
   terminalRuntimes: {},
   index: startsInDemoMode
     ? demoIndexStatus
@@ -339,10 +431,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   evidenceForcedNodeIds: {},
   actTask: null,
   askAvailable: startsInDemoMode,
+  askMode: startsInDemoMode ? "openai" : "local",
+  askProviderStatus: startsInDemoMode ? "ready" : "unavailable",
+  askNotice: undefined,
   actAvailable: startsInDemoMode,
   codexReason: startsInDemoMode
     ? undefined
     : "Comprobando el agente local…",
+  codexChecking: !startsInDemoMode,
+  codexVersion: undefined,
 
   onNodesChange: (changes) =>
     set((state) => {
@@ -380,11 +477,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   hydrateBootstrap: (payload, guards = {}) => {
     const previous = get();
-    const preserveSessionState = previous.remoteHydrated;
+    const sameWorkspace =
+      previous.remoteHydrated && previous.workspaceId === payload.workspace.id;
+    const preserveSessionState = sameWorkspace;
+    if (!sameWorkspace && previous.workspaceId) {
+      clearEditorDraftsForWorkspace(previous.workspaceId);
+      for (const runtime of Object.values(previous.terminalRuntimes)) {
+        void apiClient.deleteTerminal(runtime.terminalId).catch(() => undefined);
+      }
+    }
     const preserveGraphState =
-      Boolean(guards.preserveGraph) ||
-      (preserveSessionState &&
-        previous.graphRevision >= payload.graph.revision);
+      sameWorkspace &&
+      (Boolean(guards.preserveGraph) ||
+        (preserveSessionState &&
+          previous.graphRevision >= payload.graph.revision));
     const preserveActiveAsk =
       preserveSessionState &&
       previous.assistantThinking &&
@@ -423,7 +529,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         node.data.kind === "file" &&
         Boolean(node.data.relativePath),
     );
-    const panelNodes = previous.nodes
+    const panelNodes = (sameWorkspace
+      ? previous.nodes.filter((node) => node.type !== "semantic")
+      : createConnectedPanelNodes())
       .filter((node) => node.type !== "semantic")
       .map((node) => {
         if (preserveSessionState) return node;
@@ -499,7 +607,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     );
     const terminalPanelIds = new Set(terminalPanelCwds.keys());
     const restoredTerminalRuntimes =
-      guards.preserveTerminals
+      guards.preserveTerminals && sameWorkspace
         ? previous.terminalRuntimes
         : Object.fromEntries(
             payload.terminals.flatMap((terminal) =>
@@ -522,10 +630,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       preserveSessionState,
     );
     set({
+      workspaceId: payload.workspace.id,
       workspaceName: payload.workspace.name,
       askThreadId: `${payload.workspace.id}:main`,
       rootPath: payload.workspace.rootPath,
       branch: payload.workspace.branch ?? "—",
+      workspaceMode: payload.workspace.mode,
+      workspaceSummary: payload.summary,
+      onboardingOpen: sameWorkspace ? previous.onboardingOpen : true,
+      notices: sameWorkspace ? previous.notices : [],
       nodes: visibleState.nodes,
       edges: graphEdges,
       graphRevision: preserveGraphState
@@ -541,6 +654,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       expansionCursors,
       collapsedNodeIds,
       pinnedSemanticNodeIds,
+      semanticVersion:
+        preserveGraphState && sameWorkspace
+          ? previous.semanticVersion
+          : previous.semanticVersion + 1,
       terminalRuntimes: restoredTerminalRuntimes,
       index:
         guards.preserveIndex
@@ -581,13 +698,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         restoredAssistant?.type === "assistantPanel"
           ? restoredAssistant.data.mode
           : "ask",
-      askAvailable: payload.capabilities?.ask ?? false,
+      askAvailable: guards.preserveAskCapability
+        ? previous.askAvailable
+        : payload.capabilities?.ask ?? false,
+      askMode: guards.preserveAskCapability
+        ? previous.askMode
+        : payload.capabilities?.askMode ?? "local",
+      askProviderStatus: guards.preserveAskCapability
+        ? previous.askProviderStatus
+        : payload.capabilities?.askProviderStatus ?? "unavailable",
+      askNotice: guards.preserveAskCapability
+        ? previous.askNotice
+        : payload.capabilities?.askNotice,
       actAvailable: guards.preserveActCapability
         ? previous.actAvailable
-        : payload.capabilities?.act ?? false,
+        : payload.workspace.mode === "edit" &&
+          (payload.capabilities?.act ?? false),
       codexReason: guards.preserveActCapability
         ? previous.codexReason
-        : payload.capabilities?.codexReason,
+        : payload.workspace.mode === "read"
+          ? "Actuar está deshabilitado en Modo Lectura."
+          : payload.capabilities?.codexReason,
+      codexChecking: guards.preserveActCapability
+        ? previous.codexChecking
+        : payload.capabilities?.codexChecking ?? false,
+      codexVersion: guards.preserveActCapability
+        ? previous.codexVersion
+        : payload.capabilities?.codexVersion,
+      canvasFilters: sameWorkspace
+        ? previous.canvasFilters
+        : { nodeKind: "all", extension: "all" },
     });
     if (!guards.preserveTerminals) {
       for (const terminal of payload.terminals) {
@@ -596,19 +736,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         }
       }
     }
-    const fixedIds = new Set(
-      Object.entries(pinnedSemanticNodeIds)
-        .filter(([, pinned]) => pinned)
-        .map(([id]) => id),
-    );
     if (!preserveGraphState) {
-      void applySemanticLayout(
-        new Set(
-          semanticNodes
-            .map((node) => node.id)
-            .filter((id) => !fixedIds.has(id)),
-        ),
-      );
+      void applySemanticLayout();
     }
   },
 
@@ -626,6 +755,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       terminal: terminalTransportEpoch,
       connection: connectionTransportEpoch,
       actCapability: actCapabilityTransportEpoch,
+      askCapability: askCapabilityTransportEpoch,
     };
     const controller = new AbortController();
     reconcileAbortController = controller;
@@ -651,6 +781,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             connectionTransportEpoch !== epochs.connection,
           preserveActCapability:
             actCapabilityTransportEpoch !== epochs.actCapability,
+          preserveAskCapability:
+            askCapabilityTransportEpoch !== epochs.askCapability,
         });
       })
       .catch((error: unknown) => {
@@ -688,10 +820,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             ? { demoMode: false }
             : {
                 demoMode: false,
+                workspaceId: "",
                 workspaceName: "Conectando…",
                 askThreadId: "",
                 rootPath: "Cargando workspace…",
                 branch: "—",
+                workspaceMode: "edit",
+                workspaceSummary: emptyWorkspaceSummary,
+                onboardingOpen: false,
+                notices: [],
+                nodes: createConnectedPanelNodes(),
+                edges: [],
+                semanticVersion: state.semanticVersion + 1,
                 question: "",
                 answer: "",
                 conversation: [],
@@ -705,8 +845,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
                 evidenceForcedNodeIds: {},
                 actTask: null,
                 askAvailable: false,
+                askMode: "local",
+                askProviderStatus: "unavailable",
+                askNotice: undefined,
                 actAvailable: false,
                 codexReason: "Cargando capacidades del agente local…",
+                codexChecking: true,
+                codexVersion: undefined,
               },
         );
         break;
@@ -720,7 +865,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       case "index.progress": {
         indexTransportEpoch += 1;
         const payload = event.payload;
-        set({
+        set((state) => ({
           index: {
             phase: payload.phase,
             progress: payload.progress,
@@ -729,7 +874,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             edgesIndexed: payload.edgesIndexed,
             ...(payload.message ? { message: payload.message } : {}),
           },
-        });
+          workspaceSummary:
+            payload.summary ?? {
+              ...state.workspaceSummary,
+              indexedFileCount: payload.filesIndexed,
+            },
+        }));
         break;
       }
       case "graph.delta": {
@@ -748,7 +898,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         graphTransportEpoch += 1;
         const paginationInvalidated =
           state.graphSourceTruncated || state.graphCursor !== undefined;
-        const existingNodeIds = new Set(state.nodes.map((node) => node.id));
         const expansionCursors: Record<string, string | null> = {};
         const visibleState = visibleGraphState(
           result.nodes,
@@ -761,6 +910,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({
           nodes: visibleState.nodes,
           edges: result.edges,
+          semanticVersion: state.semanticVersion + 1,
           graphRevision: result.revision,
           graphSourceTruncated: paginationInvalidated
             ? true
@@ -771,13 +921,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             : state.graphCursor,
           expansionCursors,
         });
-        void applySemanticLayout(
-          new Set(
-            result.nodes
-              .filter((node) => !existingNodeIds.has(node.id))
-              .map((node) => node.id),
-          ),
-        );
+        void applySemanticLayout();
         if (paginationInvalidated) void get().reconcileGraph();
         break;
       }
@@ -817,19 +961,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({
           nodes: visibleState.nodes,
           edges: graphEdges,
+          semanticVersion: state.semanticVersion + 1,
           graphRevision: graph.revision,
           graphSourceTruncated: graph.truncated,
           graphTruncated: visibleState.graphTruncated,
           graphCursor: graph.cursor,
           expansionCursors,
         });
-        void applySemanticLayout(
-          new Set(
-            semanticNodes
-              .map((node) => node.id)
-              .filter((id) => !positions.has(id)),
-          ),
-        );
+        void applySemanticLayout();
         break;
       }
       case "ask.event": {
@@ -842,7 +981,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           break;
         }
         askTransportEpoch += 1;
-        if (askEvent.type === "text_delta") {
+        if (askEvent.type === "started") {
+          set({
+            askMode: askEvent.mode,
+            assistantThinking: true,
+            assistantError: null,
+          });
+        } else if (askEvent.type === "text_delta") {
           set((state) => ({
             answer: state.answer + askEvent.delta,
             assistantThinking: true,
@@ -850,19 +995,37 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           }));
         } else if (askEvent.type === "evidence") {
           get().playEvidencePath(askEvent.path);
+        } else if (askEvent.type === "fallback") {
+          set({
+            askMode: "local",
+            askProviderStatus:
+              askEvent.code.toLocaleLowerCase() === "insufficient_quota"
+                ? "insufficient_quota"
+                : "unavailable",
+            askNotice: askEvent.message,
+            answer: askEvent.discardPartial ? "" : get().answer,
+            assistantThinking: true,
+            assistantError: null,
+          });
         } else if (askEvent.type === "completed") {
           set((state) => {
             const content = askEvent.answer.trim();
             const evidence = askEvent.evidence;
+            const hasResult = Boolean(content || askEvent.localResult);
             return {
               answer: "",
-              conversation: content
+              askMode: askEvent.mode,
+              conversation: hasResult
                 ? [
                     ...state.conversation,
                     {
                       role: "assistant" as const,
                       content,
+                      mode: askEvent.mode,
                       ...(evidence ? { evidence } : {}),
+                      ...(askEvent.localResult
+                        ? { localResult: askEvent.localResult }
+                        : {}),
                     },
                   ]
                 : state.conversation,
@@ -916,15 +1079,44 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         );
         break;
       }
-      case "capabilities.updated":
-        actCapabilityTransportEpoch += 1;
-        set({
-          actAvailable: event.payload.act,
-          codexReason: event.payload.checking
-            ? "Comprobando compatibilidad con Codex CLI…"
-            : event.payload.codexReason,
-        });
+      case "capabilities.updated": {
+        const askUpdated =
+          event.payload.askMode !== undefined ||
+          event.payload.askProviderStatus !== undefined ||
+          event.payload.askNotice !== undefined;
+        const codexUpdated =
+          event.payload.act !== undefined ||
+          event.payload.checking !== undefined ||
+          event.payload.codexReason !== undefined ||
+          event.payload.codexVersion !== undefined;
+        if (askUpdated) askCapabilityTransportEpoch += 1;
+        if (codexUpdated) actCapabilityTransportEpoch += 1;
+        set((state) => ({
+          askMode: event.payload.askMode ?? state.askMode,
+          askProviderStatus:
+            event.payload.askProviderStatus ?? state.askProviderStatus,
+          askNotice:
+            event.payload.askNotice === undefined
+              ? state.askNotice
+              : event.payload.askNotice ?? undefined,
+          actAvailable:
+            event.payload.act === undefined
+              ? state.actAvailable
+              : state.workspaceMode === "edit" && event.payload.act,
+          codexReason: !codexUpdated
+            ? state.codexReason
+            : event.payload.checking
+              ? "Comprobando compatibilidad con Codex CLI…"
+              : state.workspaceMode === "read"
+                ? "Actuar está deshabilitado en Modo Lectura."
+                : event.payload.codexReason,
+          codexChecking:
+            event.payload.checking ?? state.codexChecking,
+          codexVersion:
+            event.payload.codexVersion ?? state.codexVersion,
+        }));
         break;
+      }
       case "act.event": {
         const activeTask = get().actTask;
         if (!activeTask || activeTask.id !== event.payload.taskId) break;
@@ -953,6 +1145,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         });
         break;
       }
+      case "error":
+        set((state) => ({
+          notices: [
+            ...state.notices.filter(
+              (notice) => notice.code !== event.payload.code,
+            ),
+            {
+              id: event.eventId,
+              code: event.payload.code,
+              message: event.payload.message,
+              severity: event.payload.severity,
+              recoverable: event.payload.recoverable,
+            },
+          ].slice(-4),
+        }));
+        break;
       default:
         break;
     }
@@ -1098,9 +1306,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         await get().reconcileGraph();
         return;
       }
-      const existingIdsBeforeExpansion = new Set(
-        get().nodes.map((node) => node.id),
-      );
       set((state) => {
         const anchor = state.nodes.find((node) => node.id === nodeId);
         const existingIds = new Set(state.nodes.map((node) => node.id));
@@ -1170,16 +1375,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           collapsedNodeIds,
           nodes: visibleState.nodes,
           edges: mergedEdges,
+          semanticVersion: state.semanticVersion + 1,
           graphTruncated: visibleState.graphTruncated,
         };
       });
-      void applySemanticLayout(
-        new Set(
-          snapshot.nodes
-            .map((node) => node.id)
-            .filter((id) => !existingIdsBeforeExpansion.has(id)),
-        ),
-      );
+      void applySemanticLayout();
     } catch (error) {
       set({
         assistantError:
@@ -1224,13 +1424,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({
         nodes: visibleState.nodes,
         edges: merged.edges,
+        semanticVersion: state.semanticVersion + 1,
         graphRevision: snapshot.revision,
         graphSourceTruncated: snapshot.truncated,
         graphTruncated: visibleState.graphTruncated,
         graphCursor: snapshot.cursor,
         graphReconciling: false,
       });
-      void applySemanticLayout(merged.addedNodeIds);
+      void applySemanticLayout();
     } catch (error) {
       set({
         graphReconciling: false,
@@ -1304,6 +1505,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const compactMode = zoom < 0.65;
     if (get().compactMode !== compactMode) set({ compactMode });
   },
+
+  setNodeKindFilter: (nodeKind) =>
+    set((state) => ({
+      canvasFilters: { ...state.canvasFilters, nodeKind },
+    })),
+
+  setExtensionFilter: (extension) =>
+    set((state) => ({
+      canvasFilters: { ...state.canvasFilters, extension },
+    })),
+
+  resetCanvasFilters: () =>
+    set({ canvasFilters: { nodeKind: "all", extension: "all" } }),
+
+  acknowledgeOnboarding: () => set({ onboardingOpen: false }),
+
+  dismissNotice: (id) =>
+    set((state) => ({
+      notices: state.notices.filter((notice) => notice.id !== id),
+    })),
 
   setActiveTool: (tool) => {
     set({ activeTool: tool });
@@ -1620,7 +1841,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const state = get();
     const objective = state.question.trim();
     const workspaceReady = canUseWorkspaceFeatures(state);
-    if (!workspaceReady || !objective || !state.actAvailable) return;
+    if (
+      !workspaceReady ||
+      state.workspaceMode === "read" ||
+      !objective ||
+      !state.actAvailable
+    ) return;
     if (state.demoMode) {
       actTransportEpoch += 1;
       set({
@@ -1664,6 +1890,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       !state.demoMode &&
       (!state.remoteHydrated ||
         state.connection !== "connected" ||
+        state.workspaceMode === "read" ||
         !state.actAvailable)
     ) {
       return;
@@ -1849,7 +2076,7 @@ async function recoverEvidenceGraph(
           evidencePath.edgeIds.some((edgeId) => !loadedEdgeIds.has(edgeId)),
         evidenceForcedNodeIds,
       });
-      void applySemanticLayout(merged.addedNodeIds);
+      void applySemanticLayout();
     } catch {
       return;
     }
@@ -1872,23 +2099,42 @@ function missingEvidence(
   };
 }
 
-async function applySemanticLayout(
-  targetIds: ReadonlySet<string>,
-): Promise<void> {
-  if (targetIds.size === 0) return;
+async function applySemanticLayout(): Promise<void> {
   const state = useWorkspaceStore.getState();
+  const requestEpoch = ++layoutRequestEpoch;
+  const workspaceId = state.workspaceId;
+  const graphRevision = state.graphRevision;
+  const semanticVersion = state.semanticVersion;
   try {
     const positions = await layoutSemanticNodes(state.nodes, state.edges);
+    const current = useWorkspaceStore.getState();
+    if (
+      requestEpoch !== layoutRequestEpoch ||
+      current.workspaceId !== workspaceId ||
+      current.graphRevision !== graphRevision ||
+      current.semanticVersion !== semanticVersion
+    ) {
+      return;
+    }
+    const pinnedNodeIds = new Set(
+      Object.entries(current.pinnedSemanticNodeIds)
+        .filter(([, pinned]) => pinned)
+        .map(([id]) => id),
+    );
+    const collisionFree = resolveSemanticLayoutCollisions(
+      current.nodes,
+      positions,
+      pinnedNodeIds,
+    );
     useWorkspaceStore.setState((current) => ({
       nodes: current.nodes.map((node) => {
         if (
           node.type !== "semantic" ||
-          !targetIds.has(node.id) ||
           current.pinnedSemanticNodeIds[node.id]
         ) {
           return node;
         }
-        const position = positions[node.id];
+        const position = collisionFree[node.id];
         return position ? { ...node, position } : node;
       }) as WorkspaceNode[],
     }));

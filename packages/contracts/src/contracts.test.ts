@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActTaskScopeSchema,
   AskStreamEventSchema,
+  LocalAskResultSchema,
   ClientEventSchema,
   EvidencePathSchema,
   GraphConfidenceSchema,
@@ -9,6 +10,8 @@ import {
   GraphQuerySchema,
   PROTOCOL_VERSION,
   ServerEventSchema,
+  WorkspaceIdSchema,
+  WorkspaceSummarySchema,
   WebSocketAuthenticationSchema,
 } from "./index.js";
 
@@ -67,6 +70,7 @@ describe("protocol contracts", () => {
       requestId: "request",
       threadId: "thread",
       type: "completed",
+      mode: "openai",
       responseId: "response",
       answer: "The verified answer.",
     })).toMatchObject({
@@ -78,6 +82,7 @@ describe("protocol contracts", () => {
       requestId: "request",
       threadId: "thread",
       type: "completed",
+      mode: "openai",
       responseId: "response",
     })).toThrow();
 
@@ -118,6 +123,43 @@ describe("protocol contracts", () => {
       checking: false,
       codexVersion: "0.144.5",
     });
+  });
+
+  it("validates stable workspace identities and bounded onboarding summaries", () => {
+    expect(WorkspaceIdSchema.parse("0123456789abcdef01234567")).toHaveLength(24);
+    expect(() => WorkspaceIdSchema.parse("workspace")).toThrow();
+    expect(WorkspaceSummarySchema.parse({
+      projectTypes: ["pnpm", "typescript"],
+      languages: ["typescript", "python"],
+      estimatedFileCount: 32,
+      indexedFileCount: 12,
+      warnings: [],
+      omittedFiles: [],
+      omittedFileCount: 0,
+    })).toMatchObject({
+      estimatedFileCount: 32,
+      omittedFilesTruncated: false,
+    });
+  });
+
+  it("represents local Ask results without claiming generated reasoning", () => {
+    expect(LocalAskResultSchema.parse({
+      query: "WorkspaceIndexer",
+      revision: 4,
+      hits: [{
+        nodeId: "node",
+        kind: "class",
+        name: "WorkspaceIndexer",
+        qualifiedName: "src/indexer.WorkspaceIndexer",
+        relativePath: "src/indexer.ts",
+        language: "typescript",
+        score: 10,
+        matchedFields: ["name", "qualifiedName"],
+        relations: [],
+      }],
+      truncated: false,
+      limitations: ["Búsqueda estructural local; no es una respuesta generada."],
+    }).hits[0]?.name).toBe("WorkspaceIndexer");
   });
 
   it("requires a complete path to join consecutive nodes", () => {

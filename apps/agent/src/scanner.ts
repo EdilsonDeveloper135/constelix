@@ -1,16 +1,29 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { opendir, readFile, realpath, stat } from "node:fs/promises";
-import { posix, relative, resolve, sep } from "node:path";
+import { opendir, readFile, stat } from "node:fs/promises";
+import { posix, relative, sep } from "node:path";
 import createIgnore, { type Ignore } from "ignore";
 import type { TypeScriptResolutionOptions } from "@constelix/analyzers";
-import { resolveExistingWorkspacePath } from "./security.js";
+import type {
+  Language,
+  WorkspaceOmittedFile,
+  WorkspaceSummary,
+  WorkspaceWarning,
+} from "@constelix/contracts";
+import {
+  PathSecurityError,
+  isSensitiveCredentialPath,
+  resolveExistingWorkspacePath,
+  type WorkspaceReference,
+} from "./security.js";
 
 export const MAX_WORKSPACE_FILES = 10_000;
 export const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
-export const MAX_WORKSPACE_SOURCE_BYTES = 256 * 1024 * 1024;
+export const MAX_WORKSPACE_SOURCE_BYTES = 2 * 1024 * 1024;
+export const MAX_CONFIGURABLE_WORKSPACE_SOURCE_BYTES = 256 * 1024 * 1024;
 const MAX_TYPESCRIPT_CONFIG_BYTES = 1024 * 1024;
 const DEFAULT_PROGRESS_EVERY_FILES = 100;
+const MAX_REPORTED_OMITTED_FILES = 200;
 
 const DEFAULT_IGNORES = [
   ".git/",
@@ -32,13 +45,6 @@ const DEFAULT_IGNORES = [
   "*.map",
 ] as const;
 
-const SECRET_FILE_PATTERNS = [
-  /(?:^|\/)\.env(?:\..+)?$/i,
-  /(?:^|\/)(?:credentials|secrets?)(?:\.[^/]*)?$/i,
-  /\.(?:pem|key|p12|pfx|jks)$/i,
-  /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)$/i,
-] as const;
-
 export type SupportedLanguage = "typescript" | "javascript" | "python";
 
 export interface ScannedSource {
@@ -57,6 +63,7 @@ export interface ScanResult {
   skipped: number;
   truncated: boolean;
   diagnostics: Array<{ relativePath?: string; message: string }>;
+  summary: WorkspaceSummary;
 }
 
 export interface ScanProgress {
@@ -66,6 +73,7 @@ export interface ScanProgress {
   truncated: boolean;
   complete: boolean;
   diagnostics: ReadonlyArray<{ relativePath?: string; message: string }>;
+  summary: WorkspaceSummary;
 }
 
 export interface ScanWorkspaceOptions {
@@ -76,11 +84,13 @@ export interface ScanWorkspaceOptions {
   onProgress?: (progress: ScanProgress) => void;
 }
 
-export async function buildIgnoreMatcher(workspaceRoot: string): Promise<Ignore> {
+export async function buildIgnoreMatcher(
+  workspace: WorkspaceReference,
+): Promise<Ignore> {
   const matcher = createIgnore();
   for (const name of [".gitignore", ".constelixignore"]) {
     try {
-      const path = await resolveExistingWorkspacePath(workspaceRoot, name);
+      const path = await resolveExistingWorkspacePath(workspace, name);
       matcher.add(await readFile(path, "utf8"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -93,11 +103,11 @@ export async function buildIgnoreMatcher(workspaceRoot: string): Promise<Ignore>
 }
 
 export async function readTypeScriptResolutionOptions(
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
 ): Promise<TypeScriptResolutionOptions | undefined> {
   for (const configName of ["tsconfig.json", "jsconfig.json"]) {
     try {
-      const configPath = await resolveExistingWorkspacePath(workspaceRoot, configName);
+      const configPath = await resolveExistingWorkspacePath(workspace, configName);
       const info = await stat(configPath);
       if (!info.isFile() || info.size > MAX_TYPESCRIPT_CONFIG_BYTES) return undefined;
       const source = await readFile(configPath, "utf8");
@@ -144,31 +154,48 @@ export function detectSupportedLanguage(path: string): SupportedLanguage | undef
 }
 
 export function isSecretPath(relativePath: string): boolean {
-  return SECRET_FILE_PATTERNS.some((pattern) => pattern.test(relativePath));
+  return isSensitiveCredentialPath(relativePath);
 }
 
 export async function scanWorkspace(
   workspaceId: string,
-  workspaceRoot: string,
+  workspace: WorkspaceReference,
   options: ScanWorkspaceOptions = {},
 ): Promise<ScanResult> {
   const maxFiles = Math.min(Math.max(options.maxFiles ?? MAX_WORKSPACE_FILES, 1), MAX_WORKSPACE_FILES);
   const maxBytes = Math.min(Math.max(options.maxBytes ?? MAX_SOURCE_BYTES, 1), MAX_SOURCE_BYTES);
   const maxTotalBytes = Math.min(
     Math.max(options.maxTotalBytes ?? MAX_WORKSPACE_SOURCE_BYTES, 1),
-    MAX_WORKSPACE_SOURCE_BYTES,
+    MAX_CONFIGURABLE_WORKSPACE_SOURCE_BYTES,
   );
   const progressEveryFiles = Math.max(
     1,
     Math.trunc(options.progressEveryFiles ?? DEFAULT_PROGRESS_EVERY_FILES),
   );
-  const matcher = await buildIgnoreMatcher(workspaceRoot);
-  const result: ScanResult = { files: [], skipped: 0, truncated: false, diagnostics: [] };
+  const matcher = await buildIgnoreMatcher(workspace);
+  const summaryState = {
+    estimatedFileCount: 0,
+    languages: new Set<Language>(),
+    projectTypes: await detectProjectTypes(workspace),
+    warnings: [] as WorkspaceWarning[],
+    omittedFiles: [] as WorkspaceOmittedFile[],
+    omittedFileCount: 0,
+  };
+  const result: ScanResult = {
+    files: [],
+    skipped: 0,
+    truncated: false,
+    diagnostics: [],
+    summary: createWorkspaceSummary(summaryState, 0),
+  };
   const visitedDirectories = new Set<string>();
   let sourceBytes = 0;
+  let fileLimitReached = false;
+  let sourceBudgetReached = false;
 
   function publishProgress(complete: boolean): void {
     if (!options.onProgress) return;
+    result.summary = createWorkspaceSummary(summaryState, result.files.length);
     options.onProgress({
       files: [...result.files],
       skipped: result.skipped,
@@ -176,78 +203,115 @@ export async function scanWorkspace(
       truncated: result.truncated,
       complete,
       diagnostics: [...result.diagnostics],
+      summary: result.summary,
     });
   }
 
-  async function walk(absoluteDirectory: string, relativeDirectory = ""): Promise<void> {
-    if (result.truncated) return;
-    const canonicalDirectory = await realpath(absoluteDirectory);
+  async function walk(relativeDirectory = ""): Promise<void> {
+    const canonicalDirectory = await resolveExistingWorkspacePath(
+      workspace,
+      relativeDirectory || ".",
+    );
     if (visitedDirectories.has(canonicalDirectory)) return;
     visitedDirectories.add(canonicalDirectory);
 
-    const directory = await opendir(absoluteDirectory);
+    const directory = await opendir(canonicalDirectory);
     const entries: Dirent[] = [];
     for await (const entry of directory) entries.push(entry);
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
-      if (result.truncated) break;
       const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
       const ignoreCandidate = entry.isDirectory() ? `${relativePath}/` : relativePath;
-      if (matcher.ignores(ignoreCandidate) || isSecretPath(relativePath)) {
+      if (matcher.ignores(ignoreCandidate)) {
         result.skipped += 1;
         continue;
       }
+      if (isSecretPath(relativePath)) {
+        result.skipped += 1;
+        recordOmission(relativePath, "secret");
+        continue;
+      }
 
-      const absolutePath = resolve(absoluteDirectory, entry.name);
       if (entry.isDirectory()) {
-        await walk(absolutePath, relativePath);
+        await walk(relativePath);
         continue;
       }
       if (entry.isSymbolicLink()) {
         try {
-          const target = await resolveExistingWorkspacePath(workspaceRoot, relativePath);
+          const target = await resolveExistingWorkspacePath(workspace, relativePath);
           const targetStats = await stat(target);
-          if (targetStats.isDirectory()) await walk(target, relativePath);
-          else if (targetStats.isFile()) await addFile(target, relativePath);
-        } catch {
+          if (targetStats.isDirectory()) await walk(relativePath);
+          else if (targetStats.isFile()) await addFile(relativePath);
+        } catch (error) {
+          if (
+            !(error instanceof PathSecurityError) &&
+            (error as NodeJS.ErrnoException).code !== "ENOENT"
+          ) {
+            throw error;
+          }
           result.skipped += 1;
-          result.diagnostics.push({ relativePath, message: "Symlink outside the workspace was skipped." });
+          recordOmission(relativePath, "outside_workspace");
+          addDiagnostic(relativePath, "Symlink outside the workspace was skipped.");
         }
         continue;
       }
-      if (entry.isFile()) await addFile(absolutePath, relativePath);
+      if (entry.isFile()) await addFile(relativePath);
     }
   }
 
-  async function addFile(absolutePath: string, relativePath: string): Promise<void> {
+  async function addFile(relativePath: string): Promise<void> {
     const language = detectSupportedLanguage(relativePath);
     if (!language) {
       result.skipped += 1;
       return;
     }
-    if (result.files.length >= maxFiles) {
+    summaryState.estimatedFileCount += 1;
+    summaryState.languages.add(language);
+    if (fileLimitReached || result.files.length >= maxFiles) {
       result.skipped += 1;
       result.truncated = true;
-      result.diagnostics.push({
+      fileLimitReached = true;
+      recordOmission(relativePath, "file_limit");
+      addDiagnosticOnce(
+        "WORKSPACE_FILE_LIMIT",
         relativePath,
-        message: `Workspace scan stopped at the ${maxFiles} file limit.`,
-      });
+        `Workspace index is limited to ${maxFiles} supported source files.`,
+      );
       return;
     }
+    if (sourceBudgetReached) {
+      result.skipped += 1;
+      result.truncated = true;
+      recordOmission(relativePath, "source_budget");
+      return;
+    }
+    const absolutePath = await resolveExistingWorkspacePath(
+      workspace,
+      relativePath,
+    );
     const info = await stat(absolutePath);
     if (info.size > maxBytes) {
       result.skipped += 1;
-      result.diagnostics.push({ relativePath, message: `File exceeds the ${maxBytes} byte source limit.` });
+      recordOmission(relativePath, "too_large");
+      addDiagnostic(relativePath, `File exceeds the ${maxBytes} byte source limit.`);
       return;
     }
     if (sourceBytes + info.size > maxTotalBytes) {
       truncateForSourceBudget(relativePath);
       return;
     }
-    const buffer = await readFile(absolutePath);
+    const revalidatedPath = await resolveExistingWorkspacePath(
+      workspace,
+      relativePath,
+    );
+    if (revalidatedPath !== absolutePath) {
+      throw new Error("The source path changed while it was being scanned.");
+    }
+    const buffer = await readFile(revalidatedPath);
     if (buffer.byteLength > maxBytes) {
       result.skipped += 1;
-      result.diagnostics.push({ relativePath, message: `File exceeds the ${maxBytes} byte source limit.` });
+      recordOmission(relativePath, "too_large");
+      addDiagnostic(relativePath, `File exceeds the ${maxBytes} byte source limit.`);
       return;
     }
     if (sourceBytes + buffer.byteLength > maxTotalBytes) {
@@ -256,7 +320,8 @@ export async function scanWorkspace(
     }
     if (buffer.includes(0)) {
       result.skipped += 1;
-      result.diagnostics.push({ relativePath, message: "Binary file was skipped." });
+      recordOmission(relativePath, "binary");
+      addDiagnostic(relativePath, "Binary file was skipped.");
       return;
     }
     sourceBytes += buffer.byteLength;
@@ -281,17 +346,111 @@ export async function scanWorkspace(
   function truncateForSourceBudget(relativePath: string): void {
     result.skipped += 1;
     result.truncated = true;
-    result.diagnostics.push({
+    sourceBudgetReached = true;
+    recordOmission(relativePath, "source_budget");
+    addDiagnosticOnce(
+      "WORKSPACE_SOURCE_BUDGET",
       relativePath,
-      message:
-        `Workspace scan stopped at the ${maxTotalBytes} byte aggregate source-memory limit.`,
-    });
+      `Workspace index is limited to ${maxTotalBytes} aggregate source bytes.`,
+    );
   }
 
-  await walk(workspaceRoot);
+  function addDiagnostic(
+    relativePath: string,
+    message: string,
+    publishWarning = true,
+  ): void {
+    result.diagnostics.push({ relativePath, message });
+    if (publishWarning && summaryState.warnings.length < 200) {
+      summaryState.warnings.push({
+        code: "SCAN_OMISSION",
+        relativePath,
+        message,
+      });
+    }
+  }
+
+  function addDiagnosticOnce(
+    code: string,
+    relativePath: string,
+    message: string,
+  ): void {
+    if (summaryState.warnings.some((warning) => warning.code === code)) return;
+    if (summaryState.warnings.length < 200) {
+      summaryState.warnings.push({ code, relativePath, message });
+    }
+    addDiagnostic(relativePath, message, false);
+  }
+
+  function recordOmission(
+    relativePath: string,
+    reason: WorkspaceOmittedFile["reason"],
+  ): void {
+    summaryState.omittedFileCount += 1;
+    if (summaryState.omittedFiles.length < MAX_REPORTED_OMITTED_FILES) {
+      summaryState.omittedFiles.push({ relativePath, reason });
+    }
+  }
+
+  await walk();
   result.files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  result.summary = createWorkspaceSummary(summaryState, result.files.length);
   if (options.onProgress) publishProgress(true);
   return result;
+}
+
+function createWorkspaceSummary(
+  state: {
+    projectTypes: readonly string[];
+    languages: ReadonlySet<Language>;
+    estimatedFileCount: number;
+    warnings: readonly WorkspaceWarning[];
+    omittedFiles: readonly WorkspaceOmittedFile[];
+    omittedFileCount: number;
+  },
+  indexedFileCount: number,
+): WorkspaceSummary {
+  return {
+    projectTypes: [...state.projectTypes],
+    languages: [...state.languages].sort(),
+    estimatedFileCount: state.estimatedFileCount,
+    indexedFileCount,
+    warnings: [...state.warnings],
+    omittedFiles: [...state.omittedFiles],
+    omittedFileCount: state.omittedFileCount,
+    omittedFilesTruncated: state.omittedFileCount > state.omittedFiles.length,
+  };
+}
+
+async function detectProjectTypes(
+  workspace: WorkspaceReference,
+): Promise<string[]> {
+  const markers = [
+    ["package.json", "Node.js"],
+    ["tsconfig.json", "TypeScript"],
+    ["jsconfig.json", "JavaScript"],
+    ["pnpm-workspace.yaml", "pnpm workspace"],
+    ["turbo.json", "Turborepo"],
+    ["nx.json", "Nx"],
+    ["lerna.json", "Lerna"],
+    ["vite.config.ts", "Vite"],
+    ["vite.config.js", "Vite"],
+    ["next.config.js", "Next.js"],
+    ["next.config.mjs", "Next.js"],
+    ["pyproject.toml", "Python"],
+    ["requirements.txt", "Python"],
+    ["setup.py", "Python"],
+  ] as const;
+  const detected = new Set<string>();
+  await Promise.all(markers.map(async ([relativePath, projectType]) => {
+    try {
+      const path = await resolveExistingWorkspacePath(workspace, relativePath);
+      if ((await stat(path)).isFile()) detected.add(projectType);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }));
+  return [...detected].sort();
 }
 
 export function isPathInside(workspaceRoot: string, candidate: string): boolean {

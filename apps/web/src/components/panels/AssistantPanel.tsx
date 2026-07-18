@@ -21,13 +21,16 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
   const thinking = useWorkspaceStore((state) => state.assistantThinking);
   const evidencePath = useWorkspaceStore((state) => state.evidencePath);
   const evidencePartial = useWorkspaceStore((state) => state.evidencePartial);
-  const nodes = useWorkspaceStore((state) => state.nodes);
+  const semanticVersion = useWorkspaceStore((state) => state.semanticVersion);
   const submitQuestion = useWorkspaceStore((state) => state.submitQuestion);
   const cancelQuestion = useWorkspaceStore((state) => state.cancelQuestion);
   const navigateEvidence = useWorkspaceStore((state) => state.navigateEvidence);
   const playEvidencePath = useWorkspaceStore((state) => state.playEvidencePath);
   const actTask = useWorkspaceStore((state) => state.actTask);
   const askAvailable = useWorkspaceStore((state) => state.askAvailable);
+  const askMode = useWorkspaceStore((state) => state.askMode);
+  const askNotice = useWorkspaceStore((state) => state.askNotice);
+  const workspaceMode = useWorkspaceStore((state) => state.workspaceMode);
   const actAvailable = useWorkspaceStore((state) => state.actAvailable);
   const codexReason = useWorkspaceStore((state) => state.codexReason);
   const rootPath = useWorkspaceStore((state) => state.rootPath);
@@ -44,11 +47,13 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
   const nodeLabels = useMemo(
     () =>
       new Map(
-      nodes
+      useWorkspaceStore
+        .getState()
+        .nodes
         .filter((node): node is SemanticFlowNode => node.type === "semantic")
           .map((node) => [node.id, node.data.label]),
       ),
-    [nodes],
+    [semanticVersion],
   );
   const evidenceLabels = useMemo(
     () =>
@@ -164,6 +169,21 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                     : "OpenAI no está disponible para este workspace."
               }
             />
+            {workspaceReady && askMode === "local" ? (
+              <p className="ask-mode-notice" role="status">
+                <AlertTriangle aria-hidden="true" size={12} />
+                <span>
+                  <strong>Ask Local no genera explicaciones.</strong>{" "}
+                  Busca archivos, símbolos, fragmentos y relaciones directamente
+                  en el índice local.
+                </span>
+              </p>
+            ) : null}
+            {workspaceReady && askNotice ? (
+              <p className="ask-provider-notice" role="status">
+                {askNotice}
+              </p>
+            ) : null}
             {workspaceReady && !askAvailable ? (
               <p className="assistant-error" role="status">
                 Preguntar está deshabilitado porque el agente no tiene un proveedor OpenAI disponible.
@@ -200,8 +220,68 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                       key={`${message.role}-${messageIndex}-${message.content.slice(0, 24)}`}
                       className={`conversation-message conversation-message--${message.role}`}
                     >
-                      <span>{message.role === "user" ? "Tú" : "Constelix"}</span>
+                      <span>
+                        {message.role === "user" ? "Tú" : "Constelix"}
+                        {message.role === "assistant" && message.mode
+                          ? ` · ${message.mode === "local" ? "Ask Local" : "Ask OpenAI"}`
+                          : ""}
+                      </span>
                       <p>{message.content}</p>
+                      {message.localResult ? (
+                        <div
+                          className="local-ask-results"
+                          aria-label={`Resultados locales de la consulta ${messageIndex + 1}`}
+                        >
+                          {message.localResult.hits.length ? (
+                            message.localResult.hits.map((hit) => (
+                              <article
+                                key={hit.nodeId}
+                                className="local-ask-card"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void navigateEvidence(hit.nodeId)
+                                  }
+                                >
+                                  <span>
+                                    <strong>{hit.name}</strong>
+                                    <small>{hit.kind}</small>
+                                  </span>
+                                  <code>{hit.relativePath}</code>
+                                </button>
+                                {hit.signature ? <p>{hit.signature}</p> : null}
+                                {hit.snippet ? (
+                                  <pre>
+                                    <code>{hit.snippet.content}</code>
+                                  </pre>
+                                ) : null}
+                                <small>
+                                  {hit.relations.length} relación
+                                  {hit.relations.length === 1 ? "" : "es"} ·
+                                  coincidencia{" "}
+                                  {hit.matchedFields.join(", ")}
+                                </small>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="local-ask-empty">
+                              No se encontraron coincidencias verificables en
+                              el índice local.
+                            </p>
+                          )}
+                          {message.localResult.limitations.map(
+                            (limitation, limitationIndex) => (
+                              <p
+                                key={`${limitationIndex}:${limitation}`}
+                                className="local-ask-limitation"
+                              >
+                                {limitation}
+                              </p>
+                            ),
+                          )}
+                        </div>
+                      ) : null}
                       {messageEvidence && messageEvidenceLabels.length ? (
                         <div className="evidence-path" aria-label={`Evidencia de la respuesta ${messageIndex + 1}`}>
                           {messageEvidenceLabels.map((item, index) => (
@@ -226,7 +306,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
               </div>
             ) : null}
             {thinking && !answer ? <div className="answer-thinking"><span /><span /><span /> Consultando el grafo…</div> : null}
-            {error ? <p className="assistant-error">{error}</p> : null}
+            {error ? <p className="assistant-error" role="alert">{error}</p> : null}
             {answer ? <p className="answer-copy answer-copy--streaming">{answer}</p> : !conversation.length && !thinking && !error ? <p className="answer-placeholder">{workspaceReady ? "La respuesta mostrará evidencia verificable del grafo." : "Conectando con el workspace antes de habilitar consultas y tareas…"}</p> : null}
             {(answer || thinking) && evidenceLabels.length ? (
               <div>
@@ -255,8 +335,8 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
           aria-labelledby="assistant-tab-act"
           data-testid="act-panel"
         >
-          {!actAvailable ? (
-            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p></div></div>
+          {!actAvailable || workspaceMode === "read" ? (
+            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceMode === "read" ? "Actuar bloqueado en Modo Lectura" : workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{workspaceMode === "read" ? "Vuelve a abrir un workspace con permisos de escritura para delegar cambios a Codex." : codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p></div></div>
           ) : actTask === null ? (
             <>
               <div className="act-copy">
@@ -278,7 +358,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                 />
               </label>
               <p className="act-scope-root"><strong>Raíz protegida:</strong> <code>{rootPath}</code></p>
-              {error ? <p className="assistant-error">{error}</p> : null}
+              {error ? <p className="assistant-error" role="alert">{error}</p> : null}
               <button className="act-primary" type="button" disabled={!workspaceReady || !question.trim()} onClick={() => void createActTask()}>Preparar tarea</button>
             </>
           ) : actTask.status === "awaitingApproval" ? (

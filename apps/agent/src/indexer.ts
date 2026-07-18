@@ -11,6 +11,7 @@ import {
   type GraphNode,
   type GraphQuery,
   type GraphSnapshot,
+  type WorkspaceSummary,
 } from "@constelix/contracts";
 import { InMemoryGraphStore, stableId } from "@constelix/graph-core";
 import { AnalyzerWorkerClient } from "./analyzer-worker-client.js";
@@ -21,6 +22,7 @@ import {
   buildIgnoreMatcher,
   detectSupportedLanguage,
   isSecretPath,
+  MAX_CONFIGURABLE_WORKSPACE_SOURCE_BYTES,
   MAX_WORKSPACE_FILES,
   MAX_WORKSPACE_SOURCE_BYTES,
   readTypeScriptResolutionOptions,
@@ -30,6 +32,11 @@ import {
   type ScanWorkspaceOptions,
   type ScannedSource,
 } from "./scanner.js";
+import {
+  assertWorkspaceReferenceIdentity,
+  workspaceRootOf,
+  type WorkspaceReference,
+} from "./security.js";
 
 const MAX_INCREMENTAL_CHANGED_PATHS = 24;
 const MAX_INCREMENTAL_AFFECTED_FILES = 200;
@@ -54,6 +61,7 @@ export interface IndexStatus {
   revision: number;
   message?: string;
   lastIndexedAt?: string;
+  summary: WorkspaceSummary;
 }
 
 export interface WorkspaceIndexerOptions {
@@ -61,10 +69,12 @@ export interface WorkspaceIndexerOptions {
   watcherRestartBaseDelayMs?: number;
   watcherRestartMaxDelayMs?: number;
   scanOptions?: Omit<ScanWorkspaceOptions, "onProgress">;
+  assertWorkspace?: () => Promise<void>;
 }
 
 export class WorkspaceIndexer {
   readonly graph: InMemoryGraphStore;
+  readonly workspaceRoot: string;
   #fullSnapshot: GraphSnapshot;
   #watcher: FSWatcher | undefined;
   #watcherReady = false;
@@ -83,14 +93,16 @@ export class WorkspaceIndexer {
   readonly #files = new Map<string, IndexedFileRecord>();
   readonly #analyzer = new AnalyzerWorkerClient();
   #status: IndexStatus;
+  #summary: WorkspaceSummary;
 
   constructor(
     readonly workspaceId: string,
-    readonly workspaceRoot: string,
+    private readonly workspace: WorkspaceReference,
     private readonly database: ConstelixDatabase,
     private readonly events: EventBus,
     private readonly options: WorkspaceIndexerOptions = {},
   ) {
+    this.workspaceRoot = workspaceRootOf(workspace);
     const persisted = database.loadGraph(workspaceId);
     this.#fullSnapshot =
       persisted ??
@@ -106,11 +118,30 @@ export class WorkspaceIndexer {
     for (const file of database.loadFiles(workspaceId)) {
       this.#files.set(file.relativePath, file);
     }
+    this.#summary = {
+      projectTypes: [],
+      languages: [
+        ...new Set(
+          [...this.#files.values()]
+            .map((file) => file.language)
+            .filter((language): language is WorkspaceSummary["languages"][number] =>
+              ["javascript", "typescript", "python"].includes(language),
+            ),
+        ),
+      ],
+      estimatedFileCount: this.#files.size,
+      indexedFileCount: this.#files.size,
+      warnings: [],
+      omittedFiles: [],
+      omittedFileCount: 0,
+      omittedFilesTruncated: false,
+    };
     this.#status = {
       phase: persisted ? "ready" : "idle",
       completed: this.#files.size,
       total: this.#files.size,
       revision: this.#fullSnapshot.revision,
+      summary: this.#summary,
     };
   }
 
@@ -124,6 +155,7 @@ export class WorkspaceIndexer {
 
   async start(): Promise<void> {
     if (this.#watcher) return;
+    await this.assertWorkspace();
     this.initializeWatcher(false);
     this.publishStatus("scanning", 0, 0, "Starting filesystem watcher");
     this.schedule("Initial index", 0);
@@ -277,6 +309,7 @@ export class WorkspaceIndexer {
     this.#currentOperation = "full";
     const revision = this.#fullSnapshot.revision + 1;
     try {
+      await this.assertWorkspace();
       const scanStartedBeforeWatcherReady = !this.#watcherReady;
       this.publishStatus("scanning", 0, 0, reason);
       let scan = await this.scanWorkspaceProgressively();
@@ -301,6 +334,7 @@ export class WorkspaceIndexer {
       }
 
       const snapshot = GraphSnapshotSchema.parse(normalized.snapshot);
+      await this.assertWorkspace();
       this.publishStatus(
         "persisting",
         scan.files.length,
@@ -316,6 +350,7 @@ export class WorkspaceIndexer {
       );
       this.#files.clear();
       for (const file of scan.files) this.#files.set(file.relativePath, toFileRecord(file));
+      this.#summary = scan.summary;
       this.graph.replace(snapshot);
       this.#fullSnapshot = snapshot;
       const graphPage = this.graph.snapshot(500);
@@ -337,9 +372,8 @@ export class WorkspaceIndexer {
           scan.files.length,
           scan.files.length,
           scan.truncated
-            ? scan.diagnostics.findLast((diagnostic) =>
-                /(?:file limit|source-memory limit)/i.test(diagnostic.message),
-              )?.message ?? "Workspace index is truncated by scanner limits."
+            ? scan.summary.warnings.at(-1)?.message ??
+              "Workspace index is truncated by scanner limits."
             : undefined,
           {
             lastIndexedAt: new Date().toISOString(),
@@ -368,9 +402,10 @@ export class WorkspaceIndexer {
       Math.max(Math.trunc(configuredMaximum), 1),
       MAX_WORKSPACE_FILES,
     );
-    return scanWorkspace(this.workspaceId, this.workspaceRoot, {
+    return scanWorkspace(this.workspaceId, this.workspace, {
       ...this.options.scanOptions,
       onProgress: (progress) => {
+        this.#summary = progress.summary;
         this.publishProvisionalScan(progress);
         const total = progress.complete ? progress.files.length : maximumFiles;
         const truncationMessage = progress.truncated
@@ -421,7 +456,9 @@ export class WorkspaceIndexer {
     this.publishStatus("parsing", 0, scan.files.length, undefined, {
       filesIndexed: scan.files.length,
     });
-    const typeScriptResolution = await readTypeScriptResolutionOptions(this.workspaceRoot);
+    const typeScriptResolution = await readTypeScriptResolutionOptions(
+      this.workspace,
+    );
     const analysisResult = await this.#analyzer.analyze(
       scan.files.map((file) => ({
         workspaceId: this.workspaceId,
@@ -485,8 +522,9 @@ export class WorkspaceIndexer {
     this.#currentOperation = "incremental";
     const revision = this.#fullSnapshot.revision + 1;
     try {
+      await this.assertWorkspace();
       this.publishStatus("scanning", 0, changedPaths.length, "Applying filesystem changes");
-      const matcher = await buildIgnoreMatcher(this.workspaceRoot);
+      const matcher = await buildIgnoreMatcher(this.workspace);
       const changedSources = new Map<string, ScannedSource>();
       const removedPaths = new Set<string>();
       const diagnostics: Array<{ relativePath?: string; message: string }> = [];
@@ -530,7 +568,7 @@ export class WorkspaceIndexer {
       }
 
       const typeScriptResolution = await readTypeScriptResolutionOptions(
-        this.workspaceRoot,
+        this.workspace,
       );
       const affectedPaths = this.collectAffectedPaths(
         new Set(changedPaths),
@@ -588,6 +626,7 @@ export class WorkspaceIndexer {
       );
       const delta = diffIncrementalSnapshots(this.#fullSnapshot, snapshot);
 
+      await this.assertWorkspace();
       this.publishStatus("persisting", sourceFiles.length, sourceFiles.length);
       this.database.applyGraphDelta(
         this.workspaceId,
@@ -602,6 +641,7 @@ export class WorkspaceIndexer {
       for (const file of sourceFiles) this.#files.set(file.relativePath, toFileRecord(file));
       this.graph.applyDelta(delta);
       this.#fullSnapshot = snapshot;
+      this.refreshSummaryFromFiles();
       this.events.publish("graph.delta", delta);
       this.publishStatus("ready", this.#files.size, this.#files.size, undefined, {
         lastIndexedAt: new Date().toISOString(),
@@ -630,7 +670,7 @@ export class WorkspaceIndexer {
     const language = detectSupportedLanguage(relativePath);
     if (language === undefined) return undefined;
     try {
-      const file = await readWorkspaceTextFile(this.workspaceRoot, relativePath);
+      const file = await readWorkspaceTextFile(this.workspace, relativePath);
       return {
         workspaceId: this.workspaceId,
         relativePath,
@@ -735,6 +775,7 @@ export class WorkspaceIndexer {
       completed,
       total,
       revision: this.#fullSnapshot.revision,
+      summary: this.#summary,
       ...(message === undefined ? {} : { message }),
       ...(extra.lastIndexedAt === undefined ? {} : { lastIndexedAt: extra.lastIndexedAt }),
     };
@@ -748,8 +789,34 @@ export class WorkspaceIndexer {
       filesIndexed: extra.filesIndexed ?? this.#files.size,
       symbolsIndexed: this.graph.nodeCount,
       edgesIndexed: this.graph.edgeCount,
+      summary: this.#summary,
       ...(message === undefined ? {} : { message }),
     });
+  }
+
+  private async assertWorkspace(): Promise<void> {
+    await assertWorkspaceReferenceIdentity(this.workspace);
+    await this.options.assertWorkspace?.();
+  }
+
+  private refreshSummaryFromFiles(): void {
+    const languages = [
+      ...new Set(
+        [...this.#files.values()]
+          .map((file) => file.language)
+          .filter((language): language is WorkspaceSummary["languages"][number] =>
+            ["javascript", "typescript", "python"].includes(language),
+          ),
+      ),
+    ].sort();
+    this.#summary = {
+      ...this.#summary,
+      languages,
+      indexedFileCount: this.#files.size,
+      estimatedFileCount: this.#fullSnapshot.truncated
+        ? Math.max(this.#summary.estimatedFileCount, this.#files.size)
+        : this.#files.size,
+    };
   }
 
   async close(): Promise<void> {
@@ -938,7 +1005,7 @@ function boundedSourceByteLimit(configured: number | undefined): number {
   const value = configured ?? MAX_WORKSPACE_SOURCE_BYTES;
   return Math.min(
     Math.max(Number.isFinite(value) ? Math.trunc(value) : MAX_WORKSPACE_SOURCE_BYTES, 1),
-    MAX_WORKSPACE_SOURCE_BYTES,
+    MAX_CONFIGURABLE_WORKSPACE_SOURCE_BYTES,
   );
 }
 

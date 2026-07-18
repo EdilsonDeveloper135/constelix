@@ -1,8 +1,8 @@
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
+import { chmod, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
@@ -19,8 +19,14 @@ import {
   PROTOCOL_VERSION,
   ProtocolOnlyRequestSchema,
   TerminalCreateRequestSchema,
+  type ActTask,
 } from "@constelix/contracts";
-import { AskService, DEFAULT_ASK_MODEL, OpenAIUnavailableError } from "./ask.js";
+import {
+  AskService,
+  DEFAULT_ASK_MODEL,
+  OpenAIUnavailableError,
+  type AskServiceOptions,
+} from "./ask.js";
 import {
   CodexManager,
   CodexUnavailableError,
@@ -35,12 +41,31 @@ import {
   writeWorkspaceTextFile,
 } from "./files.js";
 import { WorkspaceIndexer } from "./indexer.js";
-import { detectSupportedLanguage } from "./scanner.js";
-import { PathSecurityError, redactSecrets } from "./security.js";
-import { TerminalManager } from "./terminals.js";
+import {
+  detectSupportedLanguage,
+  type ScanWorkspaceOptions,
+} from "./scanner.js";
+import {
+  PathSecurityError,
+  WorkspaceIdentityError,
+  WorkspaceReadOnlyError,
+  WorkspaceValidationError,
+  assertWorkspaceIdentity,
+  createWorkspaceId as createCanonicalWorkspaceId,
+  inspectWorkspace,
+  redactLocalPaths,
+  redactSecrets,
+  summarizeWorkspacePath,
+  type WorkspaceDescriptor,
+} from "./security.js";
+import {
+  ReadOnlyTerminalUnavailableError,
+  TerminalManager,
+} from "./terminals.js";
 
 export interface AgentServerOptions {
   workspaceRoot: string;
+  readOnly?: boolean;
   dev?: boolean;
   port?: number;
   capabilityToken?: string;
@@ -52,7 +77,10 @@ export interface AgentServerOptions {
   databasePath?: string;
   webDistPath?: string;
   devOrigin?: string;
+  askOptions?: AskServiceOptions;
   codexOptions?: CodexManagerOptions;
+  /** Internal override for deterministic tests and the 10,000-file benchmark. */
+  indexerScanOptions?: Omit<ScanWorkspaceOptions, "onProgress">;
 }
 
 export interface RunningAgentServer {
@@ -65,7 +93,11 @@ export interface RunningAgentServer {
 }
 
 export async function startAgentServer(options: AgentServerOptions): Promise<RunningAgentServer> {
-  const workspaceId = createWorkspaceId(options.workspaceRoot);
+  const workspace = await inspectWorkspace(options.workspaceRoot, {
+    forceReadOnly: options.readOnly,
+  });
+  const workspaceRoot = workspace.canonicalRoot;
+  const workspaceId = workspace.workspaceId;
   const capabilityToken = options.capabilityToken ?? randomBytes(32).toString("base64url");
   const storageDirectory =
     options.storageDirectory ??
@@ -77,8 +109,16 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       "workspaces",
       workspaceId,
     );
+  assertStatePathOutsideWorkspace(workspaceRoot, storageDirectory, "storageDirectory");
+  if (options.databasePath && options.databasePath !== ":memory:") {
+    assertStatePathOutsideWorkspace(workspaceRoot, options.databasePath, "databasePath");
+  }
   await mkdir(storageDirectory, { recursive: true, mode: 0o700 });
-  const lock = await WorkspaceLock.acquire(resolve(storageDirectory, "agent.lock"));
+  await chmod(storageDirectory, 0o700);
+  const lock = await WorkspaceLock.acquire(
+    resolve(storageDirectory, "agent.lock"),
+    workspaceId,
+  );
   let database: ConstelixDatabase | undefined;
   let events: EventBus | undefined;
   let indexer: WorkspaceIndexer | undefined;
@@ -86,23 +126,38 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   let ask: AskService | undefined;
   let codex: CodexManager | undefined;
   let app: FastifyInstance | undefined;
+  let identityMonitor: NodeJS.Timeout | undefined;
   try {
     database = new ConstelixDatabase(
       options.databasePath ?? resolve(storageDirectory, "constelix.sqlite"),
     );
-    database.upsertWorkspace(workspaceId, options.workspaceRoot);
-    events = new EventBus();
-    indexer = new WorkspaceIndexer(workspaceId, options.workspaceRoot, database, events);
-    terminals = new TerminalManager(options.workspaceRoot, events);
-    ask = new AskService(workspaceId, options.workspaceRoot, indexer.graph, database, events);
-    codex = new CodexManager(
+    database.upsertWorkspace(workspaceId, workspaceRoot);
+    events = new EventBus((payload) => sanitizePublicPayload(payload, workspaceRoot));
+    indexer = new WorkspaceIndexer(workspaceId, workspace, database, events, {
+      assertWorkspace: () => assertWorkspaceIdentity(workspace),
+      ...(options.indexerScanOptions === undefined
+        ? {}
+        : { scanOptions: options.indexerScanOptions }),
+    });
+    terminals = new TerminalManager(workspace, events);
+    ask = new AskService(
       workspaceId,
-      options.workspaceRoot,
-      events,
+      workspace,
+      indexer.graph,
       database,
-      options.codexOptions,
+      events,
+      options.askOptions,
     );
-    void codex.availability();
+    if (!workspace.readOnly) {
+      codex = new CodexManager(
+        workspaceId,
+        workspace,
+        events,
+        database,
+        options.codexOptions,
+      );
+      void codex.availability();
+    }
     app = Fastify({
       logger: false,
       bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
@@ -124,6 +179,10 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   let cleanupPromise: Promise<void> | undefined;
   const cleanup = (): Promise<void> => {
     if (cleanupPromise) return cleanupPromise;
+    if (identityMonitor) {
+      clearInterval(identityMonitor);
+      identityMonitor = undefined;
+    }
     cleanupPromise = cleanupAgentResources({
       app,
       ask,
@@ -156,10 +215,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       return reply.code(403).send(errorBody("INVALID_ORIGIN", "Request origin is not allowed."));
     }
     if (boundOrigin && request.headers.host !== new URL(boundOrigin).host) {
-      const isDevProxy = options.dev && request.headers.host === "127.0.0.1:4321";
-      if (!isDevProxy) {
-        return reply.code(403).send(errorBody("INVALID_HOST", "Request host is not allowed."));
-      }
+      return reply.code(403).send(errorBody("INVALID_HOST", "Request host is not allowed."));
     }
     if (request.method === "OPTIONS") {
       if (origin && allowedOrigins.has(origin)) addCors(reply, origin);
@@ -169,6 +225,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     if (!hasCapability(request, capabilityToken)) {
       return reply.code(401).send(errorBody("UNAUTHORIZED", "A valid capability token is required."));
     }
+    await assertWorkspaceIdentity(workspace);
   });
 
   app.addHook("onSend", async (request, reply, payload) => {
@@ -188,6 +245,9 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       return;
     }
     events.attach(socket as never, capabilityToken);
+    void assertWorkspaceIdentity(workspace).catch(() => {
+      socket.close(4409, "Workspace root changed");
+    });
   });
 
   app.get("/api/v1/health", async () => ({
@@ -200,23 +260,30 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   app.get("/api/v1/bootstrap", async () => {
     const graph = indexer.graph.snapshot(500);
     const savedLayout = database.loadLayout(workspaceId) ?? { revision: 0, panels: [] };
-    const codexAvailability = codex.peekAvailability();
-    const activeActTask = codex.activeTask;
+    const codexAvailability = codex?.peekAvailability() ?? {
+      available: false,
+      checking: false,
+      reason: "Actuar está deshabilitado en Modo Lectura.",
+    };
+    const activeActTask = codex?.activeTask ?? null;
     const total = indexer.status.total;
     return {
       protocolVersion: PROTOCOL_VERSION,
       workspace: {
         id: workspaceId,
-        name: basename(options.workspaceRoot),
-        rootPath: options.workspaceRoot,
+        name: basename(workspaceRoot),
+        rootPath: summarizeWorkspacePath(workspaceRoot),
+        mode: workspace.mode,
+        readOnly: workspace.readOnly,
       },
+      summary: indexer.status.summary,
       graph,
       layout: savedLayout.panels,
       layoutState: savedLayout,
-      conversation: database.loadAiMessages(`${workspaceId}:main`),
+      conversation: database.loadAiMessages(`${workspaceId}:main`, workspaceId),
       activeAskTurnIds: ask.activeTurnIds,
       activeActTask: activeActTask
-        ? { protocolVersion: PROTOCOL_VERSION, ...activeActTask }
+        ? toPublicActTask(activeActTask, workspaceRoot)
         : null,
       index: {
         ...indexer.status,
@@ -227,8 +294,11 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       },
       terminals: terminals.list(),
       capabilities: {
-        ask: ask.available,
-        act: codexAvailability.available,
+        ask: true,
+        askMode: ask.mode,
+        askProviderStatus: ask.providerStatus,
+        askNotice: ask.notice,
+        act: !workspace.readOnly && codexAvailability.available,
         terminal: true,
         codexReason: codexAvailability.reason,
         codexChecking: codexAvailability.checking,
@@ -246,7 +316,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
 
   app.post("/api/v1/files/read", async (request) => {
     const input = FileReadRequestSchema.parse(request.body);
-    const file = await readWorkspaceTextFile(options.workspaceRoot, input.relativePath);
+    const file = await readWorkspaceTextFile(workspace, input.relativePath);
     return {
       protocolVersion: PROTOCOL_VERSION,
       relativePath: input.relativePath,
@@ -260,7 +330,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
 
   app.put("/api/v1/files/write", async (request) => {
     const input = FileWriteRequestSchema.parse(request.body);
-    const file = await writeWorkspaceTextFile(options.workspaceRoot, {
+    const file = await writeWorkspaceTextFile(workspace, {
       relativePath: input.relativePath,
       content: input.content,
       expectedContentHash: input.expectedContentHash,
@@ -327,6 +397,15 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       if (input.threadId !== request.params.id) {
         return reply.code(400).send(errorBody("THREAD_MISMATCH", "Thread id does not match URL."));
       }
+      if (!input.threadId.startsWith(`${workspaceId}:`)) {
+        return reply.code(403).send(
+          errorBody(
+            "THREAD_WORKSPACE_MISMATCH",
+            "The Ask thread belongs to a different workspace.",
+            false,
+          ),
+        );
+      }
       return reply
         .code(202)
         .send(
@@ -341,6 +420,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   );
 
   app.post("/api/v1/act/tasks", async (request, reply) => {
+    if (workspace.readOnly) throw new WorkspaceReadOnlyError();
     const input = ActTaskRequestSchema.parse(request.body);
     if (!isSupportedActScope(input.capabilities)) {
       return reply.code(400).send(
@@ -350,39 +430,53 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
         ),
       );
     }
+    if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
     const task = codex.createTask(input.objective, input.capabilities);
-    return reply.code(201).send({ protocolVersion: PROTOCOL_VERSION, ...task });
+    return reply.code(201).send(toPublicActTask(task, workspaceRoot));
   });
 
   app.post<{ Params: { id: string } }>(
     "/api/v1/act/tasks/:id/approve",
     async (request, reply) => {
+      if (workspace.readOnly) throw new WorkspaceReadOnlyError();
       const input = ActApproveRequestSchema.parse(request.body);
       if (input.taskId !== request.params.id) {
         return reply.code(400).send(errorBody("TASK_MISMATCH", "Task id does not match URL."));
       }
-      return { protocolVersion: PROTOCOL_VERSION, ...(await codex.approve(request.params.id)) };
+      if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
+      return toPublicActTask(
+        await codex.approve(request.params.id),
+        workspaceRoot,
+      );
     },
   );
 
   app.post<{ Params: { id: string } }>(
     "/api/v1/act/tasks/:id/cancel",
     async (request) => {
+      if (workspace.readOnly) throw new WorkspaceReadOnlyError();
       ProtocolOnlyRequestSchema.parse(request.body);
-      return {
-        protocolVersion: PROTOCOL_VERSION,
-        ...(await codex.cancel(request.params.id)),
-      };
+      if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
+      return toPublicActTask(
+        await codex.cancel(request.params.id),
+        workspaceRoot,
+      );
     },
   );
 
   app.setErrorHandler((error, request, reply) => {
     const normalizedError = error instanceof Error ? error : new Error("Unknown agent error.");
-    const mapped = mapError(normalizedError);
+    const mapped = mapError(normalizedError, workspaceRoot);
     database.audit(workspaceId, "http", `${request.method} ${request.routeOptions.url}`, "failed", {
       code: mapped.code,
     });
-    void reply.code(mapped.status).send(errorBody(mapped.code, mapped.message, mapped.recoverable));
+    const safeMessage = redactLocalPaths(
+      redactSecrets(mapped.message),
+      workspaceRoot,
+    );
+    void reply
+      .code(mapped.status)
+      .send(errorBody(mapped.code, safeMessage, mapped.recoverable));
   });
 
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -419,6 +513,14 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     boundOrigin = `http://127.0.0.1:${port}`;
     allowedOrigins.add(boundOrigin);
     await indexer.start();
+    identityMonitor = startWorkspaceIdentityMonitor(
+      workspace,
+      events,
+      indexer,
+      terminals,
+      ask,
+      codex,
+    );
 
     return {
       app,
@@ -493,7 +595,7 @@ function isSupportedActScope(capabilities: readonly string[]): boolean {
   );
 }
 
-function mapError(error: Error): {
+function mapError(error: Error, workspaceRoot?: string): {
   status: number;
   code: string;
   message: string;
@@ -511,7 +613,20 @@ function mapError(error: Error): {
   if (error instanceof PathSecurityError) {
     return { status: 403, code: error.code, message: error.message, recoverable: false };
   }
+  if (error instanceof WorkspaceReadOnlyError) {
+    return { status: 403, code: error.code, message: error.message, recoverable: true };
+  }
+  if (error instanceof WorkspaceIdentityError) {
+    return { status: 409, code: error.code, message: error.message, recoverable: false };
+  }
+  if (error instanceof WorkspaceValidationError) {
+    const status = error.code === "WORKSPACE_NOT_FOUND" ? 404 : 403;
+    return { status, code: error.code, message: error.message, recoverable: false };
+  }
   if (error instanceof OpenAIUnavailableError || error instanceof CodexUnavailableError) {
+    return { status: 503, code: error.code, message: error.message, recoverable: true };
+  }
+  if (error instanceof ReadOnlyTerminalUnavailableError) {
     return { status: 503, code: error.code, message: error.message, recoverable: true };
   }
   const nodeError = error as NodeJS.ErrnoException;
@@ -521,40 +636,97 @@ function mapError(error: Error): {
   return {
     status: 500,
     code: "INTERNAL_ERROR",
-    message: redactSecrets(error.message || "Internal agent error."),
+    message: redactLocalPaths(
+      redactSecrets(error.message || "Internal agent error."),
+      workspaceRoot,
+    ),
     recoverable: true,
   };
 }
 
 export function createWorkspaceId(root: string): string {
-  return createHash("sha256").update(root).digest("hex").slice(0, 24);
+  try {
+    return createCanonicalWorkspaceId(realpathSync(resolve(root)));
+  } catch {
+    return createCanonicalWorkspaceId(resolve(root));
+  }
+}
+
+function startWorkspaceIdentityMonitor(
+  workspace: WorkspaceDescriptor,
+  events: EventBus,
+  indexer: WorkspaceIndexer,
+  terminals: TerminalManager,
+  ask: AskService,
+  codex: CodexManager | undefined,
+): NodeJS.Timeout {
+  let checking = false;
+  let failed = false;
+  const timer = setInterval(() => {
+    if (checking || failed) return;
+    checking = true;
+    void assertWorkspaceIdentity(workspace)
+      .catch(() => {
+        failed = true;
+        events.publish("error", {
+          code: "WORKSPACE_ROOT_CHANGED",
+          message:
+            "La raíz del workspace cambió. Se detuvieron terminales, IA e indexación para proteger el aislamiento.",
+          recoverable: false,
+          severity: "error",
+        });
+        ask.close();
+        terminals.close();
+        codex?.close();
+        void indexer.close().catch(() => undefined);
+      })
+      .finally(() => {
+        checking = false;
+      });
+  }, 500);
+  timer.unref();
+  return timer;
 }
 
 class WorkspaceLock {
   private constructor(
     private readonly path: string,
     private readonly handle: Awaited<ReturnType<typeof open>>,
+    private readonly nonce: string,
   ) {}
 
-  static async acquire(path: string): Promise<WorkspaceLock> {
+  static async acquire(path: string, workspaceId: string): Promise<WorkspaceLock> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const handle = await open(path, "wx", 0o600);
-        await handle.writeFile(String(process.pid));
-        return new WorkspaceLock(path, handle);
+        const nonce = randomUUID();
+        await handle.writeFile(JSON.stringify({
+          pid: process.pid,
+          nonce,
+          workspaceId,
+          createdAt: new Date().toISOString(),
+        }));
+        await handle.sync();
+        return new WorkspaceLock(path, handle, nonce);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         let stale = false;
         try {
-          const pid = Number.parseInt(await readFile(path, "utf8"), 10);
+          const content = await readFile(path, "utf8");
+          const parsed = parseLockOwner(content);
+          const pid = parsed?.pid ?? Number.parseInt(content, 10);
           if (!Number.isFinite(pid)) stale = true;
           else process.kill(pid, 0);
         } catch (checkError) {
           const code = (checkError as NodeJS.ErrnoException).code;
           stale = code === "ESRCH" || code === "ENOENT";
         }
-        if (!stale) throw new Error("Constelix is already running for this workspace.");
+        if (!stale) {
+          throw new Error(
+            "El workspace ya está abierto por otra instancia de Constelix.",
+          );
+        }
         await unlink(path).catch(() => undefined);
       }
     }
@@ -563,6 +735,119 @@ class WorkspaceLock {
 
   async release(): Promise<void> {
     await this.handle.close().catch(() => undefined);
-    await unlink(this.path).catch(() => undefined);
+    try {
+      const owner = parseLockOwner(await readFile(this.path, "utf8"));
+      if (owner?.nonce === this.nonce) await unlink(this.path);
+    } catch {
+      // The lock may already be gone after a crash or external cleanup.
+    }
   }
+}
+
+function parseLockOwner(
+  value: string,
+): { pid: number; nonce?: string } | undefined {
+  try {
+    const parsed = JSON.parse(value) as { pid?: unknown; nonce?: unknown };
+    if (typeof parsed.pid !== "number") return undefined;
+    return {
+      pid: parsed.pid,
+      ...(typeof parsed.nonce === "string" ? { nonce: parsed.nonce } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function assertStatePathOutsideWorkspace(
+  workspaceRoot: string,
+  candidatePath: string,
+  label: string,
+): void {
+  const projected = projectCanonicalPath(resolve(candidatePath));
+  if (isPathWithin(workspaceRoot, projected)) {
+    throw new WorkspaceValidationError(
+      "WORKSPACE_VALIDATION_FAILED",
+      `${label} debe estar fuera del workspace.`,
+    );
+  }
+}
+
+function projectCanonicalPath(candidatePath: string): string {
+  let cursor = candidatePath;
+  const suffix: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    suffix.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return resolve(realpathSync(cursor), ...suffix);
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return (
+    fromRoot === "" ||
+    (!isAbsolute(fromRoot) &&
+      fromRoot !== ".." &&
+      !fromRoot.startsWith(`..${sep}`))
+  );
+}
+
+function sanitizePublicPayload(
+  value: unknown,
+  workspaceRoot: string,
+): unknown {
+  if (typeof value === "string") {
+    return redactLocalPaths(redactSecrets(value), workspaceRoot);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizePublicPayload(item, workspaceRoot));
+  }
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      sanitizePublicPayload(item, workspaceRoot),
+    ]),
+  );
+}
+
+function toPublicActTask(
+  task: {
+    id: string;
+    scope: ActTask["scope"];
+    status: ActTask["status"];
+    createdAt: string;
+    approvedAt?: string;
+    completedAt?: string;
+    error?: string;
+  },
+  workspaceRoot: string,
+): ActTask {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    id: task.id,
+    scope: {
+      ...task.scope,
+      rootPath: summarizeWorkspacePath(workspaceRoot),
+    },
+    status: task.status,
+    createdAt: task.createdAt,
+    ...(task.approvedAt === undefined
+      ? {}
+      : { approvedAt: task.approvedAt }),
+    ...(task.completedAt === undefined
+      ? {}
+      : { completedAt: task.completedAt }),
+    ...(task.error === undefined
+      ? {}
+      : {
+          error: redactLocalPaths(
+            redactSecrets(task.error),
+            workspaceRoot,
+          ),
+        }),
+  };
 }

@@ -4,10 +4,12 @@ import {
   FileReadResponseSchema,
   FileWriteResponseSchema,
   GraphSnapshotSchema,
+  LocalAskResultSchema,
   PanelStateSchema,
   ServerEventSchema,
   TerminalSessionSchema,
   TerminalOutputSnapshotSchema,
+  WorkspaceSummarySchema,
   type ActApproveRequest,
   type ActTask as ContractActTask,
   type ActTaskRequest,
@@ -31,6 +33,9 @@ export class AgentRequestError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
+    readonly recoverable = true,
+    readonly severity: "info" | "warning" | "error" = "error",
   ) {
     super(message);
     this.name = "AgentRequestError";
@@ -61,9 +66,13 @@ class ConstelixApiClient {
     const response = await fetch(`/api/v1${path}`, { ...init, headers });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
+      const parsed = parseAgentErrorDetail(detail);
       throw new AgentRequestError(
-        detail || `El agente respondió ${response.status}`,
+        parsed.message || `El agente respondió ${response.status}`,
         response.status,
+        parsed.code,
+        parsed.recoverable,
+        parsed.severity,
       );
     }
     if (response.status === 204) return undefined as T;
@@ -332,11 +341,20 @@ export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
   const workspaceId = requireString(workspaceRecord.id, "workspace.id");
   const workspaceName = requireString(workspaceRecord.name, "workspace.name");
   const rootPath = requireString(workspaceRecord.rootPath, "workspace.rootPath");
+  const mode = requireString(workspaceRecord.mode, "workspace.mode");
+  if (mode !== "read" && mode !== "edit") {
+    throw new Error("El agente devolvió un modo de workspace inválido.");
+  }
+  const readOnly = requireBoolean(workspaceRecord.readOnly, "workspace.readOnly");
+  if (readOnly !== (mode === "read")) {
+    throw new Error("El agente devolvió un modo de workspace inconsistente.");
+  }
   const branch =
     workspaceRecord.branch === undefined
       ? undefined
       : requireString(workspaceRecord.branch, "workspace.branch");
   const graph = GraphSnapshotSchema.parse(record.graph);
+  const summary = WorkspaceSummarySchema.parse(record.summary);
 
   const indexRecord = requireRecord(record.index, "index");
   const phases = new Set([
@@ -389,9 +407,15 @@ export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
               messageRecord.content,
               `conversation[${indexValue}].content`,
             ),
+            ...(messageRecord.mode === undefined
+              ? {}
+              : { mode: parseAskMode(messageRecord.mode, `conversation[${indexValue}].mode`) }),
             ...(messageRecord.evidence === undefined
               ? {}
               : { evidence: EvidencePathSchema.parse(messageRecord.evidence) }),
+            ...(messageRecord.localResult === undefined
+              ? {}
+              : { localResult: LocalAskResultSchema.parse(messageRecord.localResult) }),
           };
         });
   const terminals =
@@ -423,8 +447,11 @@ export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
       id: workspaceId,
       name: workspaceName,
       rootPath,
+      mode,
+      readOnly,
       ...(branch ? { branch } : {}),
     },
+    summary,
     graph,
     index,
     activeAskTurnIds,
@@ -440,12 +467,88 @@ function parseCapabilities(raw: unknown): NonNullable<BootstrapPayload["capabili
   const record = requireRecord(raw, "capabilities");
   return {
     ask: requireBoolean(record.ask, "capabilities.ask"),
+    askMode: parseAskMode(record.askMode, "capabilities.askMode"),
+    askProviderStatus: parseAskProviderStatus(
+      record.askProviderStatus,
+      "capabilities.askProviderStatus",
+    ),
     act: requireBoolean(record.act, "capabilities.act"),
     terminal: requireBoolean(record.terminal, "capabilities.terminal"),
+    ...(record.askNotice === undefined
+      ? {}
+      : { askNotice: requireString(record.askNotice, "capabilities.askNotice") }),
     ...(record.codexReason === undefined
       ? {}
       : { codexReason: requireString(record.codexReason, "capabilities.codexReason") }),
+    ...(record.codexChecking === undefined
+      ? {}
+      : { codexChecking: requireBoolean(record.codexChecking, "capabilities.codexChecking") }),
+    ...(record.codexVersion === undefined
+      ? {}
+      : { codexVersion: requireString(record.codexVersion, "capabilities.codexVersion") }),
   };
+}
+
+export function parseAgentErrorDetail(detail: string): {
+  message: string;
+  code?: string;
+  recoverable: boolean;
+  severity: "info" | "warning" | "error";
+} {
+  if (!detail.trim()) {
+    return { message: "", recoverable: true, severity: "error" };
+  }
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    const record = requireRecord(parsed, "error");
+    return {
+      message:
+        typeof record.message === "string" && record.message.trim()
+          ? record.message
+          : detail,
+      ...(typeof record.code === "string" ? { code: record.code } : {}),
+      recoverable:
+        typeof record.recoverable === "boolean" ? record.recoverable : true,
+      severity:
+        record.severity === "info" ||
+        record.severity === "warning" ||
+        record.severity === "error"
+          ? record.severity
+          : "error",
+    };
+  } catch {
+    return { message: detail, recoverable: true, severity: "error" };
+  }
+}
+
+function parseAskMode(value: unknown, label: string): "local" | "openai" {
+  const mode = requireString(value, label);
+  if (mode !== "local" && mode !== "openai") {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return mode;
+}
+
+function parseAskProviderStatus(
+  value: unknown,
+  label: string,
+): NonNullable<BootstrapPayload["capabilities"]>["askProviderStatus"] {
+  const status = requireString(value, label);
+  const accepted = new Set([
+    "ready",
+    "missing_api_key",
+    "insufficient_quota",
+    "invalid_api_key",
+    "network_unavailable",
+    "rate_limited",
+    "unavailable",
+  ]);
+  if (!accepted.has(status)) {
+    throw new Error(`Respuesta inválida del agente: ${label}.`);
+  }
+  return status as NonNullable<
+    BootstrapPayload["capabilities"]
+  >["askProviderStatus"];
 }
 
 function requireRecord(
