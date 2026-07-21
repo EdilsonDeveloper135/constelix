@@ -8,11 +8,13 @@ import {
   GraphConfidenceSchema,
   GraphNodeSchema,
   GraphQuerySchema,
+  LlmConfigurationUpdateSchema,
+  LlmPublicConfigurationSchema,
+  PanelStateSchema,
   PROTOCOL_VERSION,
   ServerEventSchema,
   WorkspaceIdSchema,
   WorkspaceSummarySchema,
-  WebSocketAuthenticationSchema,
 } from "./index.js";
 
 describe("protocol contracts", () => {
@@ -38,16 +40,51 @@ describe("protocol contracts", () => {
     expect(() => GraphConfidenceSchema.parse("resolved")).toThrow();
   });
 
-  it("strictly validates authentication and client WebSocket messages", () => {
-    expect(WebSocketAuthenticationSchema.parse({
+  it("defaults panels to floating while accepting explicit docks", () => {
+    const panel = PanelStateSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      id: "editor-1",
+      kind: "editor",
+      position: { x: 10, y: 20 },
+      size: { width: 600, height: 400 },
+      resource: {},
+      updatedAt: "2026-07-18T00:00:00.000Z",
+    });
+
+    expect(panel.dock).toBe("floating");
+    expect(PanelStateSchema.parse({ ...panel, dock: "bottom" }).dock).toBe("bottom");
+    expect(() => PanelStateSchema.parse({ ...panel, dock: "left" })).toThrow();
+  });
+
+  it("separates public LLM settings from write-only secret updates", () => {
+    const publicConfiguration = LlmPublicConfigurationSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen2.5-coder:7b",
+      providerKind: "ollama",
+      apiKeyConfigured: false,
+      apiKeyRequired: false,
+      apiKeySource: "none",
+    });
+    expect(Object.hasOwn(publicConfiguration, "apiKey")).toBe(false);
+    expect(() => LlmPublicConfigurationSchema.parse({
+      ...publicConfiguration,
+      apiKey: "must-not-cross-the-response-boundary",
+    })).toThrow();
+
+    expect(LlmConfigurationUpdateSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: { action: "replace", value: "write-only-key" },
+    }).apiKey).toEqual({ action: "replace", value: "write-only-key" });
+  });
+
+  it("strictly validates post-handshake client WebSocket messages", () => {
+    expect(() => ClientEventSchema.parse({
       protocolVersion: PROTOCOL_VERSION,
       type: "authenticate",
-      token: "capability",
-    })).toMatchObject({ type: "authenticate" });
-    expect(() => WebSocketAuthenticationSchema.parse({
-      protocolVersion: PROTOCOL_VERSION,
-      type: "auth",
-      token: "capability",
+      token: "obsolete-capability-message",
     })).toThrow();
     expect(() => ClientEventSchema.parse({
       protocolVersion: 2,

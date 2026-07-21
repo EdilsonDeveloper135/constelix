@@ -16,6 +16,11 @@ import {
 import { memo, type ComponentType } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
+import {
+  isSemanticHierarchy,
+  semanticNodeCapabilities,
+  semanticNodeCwd,
+} from "../../lib/semanticNodeActions";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import type { SemanticFlowNode, SemanticNodeKind } from "../../types";
 
@@ -33,14 +38,6 @@ const icons: Record<SemanticNodeKind, ComponentType<{ size?: number; "aria-hidde
   external: Package
 };
 
-function cwdForNode(data: SemanticFlowNode["data"]): string {
-  const path = data.relativePath ?? ".";
-  if (data.kind !== "module") return path;
-  const parts = path.split("/");
-  parts.pop();
-  return parts.join("/") || ".";
-}
-
 export const SemanticNode = memo(function SemanticNode({
   id,
   data,
@@ -54,14 +51,8 @@ export const SemanticNode = memo(function SemanticNode({
   const openTerminal = useWorkspaceStore((state) => state.openTerminal);
   const Icon = icons[data.kind];
   const evidenceClass = data.evidenceState ? ` semantic-node--evidence-${data.evidenceState}` : "";
-  const hierarchy =
-    data.kind === "workspace" ||
-    data.kind === "directory" ||
-    data.kind === "module";
-  const canOpenFile =
-    Boolean(data.relativePath) &&
-    data.kind !== "workspace" &&
-    data.kind !== "directory";
+  const hierarchy = isSemanticHierarchy(data);
+  const { canOpenFile } = semanticNodeCapabilities(data);
   const expanded = hierarchy && Boolean(data.expanded) && !data.collapsed;
   const evidenceDescription =
     data.evidenceState === "current"
@@ -77,6 +68,7 @@ export const SemanticNode = memo(function SemanticNode({
       aria-label={`${data.kind}: ${data.label}`}
       aria-description={evidenceDescription}
       aria-expanded={hierarchy ? expanded : undefined}
+      aria-haspopup="menu"
       aria-current={data.evidenceState === "current" ? "step" : undefined}
       title={data.relativePath ?? data.label}
       data-expanded={expanded ? "true" : "false"}
@@ -135,7 +127,7 @@ export const SemanticNode = memo(function SemanticNode({
               aria-label={`Abrir terminal en ${data.label}`}
               onClick={(event) => {
                 event.stopPropagation();
-                openTerminal(cwdForNode(data), id);
+                openTerminal(semanticNodeCwd(data), id);
               }}
             >
               <SquareTerminal aria-hidden="true" size={11} />

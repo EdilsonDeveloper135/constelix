@@ -6,6 +6,7 @@ import type {
   EvidencePath as ContractEvidencePath,
   GraphSnapshot as ContractGraphSnapshot,
   LocalAskResult,
+  PanelDock as ContractPanelDock,
   PanelState,
   ServerEvent,
   SourceRange,
@@ -60,9 +61,11 @@ export interface SemanticNodeData extends Record<string, unknown> {
 export type WorkspaceMode = WorkspaceAccessMode;
 export type WorkspaceAskMode = AskMode;
 export type WorkspaceAskProviderStatus = AskProviderStatus;
+export type PanelDock = ContractPanelDock;
 
 export interface EditorPanelData extends Record<string, unknown> {
   panelType: "editor";
+  dock: PanelDock;
   title: string;
   relativePath: string;
   language: string;
@@ -76,6 +79,7 @@ export interface EditorPanelData extends Record<string, unknown> {
 
 export interface TerminalPanelData extends Record<string, unknown> {
   panelType: "terminal";
+  dock: PanelDock;
   title: string;
   cwd: string;
   terminalId?: string;
@@ -88,6 +92,7 @@ export type AssistantMode = "ask" | "act";
 
 export interface AssistantPanelData extends Record<string, unknown> {
   panelType: "assistant";
+  dock: PanelDock;
   title: string;
   mode: AssistantMode;
   collapsed?: boolean;

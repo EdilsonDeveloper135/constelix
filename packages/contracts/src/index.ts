@@ -149,6 +149,7 @@ export const GraphQuerySchema = z.object({
 });
 
 export const PanelKindSchema = z.enum(["editor", "terminal", "ask", "act", "inspector", "index"]);
+export const PanelDockSchema = z.enum(["floating", "right", "bottom"]);
 
 export const PanelStateSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
@@ -158,6 +159,8 @@ export const PanelStateSchema = z.object({
   size: z.object({ width: z.number().positive(), height: z.number().positive() }),
   resource: z.record(z.string(), z.unknown()).default({}),
   anchorNodeId: z.string().optional(),
+  dock: PanelDockSchema.default("floating"),
+  dockActive: z.boolean().default(false),
   zoom: z.number().positive().default(1),
   pinned: z.boolean().default(false),
   updatedAt: z.string().datetime()
@@ -237,6 +240,35 @@ export const AskProviderStatusSchema = z.enum([
   "rate_limited",
   "unavailable"
 ]);
+
+export const LlmProviderKindSchema = z.enum(["openai", "ollama", "compatible"]);
+export const LlmApiKeySourceSchema = z.enum(["none", "environment", "stored"]);
+
+export const LlmPublicConfigurationSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  baseUrl: z.string().min(1).max(2_048),
+  model: z.string().min(1).max(256),
+  providerKind: LlmProviderKindSchema,
+  apiKeyConfigured: z.boolean(),
+  apiKeyRequired: z.boolean(),
+  apiKeySource: LlmApiKeySourceSchema
+}).strict();
+
+export const LlmApiKeyUpdateSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("preserve") }).strict(),
+  z.object({
+    action: z.literal("replace"),
+    value: z.string().min(1).max(8_192)
+  }).strict(),
+  z.object({ action: z.literal("clear") }).strict()
+]);
+
+export const LlmConfigurationUpdateSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  baseUrl: z.string().trim().min(1).max(2_048),
+  model: z.string().trim().min(1).max(256),
+  apiKey: LlmApiKeyUpdateSchema
+}).strict();
 
 export const LocalAskRelationSchema = z.object({
   edgeId: z.string().min(1),
@@ -409,10 +441,6 @@ const ServerEventBaseSchema = z.object({
 
 export const ServerEventSchema = z.discriminatedUnion("type", [
   ServerEventBaseSchema.extend({
-    type: z.literal("authenticated"),
-    payload: z.object({}).strict()
-  }),
-  ServerEventBaseSchema.extend({
     type: z.literal("connection.ready"),
     payload: z.object({}).strict()
   }),
@@ -460,6 +488,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       askMode: AskModeSchema.optional(),
       askProviderStatus: AskProviderStatusSchema.optional(),
       askNotice: z.string().nullable().optional(),
+      llm: LlmPublicConfigurationSchema.optional(),
       codexVersion: z.string().optional(),
       codexReason: z.string().optional()
     })
@@ -484,12 +513,6 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
     })
   })
 ]);
-
-export const WebSocketAuthenticationSchema = z.object({
-  protocolVersion: ProtocolVersionSchema,
-  type: z.literal("authenticate"),
-  token: z.string().min(1).max(512)
-}).strict();
 
 export const ClientEventSchema = z.discriminatedUnion("type", [
   z.object({
@@ -531,6 +554,7 @@ export type GraphDelta = z.infer<typeof GraphDeltaSchema>;
 export type GraphDirection = z.infer<typeof GraphDirectionSchema>;
 export type GraphQuery = z.infer<typeof GraphQuerySchema>;
 export type PanelKind = z.infer<typeof PanelKindSchema>;
+export type PanelDock = z.infer<typeof PanelDockSchema>;
 export type PanelState = z.infer<typeof PanelStateSchema>;
 export type LayoutWriteRequest = z.infer<typeof LayoutWriteRequestSchema>;
 export type ProtocolOnlyRequest = z.infer<typeof ProtocolOnlyRequestSchema>;
@@ -542,6 +566,11 @@ export type EvidencePath = z.infer<typeof EvidencePathSchema>;
 export type AskToolName = z.infer<typeof AskToolNameSchema>;
 export type AskMode = z.infer<typeof AskModeSchema>;
 export type AskProviderStatus = z.infer<typeof AskProviderStatusSchema>;
+export type LlmProviderKind = z.infer<typeof LlmProviderKindSchema>;
+export type LlmApiKeySource = z.infer<typeof LlmApiKeySourceSchema>;
+export type LlmPublicConfiguration = z.infer<typeof LlmPublicConfigurationSchema>;
+export type LlmApiKeyUpdate = z.infer<typeof LlmApiKeyUpdateSchema>;
+export type LlmConfigurationUpdate = z.infer<typeof LlmConfigurationUpdateSchema>;
 export type LocalAskRelation = z.infer<typeof LocalAskRelationSchema>;
 export type LocalAskSnippet = z.infer<typeof LocalAskSnippetSchema>;
 export type LocalAskHit = z.infer<typeof LocalAskHitSchema>;
@@ -559,7 +588,6 @@ export type TerminalSession = z.infer<typeof TerminalSessionSchema>;
 export type TerminalOutputChunk = z.infer<typeof TerminalOutputChunkSchema>;
 export type TerminalOutputSnapshot = z.infer<typeof TerminalOutputSnapshotSchema>;
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
-export type WebSocketAuthentication = z.infer<typeof WebSocketAuthenticationSchema>;
 export type ClientEvent = z.infer<typeof ClientEventSchema>;
 
 const CLEAR_SECRET_PATTERNS = [

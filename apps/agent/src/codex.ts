@@ -633,7 +633,7 @@ export class CodexManager {
 
       try {
         await this.request("initialize", {
-          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.3" },
+          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.4" },
         });
         this.notify("initialized");
       } catch (error) {

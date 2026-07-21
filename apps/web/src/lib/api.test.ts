@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   apiClient,
+  buildEventSocketUrl,
   canUseKeepaliveBody,
   parseBootstrapPayload,
   parseServerEvent,
@@ -28,16 +29,7 @@ afterEach(() => {
 });
 
 describe("strict local-agent transport", () => {
-  it("accepts authenticated connection lifecycle events", () => {
-    expect(
-      parseServerEvent({
-        protocolVersion: 1,
-        eventId: "event-authenticated",
-        timestamp,
-        type: "authenticated",
-        payload: {},
-      }),
-    ).toMatchObject({ type: "authenticated" });
+  it("accepts post-handshake connection lifecycle events", () => {
     expect(
       parseServerEvent({
         protocolVersion: 1,
@@ -300,5 +292,52 @@ describe("strict local-agent transport", () => {
   it("avoids browser keepalive limits for oversized layout payloads", () => {
     expect(canUseKeepaliveBody("small layout")).toBe(true);
     expect(canUseKeepaliveBody("x".repeat(61 * 1024))).toBe(false);
+  });
+
+  it("authenticates the WebSocket in its handshake URL", () => {
+    const url = new URL(buildEventSocketUrl(
+      { protocol: "http:", host: "127.0.0.1:4321" },
+      "token with symbols/+",
+    ));
+
+    expect(url.protocol).toBe("ws:");
+    expect(url.pathname).toBe("/api/v1/events");
+    expect(url.searchParams.get("token")).toBe("token with symbols/+");
+  });
+
+  it("reads and updates only the public LLM configuration", async () => {
+    const configuration = {
+      protocolVersion: 1 as const,
+      baseUrl: "http://localhost:11434/v1",
+      model: "qwen2.5-coder",
+      providerKind: "ollama" as const,
+      apiKeyConfigured: false,
+      apiKeyRequired: false,
+      apiKeySource: "none" as const,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(configuration), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(configuration), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(apiClient.getLlmConfiguration()).resolves.toEqual(configuration);
+    await expect(apiClient.updateLlmConfiguration({
+      protocolVersion: 1,
+      baseUrl: configuration.baseUrl,
+      model: configuration.model,
+      apiKey: { action: "preserve" },
+    })).resolves.toEqual(configuration);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/settings/llm");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/settings/llm");
+    const updateRequest = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(updateRequest.method).toBe("PUT");
+    expect(JSON.parse(String(updateRequest.body))).not.toHaveProperty("apiKey.value");
   });
 });

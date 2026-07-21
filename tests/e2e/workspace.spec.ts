@@ -13,15 +13,17 @@ test("renders the complete visual workspace without runtime errors", async ({ pa
   await expect(page.getByTestId("workspace-canvas")).toBeVisible();
   await expect(page.getByTestId("editor-panel")).toBeVisible();
   await expect(page.getByTestId("terminal-panel")).toBeVisible();
-  await expect(page.getByTestId("ask-panel")).toBeVisible();
   await expect(page.locator(".monaco-editor")).toBeVisible();
   await expect(page.locator(".xterm")).toBeVisible();
+  await page.getByRole("tab", { name: "Asistente" }).click();
+  await expect(page.getByTestId("ask-panel")).toBeVisible();
   await expect(page.getByText("Modo demostración")).toBeVisible();
   expect(runtimeErrors).toEqual([]);
 });
 
 test("asks with evidence and requires explicit approval before acting", async ({ page }) => {
   await page.goto("/");
+  await page.getByRole("tab", { name: "Asistente" }).click();
 
   const evidenceAnimationLatency = page.evaluate(
     () =>
@@ -65,6 +67,7 @@ test("asks with evidence and requires explicit approval before acting", async ({
   await historicalEvidence.getByRole("button").first().click();
   await expect(page.locator(".editor-breadcrumbs")).toContainText("query.ts");
 
+  await page.getByRole("tab", { name: "Asistente" }).click();
   await page.getByRole("tab", { name: "Actuar" }).click();
   await expect(page.getByTestId("act-panel")).toBeVisible();
   await page
@@ -83,6 +86,7 @@ test("asks with evidence and requires explicit approval before acting", async ({
 
 test("supports keyboard navigation and restores focus around modal UI", async ({ page }) => {
   await page.goto("/");
+  await page.getByRole("tab", { name: "Asistente" }).click();
 
   const askTab = page.getByRole("tab", { name: "Preguntar" });
   const actTab = page.getByRole("tab", { name: "Actuar" });
@@ -97,6 +101,7 @@ test("supports keyboard navigation and restores focus around modal UI", async ({
   await expect(askTab).toBeFocused();
   await expect(page.getByRole("tabpanel", { name: "Preguntar" })).toBeVisible();
 
+  await page.getByRole("button", { name: "Encuadrar" }).click();
   const semanticNode = page.locator(
     '.semantic-node[aria-label="directory: apps/web"]',
   );

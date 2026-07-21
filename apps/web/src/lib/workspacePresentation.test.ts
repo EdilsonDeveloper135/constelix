@@ -19,7 +19,7 @@ describe("workspace presentation", () => {
     expect(workspaceModeLabel("read")).toBe("Lectura");
     expect(workspaceModeLabel("edit")).toBe("Edición");
     expect(askModeLabel("local")).toBe("Ask Local");
-    expect(askModeLabel("openai")).toBe("Ask OpenAI");
+    expect(askModeLabel("openai")).toBe("Ask LLM");
   });
 
   it("keeps only a short non-sensitive path suffix", () => {

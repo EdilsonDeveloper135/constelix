@@ -18,6 +18,9 @@ interface PendingRequest {
   reject(error: Error): void;
 }
 
+const WORKER_GRACEFUL_CLOSE_TIMEOUT_MS = 1_000;
+const WORKER_TERMINATE_TIMEOUT_MS = 1_000;
+
 /** A single reusable worker keeps native Tree-sitter parsing off Fastify's event loop. */
 export class AnalyzerWorkerClient {
   #worker: Worker | undefined;
@@ -34,7 +37,12 @@ export class AnalyzerWorkerClient {
     const id = this.#nextRequestId++;
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
-      worker.postMessage({ id, files, options });
+      try {
+        worker.postMessage({ type: "analyze", id, files, options });
+      } catch (error) {
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -42,8 +50,28 @@ export class AnalyzerWorkerClient {
     this.#closing = true;
     const worker = this.#worker;
     this.#worker = undefined;
-    if (worker !== undefined) await worker.terminate();
     this.rejectPending(new Error("The analyzer worker was closed."));
+    if (worker === undefined) return;
+
+    const exited = waitForWorkerExit(worker, WORKER_GRACEFUL_CLOSE_TIMEOUT_MS);
+    let closePosted = true;
+    try {
+      worker.postMessage({ type: "close" });
+    } catch {
+      closePosted = false;
+    }
+    if (closePosted && await exited) return;
+
+    // Native parser cleanup must never deadlock an agent shutdown. Unref before
+    // falling back to a bounded forced termination.
+    worker.unref();
+    await settleWithin(
+      worker.terminate().then(
+        () => undefined,
+        () => undefined,
+      ),
+      WORKER_TERMINATE_TIMEOUT_MS,
+    );
   }
 
   private ensureWorker(): Worker {
@@ -88,5 +116,35 @@ export class AnalyzerWorkerClient {
   private rejectPending(error: Error): void {
     for (const request of this.#pending.values()) request.reject(error);
     this.#pending.clear();
+  }
+}
+
+function waitForWorkerExit(worker: Worker, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    worker.once("exit", onExit);
+  });
+}
+
+async function settleWithin(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

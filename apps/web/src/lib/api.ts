@@ -4,6 +4,7 @@ import {
   FileReadResponseSchema,
   FileWriteResponseSchema,
   GraphSnapshotSchema,
+  LlmPublicConfigurationSchema,
   LocalAskResultSchema,
   PanelStateSchema,
   ServerEventSchema,
@@ -17,6 +18,8 @@ import {
   type FileReadRequest,
   type FileWriteRequest,
   type GraphSnapshot,
+  type LlmConfigurationUpdate,
+  type LlmPublicConfiguration,
   type PanelState,
   type TerminalCreateRequest
 } from "@constelix/contracts";
@@ -144,6 +147,21 @@ class ConstelixApiClient {
       body: JSON.stringify(body)
     });
     return FileReadResponseSchema.parse(response);
+  }
+
+  async getLlmConfiguration(): Promise<LlmPublicConfiguration> {
+    const response = await this.request<unknown>("/settings/llm");
+    return LlmPublicConfigurationSchema.parse(response);
+  }
+
+  async updateLlmConfiguration(
+    configuration: LlmConfigurationUpdate,
+  ): Promise<LlmPublicConfiguration> {
+    const response = await this.request<unknown>("/settings/llm", {
+      method: "PUT",
+      body: JSON.stringify(configuration),
+    });
+    return LlmPublicConfigurationSchema.parse(response);
   }
 
   async writeFile(relativePath: string, content: string, expectedContentHash?: string) {
@@ -277,17 +295,8 @@ class ConstelixApiClient {
   private openSocket(): void {
     if (!this.token || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/events`);
+    const socket = new WebSocket(buildEventSocketUrl(window.location, this.token));
     this.socket = socket;
-    socket.addEventListener("open", () => {
-      if (this.socket !== socket) return;
-      socket.send(JSON.stringify({
-        protocolVersion: PROTOCOL_VERSION,
-        type: "authenticate",
-        token: this.token,
-      }));
-    });
     socket.addEventListener("message", (message) => {
       if (this.socket !== socket) return;
       try {
@@ -322,6 +331,16 @@ class ConstelixApiClient {
 }
 
 export const apiClient = new ConstelixApiClient();
+
+export function buildEventSocketUrl(
+  location: Pick<Location, "protocol" | "host">,
+  token: string,
+): string {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${protocol}//${location.host}/api/v1/events`);
+  url.searchParams.set("token", token);
+  return url.toString();
+}
 
 export function canUseKeepaliveBody(body: string): boolean {
   return new TextEncoder().encode(body).byteLength <= MAX_KEEPALIVE_BODY_BYTES;

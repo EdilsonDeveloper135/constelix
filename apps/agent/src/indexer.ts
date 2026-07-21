@@ -826,8 +826,8 @@ export class WorkspaceIndexer {
     this.finishWatcherReadyWait();
     await this.#watcher?.close();
     this.#watcher = undefined;
-    await this.#active;
     await this.#analyzer.close();
+    await this.#active;
   }
 }
 

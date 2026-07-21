@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -117,6 +117,151 @@ describe("local agent HTTP boundary", () => {
       databasePath: join(root, ".constelix", "constelix.sqlite"),
       webDistPath: join(root, "missing-web-dist"),
     })).rejects.toThrow("storageDirectory debe estar fuera del workspace.");
+  });
+
+  it("updates per-workspace LLM settings without returning or auditing the secret", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-llm-route-"));
+    const root = join(parent, "workspace");
+    const storageDirectory = join(parent, "state");
+    const databasePath = join(parent, "constelix.sqlite");
+    const secret = "route-secret-must-remain-write-only";
+    await mkdir(root);
+    await writeFile(join(root, "main.ts"), "export const safe = true;\n");
+    const server = await startAgentServer({
+      workspaceRoot: root,
+      readOnly: true,
+      port: 0,
+      capabilityToken: "llm-settings-capability",
+      storageDirectory,
+      databasePath,
+      webDistPath: join(parent, "missing-web-dist"),
+      askOptions: {
+        apiKey: "",
+        provider: {
+          async stream() {
+            return (async function* emptyStream() {})();
+          },
+        },
+      },
+    });
+    const headers = {
+      host: new URL(server.origin).host,
+      authorization: "Bearer llm-settings-capability",
+      "content-type": "application/json",
+    };
+
+    try {
+      let indexPhase = "idle";
+      for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {
+        const health = await server.app.inject({
+          method: "GET",
+          url: "/api/v1/health",
+          headers,
+        });
+        indexPhase = (health.json() as { index: { phase: string } }).index.phase;
+        if (indexPhase !== "ready") {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      expect(indexPhase).toBe("ready");
+
+      const initial = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/settings/llm",
+        headers,
+      });
+      expect(initial.statusCode).toBe(200);
+      expect(initial.json()).toMatchObject({
+        protocolVersion: 1,
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-4o",
+      });
+      expect(JSON.stringify(initial.json())).not.toContain("apiKey\"");
+
+      const updated = await server.app.inject({
+        method: "PUT",
+        url: "/api/v1/settings/llm",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          baseUrl: "https://compatible.example/v1",
+          model: "compatible-model",
+          apiKey: { action: "replace", value: secret },
+        },
+      });
+      expect(updated.statusCode).toBe(200);
+      expect(updated.json()).toMatchObject({
+        baseUrl: "https://compatible.example/v1",
+        model: "compatible-model",
+        providerKind: "compatible",
+        apiKeyConfigured: true,
+        apiKeySource: "stored",
+      });
+      expect(JSON.stringify(updated.json())).not.toContain(secret);
+      expect(JSON.stringify(updated.json())).not.toContain("\"apiKey\"");
+
+      const bootstrap = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/bootstrap",
+        headers,
+      });
+      expect(bootstrap.statusCode).toBe(200);
+      expect(bootstrap.json()).toMatchObject({
+        capabilities: {
+          model: "compatible-model",
+          llm: {
+            baseUrl: "https://compatible.example/v1",
+            apiKeyConfigured: true,
+          },
+        },
+      });
+      expect(JSON.stringify(bootstrap.json())).not.toContain(secret);
+      const storedSecret = JSON.parse(
+        await readFile(join(storageDirectory, "llm-api-key"), "utf8"),
+      ) as { apiKey: string; baseUrl: string };
+      expect(storedSecret).toMatchObject({
+        apiKey: secret,
+        baseUrl: "https://compatible.example/v1",
+      });
+      expect(await readFile(join(storageDirectory, "llm-settings.json"), "utf8")).not.toContain(secret);
+      expect((await readFile(databasePath)).toString("utf8")).not.toContain(secret);
+
+      const unsafe = await server.app.inject({
+        method: "PUT",
+        url: "/api/v1/settings/llm",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          baseUrl: "http://remote.example/v1",
+          model: "unsafe-model",
+          apiKey: { action: "preserve" },
+        },
+      });
+      expect(unsafe.statusCode).toBe(400);
+      expect(unsafe.json()).toMatchObject({
+        error: { code: "LLM_CONFIGURATION_INVALID" },
+      });
+
+      const local = await server.app.inject({
+        method: "PUT",
+        url: "/api/v1/settings/llm",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          baseUrl: "http://127.0.0.1:11434/v1",
+          model: "qwen2.5-coder:7b",
+          apiKey: { action: "clear" },
+        },
+      });
+      expect(local.statusCode).toBe(200);
+      expect(local.json()).toMatchObject({
+        providerKind: "ollama",
+        apiKeyConfigured: false,
+        apiKeyRequired: false,
+      });
+    } finally {
+      await server.close();
+    }
   });
 
   it("returns bootstrap while Codex compatibility is still being checked", async () => {
@@ -498,25 +643,27 @@ describe("local agent HTTP boundary", () => {
       });
       expect(removedTerminal.statusCode).toBe(204);
 
-      const socket = new WebSocket(`${server.origin.replace("http", "ws")}/api/v1/events`);
+      let resolveReady: (() => void) | undefined;
       const ready = new Promise<void>((resolve, reject) => {
+        resolveReady = resolve;
         const timeout = setTimeout(() => reject(new Error("WebSocket authentication timed out.")), 2_000);
-        socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({
-            protocolVersion: 1,
-            type: "authenticate",
-            token: "test-capability",
-          }));
-        });
-        socket.addEventListener("message", (event) => {
-          const message = JSON.parse(String(event.data)) as { type?: string };
-          if (message.type === "connection.ready") {
-            clearTimeout(timeout);
-            resolve();
-          }
-        });
-        socket.addEventListener("error", () => reject(new Error("WebSocket connection failed.")));
+        resolveReady = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
       });
+      const socket = await server.app.injectWS(
+        "/api/v1/events?token=test-capability",
+        { headers: { host, origin: server.origin } },
+        {
+          onInit: (candidate) => {
+            candidate.on("message", (raw: Buffer) => {
+              const message = JSON.parse(raw.toString()) as { type?: string };
+              if (message.type === "connection.ready") resolveReady?.();
+            });
+          },
+        },
+      );
       await ready;
 
       const invalidMessage = new Promise<{ type?: string; payload?: { code?: string } }>(
@@ -525,8 +672,8 @@ describe("local agent HTTP boundary", () => {
             () => reject(new Error("Invalid WebSocket message was not rejected.")),
             2_000,
           );
-          socket.addEventListener("message", (event) => {
-            const message = JSON.parse(String(event.data)) as {
+          socket.on("message", (raw: Buffer) => {
+            const message = JSON.parse(raw.toString()) as {
               type?: string;
               payload?: { code?: string };
             };
@@ -549,24 +696,26 @@ describe("local agent HTTP boundary", () => {
       });
       socket.close();
 
-      const unauthenticatedSocket = new WebSocket(
-        `${server.origin.replace("http", "ws")}/api/v1/events`,
-      );
-      const unauthenticatedClose = new Promise<CloseEvent>((resolve, reject) => {
-        const timeout = setTimeout(
-          () => reject(new Error("Unauthenticated WebSocket was not closed.")),
-          3_000,
-        );
-        unauthenticatedSocket.addEventListener("close", (event) => {
-          clearTimeout(timeout);
-          resolve(event);
-        });
-        unauthenticatedSocket.addEventListener("error", () => {
-          // A close event with the protocol code remains the source of truth.
-        });
-      });
-      const closeEvent = await unauthenticatedClose;
-      expect(closeEvent.code).toBe(4401);
+      await expect(server.app.injectWS(
+        "/api/v1/events",
+        { headers: { host, origin: server.origin } },
+      )).rejects.toThrow("Unexpected server response: 401");
+      await expect(server.app.injectWS(
+        "/api/v1/events?token=incorrect-capability",
+        { headers: { host, origin: server.origin } },
+      )).rejects.toThrow("Unexpected server response: 401");
+      await expect(server.app.injectWS(
+        "/api/v1/events?token=test-capability&token=test-capability",
+        { headers: { host, origin: server.origin } },
+      )).rejects.toThrow("Unexpected server response: 401");
+      await expect(server.app.injectWS(
+        "/api/v1/events?token=test-capability",
+        { headers: { host, origin: "https://attacker.invalid" } },
+      )).rejects.toThrow("Unexpected server response: 403");
+      await expect(server.app.injectWS(
+        "/api/v1/events?token=test-capability",
+        { headers: { host: "attacker.invalid", origin: server.origin } },
+      )).rejects.toThrow("Unexpected server response: 403");
 
       let indexPhase = "idle";
       for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {

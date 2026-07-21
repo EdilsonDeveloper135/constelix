@@ -114,6 +114,7 @@ test.describe("workspace connected to the local agent", () => {
     // real resources are available, only errors from the connected flow are relevant here.
     runtimeErrors.length = 0;
 
+    await page.getByRole("button", { name: "Encuadrar" }).click();
     const semanticNodes = page.locator(".semantic-node");
     await expect.poll(() => semanticNodes.count()).toBeGreaterThan(5);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("file");
@@ -140,15 +141,21 @@ test.describe("workspace connected to the local agent", () => {
 
     const terminalPanels = page.getByTestId("terminal-panel");
     await expect(terminalPanels).toHaveCount(1);
+    const bottomDockTabs = page
+      .getByTestId("workspace-dock-bottom")
+      .getByRole("tab");
+    await expect(bottomDockTabs).toHaveCount(1);
     const secondPtyCreated = page.waitForResponse(
       (response) => response.url().endsWith("/api/v1/terminals") && response.status() === 201,
     );
     await page.getByRole("button", { name: "Nueva terminal" }).click();
     const secondPtyResponse = await secondPtyCreated;
     const secondPty = (await secondPtyResponse.json()) as { id: string };
+    await expect(bottomDockTabs).toHaveCount(2);
     await expect(terminalPanels).toHaveCount(2);
 
-    const terminal = terminalPanels.last();
+    const terminal = page.locator('[data-testid="terminal-panel"]:visible');
+    await expect(terminal).toHaveCount(1);
     await expect(terminal).toBeVisible();
     await expect(terminal).toHaveAttribute("data-dispose-ready", "true");
     const terminalInput = terminal.locator("textarea.xterm-helper-textarea");
@@ -193,8 +200,9 @@ test.describe("workspace connected to the local agent", () => {
       .dispatchEvent("click");
     const anchoredPty = (await (await anchoredPtyCreated).json()) as { cwd: string };
     expect(anchoredPty.cwd).toBe("src");
-    await expect(terminalPanels.first().locator(".xterm-rows")).toContainText("src");
+    await expect(terminal.locator(".xterm-rows")).toContainText("src");
 
+    await page.getByRole("tab", { name: "Asistente" }).click();
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(page.getByRole("tab", { name: "Actuar" })).toHaveAttribute("aria-selected", "true");
     await page.waitForTimeout(650);
@@ -239,6 +247,80 @@ test.describe("workspace connected to the local agent", () => {
     ).toBeVisible();
   });
 
+  test("opens an accessible context menu before creating a terminal", async ({ page }) => {
+    let terminalCreates = 0;
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === "/api/v1/terminals" && request.method() === "POST") {
+        terminalCreates += 1;
+      }
+    });
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await expect(
+      page.locator('[data-testid="terminal-panel"]:visible').first(),
+    ).toBeVisible();
+    terminalCreates = 0;
+
+    await page.getByLabel("Filtrar por tipo de nodo").selectOption("directory");
+    await page.getByRole("button", { name: "Encuadrar" }).click();
+    const node = page.locator(
+      '.react-flow__node[aria-label="directory: python"]',
+    );
+    await node.click({ button: "right" });
+
+    const menu = page.getByTestId("semantic-node-context-menu");
+    await expect(menu).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Inspeccionar nodo" }),
+    ).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      menu.getByRole("menuitem", { name: "Abrir terminal aquí" }),
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      menu.getByRole("menuitem", { name: "Inspeccionar nodo" }),
+    ).toBeFocused();
+    await page.waitForTimeout(150);
+    expect(terminalCreates).toBe(0);
+
+    const terminalCreated = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/terminals") &&
+        response.status() === 201,
+    );
+    await page.keyboard.press("End");
+    await expect(
+      menu.getByRole("menuitem", { name: "Abrir terminal aquí" }),
+    ).toBeFocused();
+    await page.keyboard.press("Enter");
+    const terminal = (await (await terminalCreated).json()) as { cwd: string };
+    expect(terminal.cwd).toBe("python");
+    expect(terminalCreates).toBe(1);
+    await expect(menu).toHaveCount(0);
+
+    await node.click({ button: "right" });
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    const nodeWrapper = node;
+    await expect(nodeWrapper).toBeFocused();
+    await expect(nodeWrapper).toHaveAttribute("aria-haspopup", "menu");
+
+    await nodeWrapper.press("Shift+F10");
+    await expect(menu).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Inspeccionar nodo" }),
+    ).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(menu).toHaveCount(0);
+    await expect(nodeWrapper).toBeFocused();
+    await expect(nodeWrapper).toHaveClass(/selected/);
+  });
+
   test("uses Ask Local without an API key and opens a verified result", async ({ page }) => {
     await openConnectedWorkspace(page, {
       expectedName: "sample-workspace",
@@ -250,6 +332,7 @@ test.describe("workspace connected to the local agent", () => {
         exact: true,
       }),
     ).toBeVisible();
+    await page.getByRole("tab", { name: "Asistente" }).click();
     await page.getByRole("tab", { name: "Preguntar" }).click();
     const question = page.getByRole("textbox", { name: "Pregunta" });
     await question.fill("answerProjectQuestion");
@@ -289,10 +372,13 @@ test.describe("workspace connected to the local agent", () => {
       expectedMode: "Edición",
     });
     await expect(page.getByRole("status").filter({ hasText: "Agente local conectado" })).toBeVisible();
+    await page.getByRole("tab", { name: "Asistente" }).click();
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(page.getByRole("tab", { name: "Actuar" })).toHaveAttribute("aria-selected", "true");
     const terminalPanels = page.getByTestId("terminal-panel");
-    if ((await terminalPanels.count()) < 2) {
+    const bottomDock = page.getByTestId("workspace-dock-bottom");
+    const bottomDockTabs = bottomDock.getByRole("tab");
+    if ((await bottomDockTabs.count()) < 2) {
       const terminalCreated = page.waitForResponse(
         (response) =>
           response.url().endsWith("/api/v1/terminals") &&
@@ -301,6 +387,7 @@ test.describe("workspace connected to the local agent", () => {
       await page.getByRole("button", { name: "Nueva terminal" }).click();
       await terminalCreated;
     }
+    await expect.poll(() => bottomDockTabs.count()).toBeGreaterThanOrEqual(2);
     await expect.poll(() => terminalPanels.count()).toBeGreaterThanOrEqual(2);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("file");
     await page.getByLabel("Filtrar por extensión").selectOption(".ts");
@@ -311,13 +398,14 @@ test.describe("workspace connected to the local agent", () => {
     await page.getByRole("button", { name: "Restablecer filtros" }).click();
     await expect(page.locator(".editor-breadcrumbs")).toContainText("index.ts");
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("export");
-    await expect(page.locator(".xterm").first()).toBeVisible();
+    await expect(page.locator(".editor-save-status")).not.toHaveText("Cargando");
+    await expect(page.locator(".xterm:visible").first()).toBeVisible();
     terminalCreates = 0;
     terminalDeletes = 0;
 
-    const editor = page.locator(".monaco-editor");
+    const editor = page.locator(".monaco-editor").first();
     await editor.click();
-    await page.keyboard.press("Meta+ArrowDown");
+    await page.keyboard.press("Control+End");
     await page.keyboard.insertText("\n// borrador local Constelix");
     await expect(page.getByText("Modificado", { exact: true })).toBeVisible();
 
@@ -325,13 +413,40 @@ test.describe("workspace connected to the local agent", () => {
       await page.getByRole("button", { name: "Alejar" }).click();
       await page.waitForTimeout(180);
     }
-    await expect(page.getByText("Contenido suspendido a este nivel de zoom").first()).toBeVisible();
+    await expect(page.getByText("Contenido suspendido a este nivel de zoom")).toHaveCount(0);
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText("borrador local Constelix");
+    await expect(page.locator(".xterm:visible").first()).toBeVisible();
+
+    await bottomDock
+      .getByRole("button", { name: "Desanclar panel al canvas" })
+      .click();
+    const dockTerminalBottom = page.getByRole("button", {
+      name: "Anclar panel abajo",
+    });
+    await expect(dockTerminalBottom).toBeVisible();
+    await dockTerminalBottom.focus();
+    await dockTerminalBottom.press("Enter");
+
+    const rightDock = page.getByTestId("workspace-dock-right");
+    await rightDock
+      .getByRole("button", { name: "Desanclar panel al canvas" })
+      .click();
+    const dockEditorRight = page.getByRole("button", {
+      name: "Anclar panel a la derecha",
+    });
+    await expect(dockEditorRight).toBeVisible();
+    await dockEditorRight.focus();
+    await dockEditorRight.press("Enter");
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+      "borrador local Constelix",
+    );
+
     for (let index = 0; index < 4; index += 1) {
       await page.getByRole("button", { name: "Acercar" }).click();
       await page.waitForTimeout(180);
     }
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("borrador local Constelix");
-    await expect(page.locator(".xterm").first()).toBeVisible();
+    await expect(page.locator(".xterm:visible").first()).toBeVisible();
     expect(terminalCreates).toBe(0);
     expect(terminalDeletes).toBe(0);
 
@@ -345,7 +460,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("cambio externo uno");
 
     await editor.click();
-    await page.keyboard.press("Meta+ArrowDown");
+    await page.keyboard.press("Control+End");
     await page.keyboard.insertText(
       "\nexport function e2eGraphSignal(): boolean { return true; }\n// versión local definitiva",
     );
@@ -363,6 +478,259 @@ test.describe("workspace connected to the local agent", () => {
     await expect(
       page.locator('.semantic-node[aria-label="function: e2eGraphSignal"]'),
     ).toBeVisible({ timeout: 3_000 });
+
+    const floatingLayoutSaved = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/layout") &&
+        response.request().method() === "PUT" &&
+        response.status() === 200,
+    );
+    await rightDock
+      .getByRole("button", { name: "Desanclar panel al canvas" })
+      .click();
+    await floatingLayoutSaved;
+    await expect(
+      page.getByRole("button", { name: "Anclar panel a la derecha" }),
+    ).toHaveCount(1);
+
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await expect(
+      page
+        .getByTestId("workspace-dock-right")
+        .getByRole("tab", { name: "Editor" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Anclar panel a la derecha" }),
+    ).toHaveCount(1);
+  });
+
+  test("hydrates pristine settings opened before the agent configuration arrives", async ({ page }) => {
+    let releaseSettingsLoad: (() => void) | undefined;
+    let markSettingsRequestStarted: (() => void) | undefined;
+    const settingsLoadGate = new Promise<void>((resolveGate) => {
+      releaseSettingsLoad = resolveGate;
+    });
+    const settingsRequestStarted = new Promise<void>((resolveStarted) => {
+      markSettingsRequestStarted = resolveStarted;
+    });
+    await page.route("**/api/v1/settings/llm", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      markSettingsRequestStarted?.();
+      await settingsLoadGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          protocolVersion: 1,
+          baseUrl: "http://127.0.0.1:11434/v1",
+          model: "server-model-after-delay",
+          providerKind: "ollama",
+          apiKeyConfigured: false,
+          apiKeyRequired: false,
+          apiKeySource: "none",
+        }),
+      });
+    });
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await settingsRequestStarted;
+
+    const settingsButton = page
+      .getByRole("button", { name: "Configuración" })
+      .first();
+    await settingsButton.click();
+    const settings = page.getByTestId("settings-modal");
+    await expect(settings.getByRole("status")).toContainText(
+      "Cargando la configuración segura",
+    );
+    await expect(settings.getByRole("button", { name: "Cargando…" })).toBeDisabled();
+    releaseSettingsLoad?.();
+    await expect(settings.getByLabel("URL base del LLM")).toHaveValue(
+      "http://127.0.0.1:11434/v1",
+    );
+    await expect(settings.getByLabel("Modelo")).toHaveValue(
+      "server-model-after-delay",
+    );
+    await expect(
+      settings.getByRole("button", { name: "Guardar configuración" }),
+    ).toBeEnabled();
+    await settings.getByRole("button", { name: "Cancelar" }).click();
+    await expect(settingsButton).toBeFocused();
+  });
+
+  test("blocks an unsafe settings save after load failure and supports retry", async ({ page }) => {
+    let failSettingsLoad = true;
+    await page.route("**/api/v1/settings/llm", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (failSettingsLoad) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "temporary failure" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          protocolVersion: 1,
+          baseUrl: "https://compatible.example/v1",
+          model: "recovered-model",
+          providerKind: "compatible",
+          apiKeyConfigured: false,
+          apiKeyRequired: true,
+          apiKeySource: "none",
+        }),
+      });
+    });
+    const firstFailure = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/llm") &&
+        response.request().method() === "GET" &&
+        response.status() === 503,
+    );
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await firstFailure;
+
+    await page.getByRole("button", { name: "Configuración" }).first().click();
+    const settings = page.getByTestId("settings-modal");
+    await expect(settings.getByRole("alert")).toContainText(
+      "No se pudo cargar la configuración",
+    );
+    await expect(
+      settings.getByRole("button", { name: "Guardar configuración" }),
+    ).toBeDisabled();
+    failSettingsLoad = false;
+    await settings.getByRole("button", { name: "Reintentar carga" }).click();
+    await expect(settings.getByLabel("URL base del LLM")).toHaveValue(
+      "https://compatible.example/v1",
+    );
+    await expect(settings.getByLabel("Modelo")).toHaveValue("recovered-model");
+    await expect(
+      settings.getByRole("button", { name: "Guardar configuración" }),
+    ).toBeEnabled();
+  });
+
+  test("configures a write-only local LLM credential and can clear it", async ({ page }) => {
+    const secret = "constelix-e2e-write-only-credential";
+    let releaseSettingsLoad: (() => void) | undefined;
+    let markSettingsRequestStarted: (() => void) | undefined;
+    const settingsLoadGate = new Promise<void>((resolveGate) => {
+      releaseSettingsLoad = resolveGate;
+    });
+    const settingsRequestStarted = new Promise<void>((resolveStarted) => {
+      markSettingsRequestStarted = resolveStarted;
+    });
+    await page.route("**/api/v1/settings/llm", async (route) => {
+      if (route.request().method() === "GET") {
+        markSettingsRequestStarted?.();
+        await settingsLoadGate;
+      }
+      await route.continue();
+    });
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await settingsRequestStarted;
+
+    const settingsButton = page
+      .getByRole("button", { name: "Configuración" })
+      .first();
+    await settingsButton.click();
+    const settings = page.getByTestId("settings-modal");
+    await expect(settings).toBeVisible();
+    await settings.getByLabel("URL base del LLM").fill(
+      "http://127.0.0.1:11434/v1",
+    );
+    await settings.getByLabel("Modelo").fill("qwen2.5-coder:7b");
+    await settings.getByLabel("Clave de API (opcional)").fill(secret);
+    await expect(settings.getByRole("button", { name: "Cargando…" })).toBeDisabled();
+    const loadedResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/llm") &&
+        response.request().method() === "GET" &&
+        response.status() === 200,
+    );
+    releaseSettingsLoad?.();
+    await loadedResponse;
+    await expect(settings.getByLabel("URL base del LLM")).toHaveValue(
+      "http://127.0.0.1:11434/v1",
+    );
+    await expect(settings.getByLabel("Modelo")).toHaveValue(
+      "qwen2.5-coder:7b",
+    );
+
+    const savedResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/llm") &&
+        response.request().method() === "PUT" &&
+        response.status() === 200,
+    );
+    await settings.getByRole("button", { name: "Guardar configuración" }).click();
+    const saved = await (await savedResponse).json() as {
+      apiKeyConfigured: boolean;
+      apiKeySource: string;
+      baseUrl: string;
+      model: string;
+    };
+    expect(saved).toMatchObject({
+      apiKeyConfigured: true,
+      apiKeySource: "stored",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen2.5-coder:7b",
+    });
+    expect(JSON.stringify(saved)).not.toContain(secret);
+    await expect(settings).toHaveCount(0);
+    await expect(settingsButton).toBeFocused();
+
+    const browserStorage = await page.evaluate(() => {
+      const values = (storage: Storage) =>
+        Array.from({ length: storage.length }, (_, index) =>
+          storage.getItem(storage.key(index) ?? ""),
+        );
+      return {
+        local: values(localStorage),
+        session: values(sessionStorage),
+        body: document.body.textContent ?? "",
+      };
+    });
+    expect(JSON.stringify(browserStorage)).not.toContain(secret);
+
+    await settingsButton.click();
+    await expect(settings).toBeVisible();
+    await settings.getByRole("button", { name: "Eliminar la clave guardada" }).click();
+    const clearedResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/llm") &&
+        response.request().method() === "PUT" &&
+        response.status() === 200,
+    );
+    await settings.getByRole("button", { name: "Guardar configuración" }).click();
+    const cleared = await (await clearedResponse).json() as {
+      apiKeyConfigured: boolean;
+      apiKeySource: string;
+    };
+    expect(cleared).toMatchObject({
+      apiKeyConfigured: false,
+      apiKeySource: "none",
+    });
+    expect(JSON.stringify(cleared)).not.toContain(secret);
   });
 
   test("enforces read-only UI, API, Act, and PTY boundaries", async ({ page }) => {
@@ -409,6 +777,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.getByRole("button", { name: "Guardar archivo" })).toBeDisabled();
     await expect(page.locator(".monaco-editor textarea").first()).not.toBeEditable();
 
+    await page.getByRole("tab", { name: "Asistente" }).click();
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(
       page.getByText("Actuar bloqueado en Modo Lectura"),
@@ -487,8 +856,9 @@ test.describe("workspace connected to the local agent", () => {
     await openConnectedWorkspace(page, {
       expectedName: "v003-redacted-errors",
       expectedMode: "Edición",
-      expectedAskMode: "Ask OpenAI",
+      expectedAskMode: "Ask LLM",
     });
+    await page.getByRole("tab", { name: "Asistente" }).click();
     await page.getByRole("textbox", { name: "Pregunta" }).fill("index.ts");
     await page.getByRole("button", { name: "Consultar" }).click();
 
@@ -528,16 +898,15 @@ async function writeTerminalCommand(
   await page.evaluate(
     ({ capabilityToken: token, terminalId: id, data: command, expectedOutput: expected }) =>
       new Promise<void>((resolveCommand, rejectCommand) => {
-        const socket = new WebSocket(`ws://${window.location.host}/api/v1/events`);
+        const socket = new WebSocket(
+          `ws://${window.location.host}/api/v1/events?token=${encodeURIComponent(token)}`,
+        );
         let output = "";
         const timeout = window.setTimeout(() => {
           socket.close();
           rejectCommand(new Error("PTY output timed out."));
         }, 5_000);
 
-        socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ protocolVersion: 1, type: "authenticate", token }));
-        });
         socket.addEventListener("message", (event) => {
           const message = JSON.parse(String(event.data)) as {
             type?: string;
@@ -546,7 +915,7 @@ async function writeTerminalCommand(
               data?: string;
             };
           };
-          if (message.type === "authenticated") {
+          if (message.type === "connection.ready") {
             socket.send(JSON.stringify({
               protocolVersion: 1,
               type: "terminal.input",
@@ -584,17 +953,16 @@ async function sendTerminalInput(
   await page.evaluate(
     ({ capabilityToken: token, terminalId: id, data: command }) =>
       new Promise<void>((resolveCommand, rejectCommand) => {
-        const socket = new WebSocket(`ws://${window.location.host}/api/v1/events`);
+        const socket = new WebSocket(
+          `ws://${window.location.host}/api/v1/events?token=${encodeURIComponent(token)}`,
+        );
         const timeout = window.setTimeout(() => {
           socket.close();
           rejectCommand(new Error("PTY input timed out."));
         }, 5_000);
-        socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ protocolVersion: 1, type: "authenticate", token }));
-        });
         socket.addEventListener("message", (event) => {
           const message = JSON.parse(String(event.data)) as { type?: string };
-          if (message.type !== "authenticated") return;
+          if (message.type !== "connection.ready") return;
           socket.send(JSON.stringify({
             protocolVersion: 1,
             type: "terminal.input",
@@ -619,9 +987,10 @@ async function openConnectedWorkspace(
   options: {
     expectedName: string;
     expectedMode: "Lectura" | "Edición";
-    expectedAskMode?: "Ask Local" | "Ask OpenAI";
+    expectedAskMode?: "Ask Local" | "Ask LLM";
   },
 ): Promise<void> {
+  await page.goto("about:blank");
   await page.goto(`/#token=${encodeURIComponent(capabilityToken)}`);
   const onboarding = page.getByRole("dialog", {
     name: options.expectedName,

@@ -6,9 +6,27 @@ This document records the approved visual concept as implementation tokens.
 
 - Full viewport, graphite-black world surface with a subtle dotted grid.
 - 48 px top bar and 72 px left navigation rail.
-- Semantic graph occupies the primary field.
-- Code editor floats on the right, terminal at lower left, and AI panel at lower center.
-- Tool panels are part of the canvas world, not modal dialogs.
+- The semantic graph occupies the primary transformable field by itself.
+- Editor and Assistant may dock on the right; Terminal may dock at the bottom.
+- Docked tools belong to viewport chrome and remain stable during canvas pan,
+  zoom, fit-view, evidence focus, and graph relayout.
+- Every tool retains a floating canvas mode. Placement, active dock tab,
+  visibility, and the last floating position and size persist per workspace.
+
+## Workspace interaction
+
+- Dock and float controls are explicit, keyboard reachable, and expose their
+  action and destination through an accessible name.
+- Adding or removing a dock changes the remaining canvas viewport, not semantic
+  node coordinates. v0.0.4 uses fixed responsive dock dimensions. Docked Monaco
+  and xterm instances remain mounted across zoom and dock-tab switches.
+- Right-clicking a semantic node opens a focusable `menu`; it never executes a
+  command by itself. Inspecting/selecting the node, exploring its relations,
+  opening its file, or creating a terminal require an explicit selection.
+- Settings is a real modal surface with labeled Base URL, Model, and write-only
+  API key fields. Saving never re-renders a stored credential in the browser.
+- Dialogs and context menus trap focus while open, close with Escape, and return
+  focus to their trigger.
 
 ## Tokens
 

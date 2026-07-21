@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -16,6 +16,7 @@ import {
   FileWriteRequestSchema,
   GraphQuerySchema,
   LayoutWriteRequestSchema,
+  LlmConfigurationUpdateSchema,
   PROTOCOL_VERSION,
   ProtocolOnlyRequestSchema,
   TerminalCreateRequestSchema,
@@ -23,7 +24,6 @@ import {
 } from "@constelix/contracts";
 import {
   AskService,
-  DEFAULT_ASK_MODEL,
   OpenAIUnavailableError,
   type AskServiceOptions,
 } from "./ask.js";
@@ -41,6 +41,10 @@ import {
   writeWorkspaceTextFile,
 } from "./files.js";
 import { WorkspaceIndexer } from "./indexer.js";
+import {
+  LlmConfigurationError,
+  LlmConfigurationStore,
+} from "./llm-config.js";
 import {
   detectSupportedLanguage,
   type ScanWorkspaceOptions,
@@ -124,6 +128,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   let indexer: WorkspaceIndexer | undefined;
   let terminals: TerminalManager | undefined;
   let ask: AskService | undefined;
+  let llmConfigurationStore: LlmConfigurationStore | undefined;
   let codex: CodexManager | undefined;
   let app: FastifyInstance | undefined;
   let identityMonitor: NodeJS.Timeout | undefined;
@@ -140,13 +145,18 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
         : { scanOptions: options.indexerScanOptions }),
     });
     terminals = new TerminalManager(workspace, events);
+    llmConfigurationStore = new LlmConfigurationStore(storageDirectory);
+    const llmConfiguration = await llmConfigurationStore.load();
     ask = new AskService(
       workspaceId,
       workspace,
       indexer.graph,
       database,
       events,
-      options.askOptions,
+      {
+        configuration: llmConfiguration,
+        ...options.askOptions,
+      },
     );
     if (!workspace.readOnly) {
       codex = new CodexManager(
@@ -210,6 +220,7 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
 
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/api/")) return;
+    const pathname = requestPathname(request.url);
     const origin = request.headers.origin;
     if (origin && !allowedOrigins.has(origin) && origin !== boundOrigin) {
       return reply.code(403).send(errorBody("INVALID_ORIGIN", "Request origin is not allowed."));
@@ -221,7 +232,16 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
       if (origin && allowedOrigins.has(origin)) addCors(reply, origin);
       return reply.code(204).send();
     }
-    if (request.url === "/api/v1/events") return;
+    if (pathname === "/api/v1/events") {
+      if (!origin || (!allowedOrigins.has(origin) && origin !== boundOrigin)) {
+        return reply.code(403).send(errorBody("INVALID_ORIGIN", "A valid WebSocket origin is required."));
+      }
+      if (!hasWebSocketCapability(request.url, capabilityToken)) {
+        return reply.code(401).send(errorBody("UNAUTHORIZED", "A valid WebSocket capability token is required."));
+      }
+      await assertWorkspaceIdentity(workspace);
+      return;
+    }
     if (!hasCapability(request, capabilityToken)) {
       return reply.code(401).send(errorBody("UNAUTHORIZED", "A valid capability token is required."));
     }
@@ -238,13 +258,8 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
     return payload;
   });
 
-  app.get("/api/v1/events", { websocket: true }, (socket, request) => {
-    const origin = request.headers.origin;
-    if (origin && !allowedOrigins.has(origin) && origin !== boundOrigin) {
-      socket.close(4403, "Origin not allowed");
-      return;
-    }
-    events.attach(socket as never, capabilityToken);
+  app.get("/api/v1/events", { websocket: true }, (socket) => {
+    events.attachAuthenticated(socket as never);
     void assertWorkspaceIdentity(workspace).catch(() => {
       socket.close(4409, "Workspace root changed");
     });
@@ -298,15 +313,35 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
         askMode: ask.mode,
         askProviderStatus: ask.providerStatus,
         askNotice: ask.notice,
+        llm: ask.llmConfiguration,
         act: !workspace.readOnly && codexAvailability.available,
         terminal: true,
         codexReason: codexAvailability.reason,
         codexChecking: codexAvailability.checking,
         codexVersion: codexAvailability.version,
-        model: process.env.CONSTELIX_OPENAI_MODEL ?? DEFAULT_ASK_MODEL,
+        model: ask.model,
         languages: ["javascript", "typescript", "python"],
       },
     };
+  });
+
+  app.get("/api/v1/settings/llm", async () => ask.llmConfiguration);
+
+  app.put("/api/v1/settings/llm", async (request) => {
+    const input = LlmConfigurationUpdateSchema.parse(request.body);
+    if (!llmConfigurationStore) {
+      throw new LlmConfigurationError("El almacenamiento de configuración LLM no está disponible.");
+    }
+    const configuration = await llmConfigurationStore.update(input);
+    const publicConfiguration = ask.reconfigure(configuration);
+    database.audit(workspaceId, "settings", "llm.update", "success", {
+      baseUrl: publicConfiguration.baseUrl,
+      model: publicConfiguration.model,
+      providerKind: publicConfiguration.providerKind,
+      apiKeyAction: input.apiKey.action,
+      apiKeyConfigured: publicConfiguration.apiKeyConfigured,
+    });
+    return publicConfiguration;
   });
 
   app.post("/api/v1/graph/query", async (request) => {
@@ -574,6 +609,31 @@ function hasCapability(request: FastifyRequest, token: string): boolean {
   return authorization === `Bearer ${token}`;
 }
 
+function requestPathname(value: string): string {
+  try {
+    return new URL(value, "http://127.0.0.1").pathname;
+  } catch {
+    return "";
+  }
+}
+
+function hasWebSocketCapability(requestUrl: string, token: string): boolean {
+  let candidates: string[];
+  try {
+    candidates = new URL(requestUrl, "http://127.0.0.1").searchParams.getAll("token");
+  } catch {
+    return false;
+  }
+  return candidates.length === 1 && secureTokenEquals(candidates[0] ?? "", token);
+}
+
+function secureTokenEquals(candidate: string, expected: string): boolean {
+  const candidateBytes = Buffer.from(candidate, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return candidateBytes.length === expectedBytes.length &&
+    timingSafeEqual(candidateBytes, expectedBytes);
+}
+
 function addCors(reply: FastifyReply, origin: string): void {
   reply.header("Access-Control-Allow-Origin", origin);
   reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
@@ -622,6 +682,9 @@ function mapError(error: Error, workspaceRoot?: string): {
   if (error instanceof WorkspaceValidationError) {
     const status = error.code === "WORKSPACE_NOT_FOUND" ? 404 : 403;
     return { status, code: error.code, message: error.message, recoverable: false };
+  }
+  if (error instanceof LlmConfigurationError) {
+    return { status: 400, code: error.code, message: error.message, recoverable: true };
   }
   if (error instanceof OpenAIUnavailableError || error instanceof CodexUnavailableError) {
     return { status: 503, code: error.code, message: error.message, recoverable: true };

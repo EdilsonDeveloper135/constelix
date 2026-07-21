@@ -1,5 +1,37 @@
 # Changelog
 
+## [v0.0.4] - 2026-07-21
+
+### Added
+
+- Docking opcional y persistente: Editor y Asistente pueden anclarse a la derecha, Terminal abajo y todos conservan el modo flotante.
+- Separación visual entre el canvas semántico transformable y las herramientas ancladas al viewport.
+- Settings local para `LLM_BASE_URL`, `LLM_MODEL` y la clave write-only `LLM_API_KEY`, con valores predeterminados `https://api.openai.com/v1` y `gpt-4o`.
+- Compatibilidad con endpoints OpenAI-compatible en loopback, incluido Ollama en `http://localhost:11434/v1`, sin exigir una clave.
+- Almacenamiento privado y transaccional del secreto en el agente, ligado al endpoint y sin inyectarlo en navegador, SQLite, logs o entornos de procesos hijo.
+- Menú contextual accesible de nodos con acciones explícitas para inspeccionar, explorar relaciones, abrir archivos o crear terminales.
+
+### Fixed
+
+- WebSocket autentica el token de capacidad durante el handshake y valida conjuntamente `Origin` y `Host`, sin aceptar conexiones anónimas transitorias.
+- Ask completa el mismo turno mediante Ask Local ante cuota insuficiente, clave inválida, rate limit o fallo de red, preservando el historial y mostrando una guía útil.
+- Los timeouts del proveedor se distinguen de una cancelación manual, descartan texto parcial y completan el turno mediante Ask Local.
+- Pan, zoom y relayout del grafo ya no desplazan los paneles anclados ni mezclan sus dimensiones con el layout semántico.
+- La pestaña activa de cada dock se conserva al recargar y las pestañas inactivas permanecen montadas para preservar Monaco y xterm.
+- El clic derecho sobre un nodo ya no crea una terminal de manera inmediata e inesperada.
+- El cierre del indexador ya no puede bloquearse esperando un worker de Tree-sitter; su apagado cooperativo tiene un fallback acotado.
+- Settings impide guardar valores predeterminados si la configuración inicial sigue cargando o falló, y permite reintentar sin perder campos editados.
+- La selección realizada desde el menú contextual ahora se refleja también en el estado visual controlado de React Flow.
+
+### Known issues
+
+- La generación depende de que el proveedor remoto tenga credenciales, cuota y red, o de que el daemon local y el modelo configurado estén disponibles y sean compatibles.
+- Vite continúa advirtiendo sobre chunks grandes de Monaco y ELK.
+- Permanece una carrera TOCTOU residual frente a otro proceso hostil ejecutado con la misma cuenta de macOS.
+- Un proceso hostil ejecutado como el mismo usuario podría leer el archivo privado de credencial; Act solo debe usarse con repositorios confiables.
+- Mover una herramienta entre dock y canvas recrea su vista; borradores y PTY sobreviven, pero cierto estado visual puede reiniciarse.
+- El soporte sigue limitado a macOS y el índice semántico conserva sus límites de seguridad predeterminados.
+
 ## [v0.0.3] - 2026-07-17
 
 ### Added

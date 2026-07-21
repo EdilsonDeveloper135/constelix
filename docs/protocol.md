@@ -8,14 +8,21 @@ Every body and event includes `protocolVersion: 1` and is validated with the sch
 
 The CLI opens `/#token=<capability>`. The dashboard stores the token in memory, removes the fragment with `history.replaceState`, and sends it as a bearer credential. Static assets are public on loopback; `/api/v1/*` is protected.
 
-The WebSocket must receive `{ protocolVersion: 1, type: "authenticate", token }` as its first message within two seconds. The server then sends canonical `authenticated` and `connection.ready` envelopes. Legacy flattened messages are rejected.
+The dashboard opens `/api/v1/events?token=<capability>`. Before completing the
+WebSocket upgrade, the agent validates that query token together with the exact
+`Origin` and `Host` for the active loopback endpoint. A missing or invalid token
+is rejected during the HTTP handshake, so no anonymous transient socket exists.
+After a successful upgrade the server sends `connection.ready`. The former
+authenticate-as-first-message flow and legacy flattened messages are rejected.
 
 ## Bootstrap reconciliation
 
 `GET /api/v1/bootstrap` is the authoritative reconnect snapshot. It returns the
 bounded graph, saved layout, conversation, active Ask turn IDs, the active Act
 task when one exists, recoverable terminal sessions, index status, and current
-capabilities. The workspace descriptor includes a stable ID, summarized path,
+capabilities. Public LLM state can include its base URL, model, provider kind,
+whether a key is configured or required, and the key source; it never includes
+the key value. The workspace descriptor includes a stable ID, summarized path,
 `mode: "read" | "edit"`, and the equivalent `readOnly: boolean`. Clients reject
 inconsistent mode/boolean combinations. A bounded summary reports detected project types,
 languages, estimated/indexed files, warnings, and omitted files. Live events
@@ -50,16 +57,58 @@ Each committed index update increments the workspace revision. `GraphDelta.previ
 
 Every server event uses `{ protocolVersion, eventId, timestamp, type, payload }`. REST bodies, WebSocket messages, and responses are validated at their boundary with shared Zod contracts.
 
+## Panel placement and layout
+
+Editor and Assistant can be docked on the right and Terminal can be docked at
+the bottom. Docked panels render in viewport chrome outside React Flow, so pan,
+zoom, fit-view, and semantic relayout do not transform them. Floating placement
+remains available for every tool and keeps the prior canvas interaction model.
+The layout contract persists each panel's placement, active dock tab, floating
+size, resource, and visibility. Semantic graph positions remain a separate
+concern and do not move when a fixed responsive dock is toggled.
+
+Opening a semantic node's context menu is non-executing. A terminal is created
+only after the client sends the existing terminal request from an explicit
+menu action.
+
+## LLM configuration
+
+Authenticated `GET /api/v1/settings/llm` returns only the public configuration.
+Authenticated `PUT /api/v1/settings/llm` accepts `protocolVersion`, `baseUrl`,
+`model`, and a write-only key operation: `preserve`, `replace`, or `clear`. A
+replacement includes the new value only in the request; no response, bootstrap,
+event, database row, or log contains it.
+
+Agent-entered credentials are stored outside the repository and SQLite in a
+private `0600` file, transactionally paired with the provider URL through a
+random identifier. A provider change with `preserve` deletes the prior stored
+credential instead of forwarding it. The Settings form blocks writes while its
+initial configuration is loading or failed, and exposes an explicit retry.
+
+Defaults are `https://api.openai.com/v1` and `gpt-4o`. Remote endpoints require
+HTTPS and a key. A key is optional only when the URL host is `localhost`,
+`127.0.0.1`, or `::1`; `http://localhost:11434/v1` supports an Ollama-compatible
+server. URLs with embedded credentials, query strings, fragments, unsupported
+schemes, or cleartext remote hosts are rejected. Changes replace the active
+provider configuration without exposing the previous credential.
+
 ## Ask modes
 
-Ask is always available. With no API key, `started.mode` is `local` and
+Ask is always available. With no usable LLM configuration, `started.mode` is `local` and
 `completed.localResult` contains bounded symbol hits, signatures, relative
 paths, snippets, and depth-one relations. These results are structural search,
 not generated natural-language reasoning.
 
-When an OpenAI turn fails with `INSUFFICIENT_QUOTA`, the agent emits a
-`fallback` event with `discardPartial: true`, switches the session to Local,
-and completes the same request without duplicating its user message.
+When a generated turn fails with `INSUFFICIENT_QUOTA`, `INVALID_API_KEY`,
+`RATE_LIMITED`, or `NETWORK_UNAVAILABLE`, the agent emits a `fallback` event
+with `discardPartial: true`, switches the same turn to Local, and completes it
+without duplicating the user's message or losing prior conversation history.
+The notice remains visible and actionable. Quota, rate-limit, connectivity, and
+provider-timeout failures may retry the configured provider on the next turn;
+an invalid key remains Local until configuration changes. Failures against an
+Ollama URL instruct the user to verify that Ollama and the configured model are
+available on the selected port. Partial remote output is not persisted as a
+completed answer.
 
 ## Terminal output recovery
 

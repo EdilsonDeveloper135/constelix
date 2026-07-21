@@ -174,11 +174,17 @@ function initialDraft(
   });
 }
 
+type EditorPanelProps = Pick<
+  NodeProps<EditorFlowNode>,
+  "id" | "data" | "height"
+> & { docked?: boolean };
+
 export const EditorPanel = memo(function EditorPanel({
   id,
   data,
   height,
-}: NodeProps<EditorFlowNode>) {
+  docked = false,
+}: EditorPanelProps) {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const remoteHydrated = useWorkspaceStore((state) => state.remoteHydrated);
   const workspaceId = useWorkspaceStore((state) => state.workspaceId);
@@ -451,6 +457,8 @@ export const EditorPanel = memo(function EditorPanel({
       expandedHeight={data.expandedHeight}
       accent="cyan"
       className="editor-panel"
+      docked={docked}
+      dockTarget="right"
       actions={
         <>
           <button

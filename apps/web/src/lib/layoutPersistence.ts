@@ -1,6 +1,8 @@
 import type { PanelKind, PanelState } from "@constelix/contracts";
 
-import type { AssistantMode, WorkspaceNode } from "../types";
+import type { AssistantMode, PanelDock, WorkspaceNode } from "../types";
+
+type DockablePanelState = Omit<PanelState, "dock"> & { dock?: PanelDock };
 
 interface WorkspaceLayoutInput {
   nodes: readonly WorkspaceNode[];
@@ -28,6 +30,11 @@ export function derivePinnedSemanticNodes(
   );
 }
 
+export function persistedPanelDock(panel: DockablePanelState): PanelDock {
+  const dock = panel.dock;
+  return dock === "right" || dock === "bottom" ? dock : "floating";
+}
+
 export function serializeWorkspaceLayout({
   nodes,
   assistantMode,
@@ -35,6 +42,7 @@ export function serializeWorkspaceLayout({
   pinnedSemanticNodeIds,
   updatedAt = nextLayoutUpdatedAt(),
 }: WorkspaceLayoutInput): PanelState[] {
+  const activeDockPanelIds = deriveActiveDockPanelIds(nodes);
   return nodes.flatMap<PanelState>((node) => {
     const semanticPinned =
       node.type === "semantic" && Boolean(pinnedSemanticNodeIds[node.id]);
@@ -102,10 +110,12 @@ export function serializeWorkspaceLayout({
                 expandedHeight: node.data.expandedHeight ?? height,
               };
 
-    return [{
+    const panel = {
       protocolVersion: 1,
       id: node.id,
       kind,
+      dock: node.type === "semantic" ? "floating" : node.data.dock,
+      dockActive: node.type !== "semantic" && activeDockPanelIds.has(node.id),
       position: node.position,
       size: { width, height },
       resource,
@@ -113,6 +123,32 @@ export function serializeWorkspaceLayout({
       zoom: 1,
       pinned: semanticPinned,
       updatedAt,
-    }];
+    } satisfies DockablePanelState;
+    return [panel];
   });
+}
+
+function deriveActiveDockPanelIds(
+  nodes: readonly WorkspaceNode[],
+): ReadonlySet<string> {
+  const active = new Map<Exclude<PanelDock, "floating">, {
+    id: string;
+    zIndex: number;
+  }>();
+  for (const node of nodes) {
+    if (
+      node.type === "semantic" ||
+      node.hidden ||
+      node.data.dock === "floating"
+    ) {
+      continue;
+    }
+    const dock = node.data.dock;
+    const current = active.get(dock);
+    const zIndex = node.zIndex ?? 0;
+    if (!current || zIndex > current.zIndex) {
+      active.set(dock, { id: node.id, zIndex });
+    }
+  }
+  return new Set([...active.values()].map(({ id }) => id));
 }

@@ -7,9 +7,14 @@ import {
 } from "@constelix/analyzers";
 
 interface AnalyzeRequest {
+  type: "analyze";
   id: number;
   files: SourceFileInput[];
   options: AnalyzeFilesOptions;
+}
+
+interface CloseRequest {
+  type: "close";
 }
 
 interface AnalyzeResponse {
@@ -23,7 +28,11 @@ if (port === null) {
   throw new Error("The analyzer worker must run inside a worker thread.");
 }
 
-port.on("message", (request: AnalyzeRequest) => {
+port.on("message", (request: AnalyzeRequest | CloseRequest) => {
+  if (request.type === "close") {
+    port.close();
+    return;
+  }
   try {
     const result = analyzeFiles(request.files, request.options);
     port.postMessage({ id: request.id, result } satisfies AnalyzeResponse);

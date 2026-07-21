@@ -34,6 +34,7 @@ const tools: RailItem[] = [
 export const Rail = memo(function Rail() {
   const activeTool = useWorkspaceStore((state) => state.activeTool);
   const setActiveTool = useWorkspaceStore((state) => state.setActiveTool);
+  const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
 
   return (
     <aside className="rail" aria-label="Herramientas del workspace">
@@ -58,7 +59,7 @@ export const Rail = memo(function Rail() {
         })}
       </nav>
       <div className="rail-footer">
-        <button type="button" aria-label="Configuración"><Settings2 aria-hidden="true" size={19} /></button>
+        <button type="button" aria-label="Configuración" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" size={19} /></button>
         <button type="button" aria-label="Ayuda"><CircleHelp aria-hidden="true" size={19} /></button>
       </div>
     </aside>

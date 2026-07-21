@@ -58,6 +58,7 @@ const semantic = (
   id,
   type: "semantic",
   ariaLabel: `${kind}: ${label}`,
+  domAttributes: { "aria-haspopup": "menu" },
   position: { x, y },
   data: {
     kind,
@@ -76,6 +77,7 @@ const editorPanel: EditorFlowNode = {
   dragHandle: ".panel-titlebar",
   data: {
     panelType: "editor",
+    dock: "right",
     title: "Editor — GraphIndexer.ts",
     relativePath: "apps/local-agent/src/indexers/GraphIndexer.ts",
     language: "typescript",
@@ -93,6 +95,7 @@ const terminalPanel: TerminalFlowNode = {
   dragHandle: ".panel-titlebar",
   data: {
     panelType: "terminal",
+    dock: "bottom",
     title: "Terminal — apps/local-agent",
     cwd: "apps/local-agent"
   },
@@ -105,7 +108,12 @@ const assistantPanel: AssistantFlowNode = {
   position: { x: 455, y: 675 },
   style: { width: 625, height: 210 },
   dragHandle: ".panel-titlebar",
-  data: { panelType: "assistant", title: "IA — Consulta", mode: "ask" },
+  data: {
+    panelType: "assistant",
+    dock: "right",
+    title: "IA — Consulta",
+    mode: "ask",
+  },
   zIndex: 19
 };
 

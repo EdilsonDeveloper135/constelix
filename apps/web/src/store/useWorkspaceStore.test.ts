@@ -11,6 +11,7 @@ import type {
   ActTask as ContractActTask,
   GraphEdge,
   GraphNode,
+  PanelState,
 } from "@constelix/contracts";
 
 import type { BootstrapPayload, EvidencePath, WorkspaceNode } from "../types";
@@ -234,6 +235,46 @@ describe("workspace bootstrap reconciliation", () => {
       askProviderStatus: "ready",
       askNotice: undefined,
       actAvailable: true,
+    });
+  });
+
+  it.each([
+    ["INSUFFICIENT_QUOTA", "insufficient_quota"],
+    ["INVALID_API_KEY", "invalid_api_key"],
+    ["RATE_LIMITED", "rate_limited"],
+    ["NETWORK_UNAVAILABLE", "network_unavailable"],
+  ] as const)("preserves the %s fallback status", (code, expectedStatus) => {
+    useWorkspaceStore.setState({
+      askThreadId: "workspace:main",
+      activeAskRequestId: "request-fallback",
+      answer: "partial answer",
+      assistantThinking: true,
+    });
+
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: `fallback-${code}`,
+      timestamp: "2026-07-18T12:00:00.000Z",
+      type: "ask.event",
+      payload: {
+        protocolVersion: 1,
+        requestId: "request-fallback",
+        threadId: "workspace:main",
+        type: "fallback",
+        from: "openai",
+        to: "local",
+        code,
+        message: "Ask Local continuará la consulta.",
+        discardPartial: true,
+      },
+    });
+
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      askMode: "local",
+      askProviderStatus: expectedStatus,
+      askNotice: "Ask Local continuará la consulta.",
+      answer: "",
+      assistantThinking: true,
     });
   });
 
@@ -501,6 +542,98 @@ describe("workspace bootstrap reconciliation", () => {
     expect(apiMock.cancelActTask).toHaveBeenCalledWith("task-running");
     expect(useWorkspaceStore.getState().actTask?.status).toBe("cancelled");
   });
+
+  it("docks an existing terminal without recreating its server PTY", () => {
+    const runtime = {
+      terminalId: "terminal-existing",
+      cwd: ".",
+      status: "running" as const,
+    };
+    useWorkspaceStore.setState({
+      terminalRuntimes: { "panel-terminal": runtime },
+    });
+
+    useWorkspaceStore.getState().setPanelDock("panel-terminal", "bottom");
+
+    const terminal = useWorkspaceStore
+      .getState()
+      .nodes.find((node) => node.id === "panel-terminal");
+    expect(terminal?.type).toBe("terminalPanel");
+    if (terminal?.type === "terminalPanel") {
+      expect(terminal.data.dock).toBe("bottom");
+    }
+    expect(terminal?.hidden).toBe(false);
+    expect(useWorkspaceStore.getState().terminalRuntimes["panel-terminal"]).toBe(
+      runtime,
+    );
+    expect(apiMock.deleteTerminal).not.toHaveBeenCalled();
+  });
+
+  it("restores and persists the active tab for each dock", async () => {
+    const timestamp = "2026-07-18T12:00:00.000Z";
+    const panel = (
+      id: string,
+      kind: PanelState["kind"],
+      dock: PanelState["dock"],
+      dockActive: boolean,
+      resource: PanelState["resource"],
+    ): PanelState => ({
+      protocolVersion: 1,
+      id,
+      kind,
+      dock,
+      dockActive,
+      position: { x: 0, y: 0 },
+      size: { width: 480, height: 320 },
+      resource,
+      zoom: 1,
+      pinned: false,
+      updatedAt: timestamp,
+    });
+    const layout = [
+      panel("panel-editor", "editor", "right", false, {
+        relativePath: "base.ts",
+        language: "typescript",
+        hidden: false,
+      }),
+      panel("panel-assistant", "ask", "right", true, {
+        mode: "ask",
+        hidden: false,
+      }),
+      panel("panel-terminal", "terminal", "bottom", true, {
+        cwd: ".",
+        hidden: false,
+      }),
+    ];
+
+    useWorkspaceStore.getState().hydrateBootstrap(
+      bootstrapPayload({ layout }),
+    );
+    const restored = useWorkspaceStore.getState().nodes;
+    const editor = restored.find(({ id }) => id === "panel-editor");
+    const assistant = restored.find(({ id }) => id === "panel-assistant");
+    expect(assistant?.zIndex ?? 0).toBeGreaterThan(editor?.zIndex ?? 0);
+
+    useWorkspaceStore.getState().raisePanel("panel-editor");
+    await vi.waitFor(() => expect(apiMock.saveLayout).toHaveBeenCalled());
+    const saved = apiMock.saveLayout.mock.calls.at(-1)?.[0] as PanelState[];
+    expect(saved.find(({ id }) => id === "panel-editor")?.dockActive).toBe(
+      true,
+    );
+    expect(saved.find(({ id }) => id === "panel-assistant")?.dockActive).toBe(
+      false,
+    );
+    expect(saved.find(({ id }) => id === "panel-terminal")?.dockActive).toBe(
+      true,
+    );
+  });
+
+  it("opens and closes the settings surface explicitly", () => {
+    useWorkspaceStore.getState().setSettingsOpen(true);
+    expect(useWorkspaceStore.getState().settingsOpen).toBe(true);
+    useWorkspaceStore.getState().setSettingsOpen(false);
+    expect(useWorkspaceStore.getState().settingsOpen).toBe(false);
+  });
 });
 
 function bootstrapPayload(options: {
@@ -509,6 +642,7 @@ function bootstrapPayload(options: {
   cursor?: string;
   capabilities?: NonNullable<BootstrapPayload["capabilities"]>;
   activeActTask?: ContractActTask | null;
+  layout?: BootstrapPayload["layout"];
 } = {}): BootstrapPayload {
   return {
     protocolVersion: 1,
@@ -548,6 +682,7 @@ function bootstrapPayload(options: {
     activeAskTurnIds: [],
     activeActTask: options.activeActTask ?? null,
     terminals: [],
+    ...(options.layout === undefined ? {} : { layout: options.layout }),
     capabilities: options.capabilities ?? {
       ask: true,
       askMode: "openai",

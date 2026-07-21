@@ -27,15 +27,22 @@ interface TerminalHost extends HTMLDivElement {
   clearTerminal?: () => void;
 }
 
+type TerminalPanelProps = Pick<
+  NodeProps<TerminalFlowNode>,
+  "id" | "data" | "height"
+> & { docked?: boolean };
+
 export const TerminalPanel = memo(function TerminalPanel({
   id,
   data,
   height,
-}: NodeProps<TerminalFlowNode>) {
+  docked = false,
+}: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const connection = useWorkspaceStore((state) => state.connection);
-  const compactMode = useWorkspaceStore((state) => state.compactMode);
+  const canvasCompactMode = useWorkspaceStore((state) => state.compactMode);
+  const compactMode = !docked && canvasCompactMode;
   const createTerminal = useWorkspaceStore((state) => state.createTerminal);
   const runtime = useWorkspaceStore((state) => state.terminalRuntimes[id]);
   const registerTerminalRuntime = useWorkspaceStore(
@@ -308,12 +315,14 @@ export const TerminalPanel = memo(function TerminalPanel({
       expandedHeight={data.expandedHeight}
       accent="green"
       className="terminal-panel"
+      docked={docked}
+      dockTarget="bottom"
       actions={
         <>
           <button
             type="button"
             aria-label="Nueva terminal"
-            onClick={() => createTerminal(data.cwd, data.anchorNodeId)}
+            onClick={() => createTerminal(data.cwd, data.anchorNodeId, data.dock)}
           >
             <Plus aria-hidden="true" size={14} />
           </button>

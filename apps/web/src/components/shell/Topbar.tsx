@@ -31,6 +31,7 @@ export const Topbar = memo(function Topbar() {
   const connection = useWorkspaceStore((state) => state.connection);
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const setCommandPaletteOpen = useWorkspaceStore((state) => state.setCommandPaletteOpen);
+  const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
 
   const connected = connection === "connected";
 
@@ -86,7 +87,7 @@ export const Topbar = memo(function Topbar() {
         <span>Buscar o ejecutar comando…</span>
         <kbd><Command aria-hidden="true" size={11} /> K</kbd>
       </button>
-      <button className="topbar-icon-button" type="button" aria-label="Configuración">
+      <button className="topbar-icon-button" type="button" aria-label="Configuración" onClick={() => setSettingsOpen(true)}>
         <Settings2 aria-hidden="true" size={17} />
       </button>
     </header>

@@ -72,7 +72,11 @@ try {
     "constelix",
   );
   const environment = { ...process.env };
+  delete environment.LLM_API_KEY;
+  delete environment.LLM_BASE_URL;
+  delete environment.LLM_MODEL;
   delete environment.OPENAI_API_KEY;
+  delete environment.CONSTELIX_OPENAI_MODEL;
   delete environment.CONSTELIX_CAPABILITY_TOKEN;
   child = spawn(
     executable,

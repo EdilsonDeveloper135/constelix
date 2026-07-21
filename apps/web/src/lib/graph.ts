@@ -37,6 +37,7 @@ export function graphRecordsToFlowNodes(records: GraphNode[]): WorkspaceNode[] {
       id: record.id,
       type: "semantic" as const,
       ariaLabel: `${kindMap[record.kind]}: ${record.name}`,
+      domAttributes: { "aria-haspopup": "menu" as const },
       position: { x: 130 + column * 190, y: 60 + row * 90 },
       data: {
         kind: kindMap[record.kind],

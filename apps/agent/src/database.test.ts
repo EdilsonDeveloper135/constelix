@@ -44,6 +44,8 @@ describe("ConstelixDatabase", () => {
       position: { x: 10, y: 20 },
       size: { width: 600, height: 400 },
       resource: { relativePath: "src/main.ts" },
+      dock: "floating",
+      dockActive: false,
       zoom: 1,
       pinned: false,
       updatedAt: "2026-07-16T00:00:00.000Z",

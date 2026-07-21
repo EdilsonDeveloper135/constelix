@@ -10,7 +10,17 @@ import { PanelFrame } from "./PanelFrame";
 
 const assistantModes = ["ask", "act"] as const satisfies readonly AssistantMode[];
 
-export const AssistantPanel = memo(function AssistantPanel({ id, data, height }: NodeProps<AssistantFlowNode>) {
+type AssistantPanelProps = Pick<
+  NodeProps<AssistantFlowNode>,
+  "id" | "data" | "height"
+> & { docked?: boolean };
+
+export const AssistantPanel = memo(function AssistantPanel({
+  id,
+  data,
+  height,
+  docked = false,
+}: AssistantPanelProps) {
   const mode = useWorkspaceStore((state) => state.assistantMode);
   const setMode = useWorkspaceStore((state) => state.setAssistantMode);
   const question = useWorkspaceStore((state) => state.question);
@@ -104,6 +114,8 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
       expandedHeight={data.expandedHeight}
       accent="violet"
       className="assistant-panel"
+      docked={docked}
+      dockTarget="right"
     >
       <div className="assistant-tabs" role="tablist" aria-label="Modo de inteligencia artificial">
         <button
@@ -166,7 +178,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                   ? "Conectando con el agente local…"
                   : askAvailable
                     ? "Pregunta sobre el proyecto…"
-                    : "OpenAI no está disponible para este workspace."
+                    : "Ask LLM no está disponible para este workspace."
               }
             />
             {workspaceReady && askMode === "local" ? (
@@ -186,7 +198,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
             ) : null}
             {workspaceReady && !askAvailable ? (
               <p className="assistant-error" role="status">
-                Preguntar está deshabilitado porque el agente no tiene un proveedor OpenAI disponible.
+                Preguntar está deshabilitado porque el agente no tiene un proveedor LLM disponible.
               </p>
             ) : null}
             <div className="ask-submit-row">
@@ -223,7 +235,7 @@ export const AssistantPanel = memo(function AssistantPanel({ id, data, height }:
                       <span>
                         {message.role === "user" ? "Tú" : "Constelix"}
                         {message.role === "assistant" && message.mode
-                          ? ` · ${message.mode === "local" ? "Ask Local" : "Ask OpenAI"}`
+                          ? ` · ${message.mode === "local" ? "Ask Local" : "Ask LLM"}`
                           : ""}
                       </span>
                       <p>{message.content}</p>

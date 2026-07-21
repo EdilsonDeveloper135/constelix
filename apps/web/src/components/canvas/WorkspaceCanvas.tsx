@@ -17,14 +17,18 @@ import {
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import { MAX_VISIBLE_SEMANTIC_NODES } from "../../lib/workspaceGraph";
 import { applyCanvasFilters } from "../../lib/canvasFilters";
+import { isFloatingCanvasNode } from "../../lib/panelDock";
+import { semanticNodeCwd } from "../../lib/semanticNodeActions";
 import type { SemanticFlowNode, WorkspaceNode } from "../../types";
 import { AssistantPanel } from "../panels/AssistantPanel";
+import { DockedPanelHost } from "../panels/DockedPanelHost";
 import { EditorPanel } from "../panels/EditorPanel";
 import { TerminalPanel } from "../panels/TerminalPanel";
 import { GraphEdge } from "./GraphEdge";
 import { CanvasFilters } from "./CanvasFilters";
 import { Legend } from "./Legend";
 import { SemanticNode } from "./SemanticNode";
+import { SemanticNodeContextMenu } from "./SemanticNodeContextMenu";
 
 const nodeTypes = {
   semantic: SemanticNode,
@@ -52,12 +56,11 @@ const miniMapColor = (node: Node): string => {
   return "#788286";
 };
 
-function cwdForSemanticNode(node: SemanticFlowNode): string {
-  const path = node.data.relativePath ?? ".";
-  if (node.data.kind !== "module") return path;
-  const parts = path.split("/");
-  parts.pop();
-  return parts.join("/") || ".";
+interface ContextMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
+  returnFocusTo: HTMLElement | null;
 }
 
 function CanvasInner() {
@@ -67,7 +70,9 @@ function CanvasInner() {
   const onEdgesChange = useWorkspaceStore((state) => state.onEdgesChange);
   const selectNode = useWorkspaceStore((state) => state.selectNode);
   const raisePanel = useWorkspaceStore((state) => state.raisePanel);
+  const openFile = useWorkspaceStore((state) => state.openFile);
   const openTerminal = useWorkspaceStore((state) => state.openTerminal);
+  const activateSemanticNode = useWorkspaceStore((state) => state.activateSemanticNode);
   const setCanvasZoom = useWorkspaceStore((state) => state.setCanvasZoom);
   const saveLayout = useWorkspaceStore((state) => state.saveLayout);
   const evidencePath = useWorkspaceStore((state) => state.evidencePath);
@@ -79,8 +84,14 @@ function CanvasInner() {
   const graphCursor = useWorkspaceStore((state) => state.graphCursor);
   const graphReconciling = useWorkspaceStore((state) => state.graphReconciling);
   const loadNextGraphPage = useWorkspaceStore((state) => state.loadNextGraphPage);
+  const selectedNodeId = useWorkspaceStore((state) => state.selectedNodeId);
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [locked, setLocked] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const canvasNodes = useMemo(
+    () => nodes.filter(isFloatingCanvasNode),
+    [nodes],
+  );
   const semanticNodeCount = useMemo(
     () => nodes.filter((node) => node.type === "semantic").length,
     [nodes],
@@ -92,31 +103,40 @@ function CanvasInner() {
   const filteredGraph = useMemo(
     () =>
       applyCanvasFilters(
-        nodes,
+        canvasNodes,
         edges,
         canvasFilters,
         new Set(evidencePath?.nodeIds ?? []),
       ),
-    [canvasFilters, edges, evidencePath, nodes],
+    [canvasFilters, canvasNodes, edges, evidencePath],
   );
 
+  const contextMenuNode = useMemo(() => {
+    if (!contextMenu) return undefined;
+    const node = nodes.find((candidate) => candidate.id === contextMenu.nodeId);
+    return node?.type === "semantic" ? node : undefined;
+  }, [contextMenu, nodes]);
+
   const decoratedNodes = useMemo(() => {
-    if (!evidencePath) return filteredGraph.nodes;
-    const positionById = new Map(evidencePath.nodeIds.map((nodeId, index) => [nodeId, index]));
+    const positionById = new Map(
+      (evidencePath?.nodeIds ?? []).map((nodeId, index) => [nodeId, index]),
+    );
     return filteredGraph.nodes.map((node) => {
       if (node.type !== "semantic") return node;
+      const selected = node.id === selectedNodeId;
       const evidenceIndex = positionById.get(node.id);
       if (evidenceIndex === undefined || evidenceIndex >= evidenceCursor) {
-        if (!node.data.evidenceState) return node;
+        if (!node.data.evidenceState && node.selected === selected) return node;
         const { evidenceState: _evidenceState, ...data } = node.data;
-        return { ...node, data } as WorkspaceNode;
+        return { ...node, selected, data } as WorkspaceNode;
       }
       return {
         ...node,
+        selected,
         data: { ...node.data, evidenceState: evidenceIndex === evidenceCursor - 1 ? "current" : "visited" }
       } as WorkspaceNode;
     });
-  }, [evidenceCursor, evidencePath, filteredGraph.nodes]);
+  }, [evidenceCursor, evidencePath, filteredGraph.nodes, selectedNodeId]);
 
   const decoratedEdges = useMemo(() => {
     if (!evidencePath) return filteredGraph.edges;
@@ -184,8 +204,36 @@ function CanvasInner() {
     });
   }, [decoratedNodes, evidenceCursor, evidencePath, fitView]);
 
+  useEffect(() => {
+    const openFromKeyboard = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+        return;
+      }
+      const focused = document.activeElement;
+      if (!(focused instanceof HTMLElement)) return;
+      const wrapper = focused.closest<HTMLElement>(".react-flow__node[data-id]");
+      const nodeId = wrapper?.dataset.id;
+      const node = nodes.find(
+        (candidate): candidate is SemanticFlowNode =>
+          candidate.id === nodeId && candidate.type === "semantic",
+      );
+      if (!node || !wrapper) return;
+      event.preventDefault();
+      const bounds = wrapper.getBoundingClientRect();
+      setContextMenu({
+        nodeId: node.id,
+        x: bounds.left + Math.min(bounds.width, 42),
+        y: bounds.top + Math.min(bounds.height, 42),
+        returnFocusTo: focused,
+      });
+    };
+    window.addEventListener("keydown", openFromKeyboard);
+    return () => window.removeEventListener("keydown", openFromKeyboard);
+  }, [nodes]);
+
   return (
-    <main className="workspace-canvas" aria-label="Mapa visual del proyecto" data-testid="workspace-canvas">
+    <>
+      <main className="workspace-canvas" aria-label="Mapa visual del proyecto" data-testid="workspace-canvas">
       <ReactFlow
         nodes={decoratedNodes}
         edges={decoratedEdges}
@@ -194,6 +242,7 @@ function CanvasInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {
+          setContextMenu(null);
           if (node.type === "semantic") {
             selectNode(node.id);
           } else {
@@ -203,16 +252,23 @@ function CanvasInner() {
         }}
         onNodeContextMenu={(event, node) => {
           if (node.type !== "semantic") return;
-          const semanticNode = node as SemanticFlowNode;
-          if (
-            semanticNode.data.kind !== "directory" &&
-            semanticNode.data.kind !== "workspace" &&
-            semanticNode.data.kind !== "module"
-          ) return;
           event.preventDefault();
-          openTerminal(cwdForSemanticNode(semanticNode), node.id);
+          const target = event.target;
+          const returnFocusTo =
+            target instanceof HTMLElement
+              ? target.closest<HTMLElement>(".react-flow__node")
+              : null;
+          setContextMenu({
+            nodeId: node.id,
+            x: event.clientX,
+            y: event.clientY,
+            returnFocusTo,
+          });
         }}
-        onPaneClick={() => selectNode(null)}
+        onPaneClick={() => {
+          setContextMenu(null);
+          selectNode(null);
+        }}
         onNodeDragStop={saveLayout}
         onMove={(_, viewport) => setCanvasZoom(viewport.zoom)}
         defaultViewport={initialViewport}
@@ -280,10 +336,37 @@ function CanvasInner() {
           ) : null}
         </div>
       ) : null}
-    </main>
+      </main>
+      {contextMenu && contextMenuNode ? (
+        <SemanticNodeContextMenu
+          node={contextMenuNode}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          returnFocusTo={contextMenu.returnFocusTo}
+          onClose={() => setContextMenu(null)}
+          onInspect={() => selectNode(contextMenuNode.id)}
+          onActivate={() => void activateSemanticNode(contextMenuNode.id)}
+          onOpenFile={() => {
+            if (contextMenuNode.data.relativePath) {
+              openFile(contextMenuNode.data.relativePath, contextMenuNode.id);
+            }
+          }}
+          onOpenTerminal={() =>
+            openTerminal(semanticNodeCwd(contextMenuNode.data), contextMenuNode.id)
+          }
+        />
+      ) : null}
+    </>
   );
 }
 
 export const WorkspaceCanvas = memo(function WorkspaceCanvas() {
-  return <ReactFlowProvider><CanvasInner /></ReactFlowProvider>;
+  return (
+    <ReactFlowProvider>
+      <div className="workspace-stage">
+        <CanvasInner />
+        <DockedPanelHost />
+      </div>
+    </ReactFlowProvider>
+  );
 });

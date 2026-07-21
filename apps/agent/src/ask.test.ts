@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GraphEdge, GraphNode, GraphSnapshot } from "@constelix/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ASK_CONTEXT_LIMIT_BYTES,
@@ -32,22 +32,41 @@ describe("normalizeOpenAIError", () => {
   it("distinguishes exhausted quota from transient rate limiting", () => {
     expect(normalizeOpenAIError({ code: "insufficient_quota", status: 429, message: "current quota" })).toEqual({
       code: "INSUFFICIENT_QUOTA",
-      message: "El proyecto de OpenAI no tiene cuota disponible. Revisa la facturación o los límites de uso y vuelve a intentarlo."
+      message: "El proveedor LLM no tiene cuota disponible. Revisa la facturación o los límites de uso y vuelve a intentarlo."
     });
     expect(normalizeOpenAIError({ code: "rate_limit_exceeded", status: 429, message: "rate limit" }).code).toBe("RATE_LIMITED");
+    expect(normalizeOpenAIError({ status: 429, message: "Too many requests" }).code).toBe("RATE_LIMITED");
   });
 
   it("classifies invalid credentials without exposing the rejected key", () => {
     expect(normalizeOpenAIError({ code: "invalid_api_key", status: 401, message: "bad sk-secret" })).toEqual({
       code: "INVALID_API_KEY",
-      message: "OpenAI rechazó la clave configurada. Revisa OPENAI_API_KEY en el agente local."
+      message: "El endpoint LLM rechazó la clave configurada. Revisa LLM_API_KEY en Configuración."
     });
   });
 
   it("classifies an unavailable network without exposing transport details", () => {
     expect(normalizeOpenAIError(new TypeError("fetch failed"))).toEqual({
       code: "NETWORK_UNAVAILABLE",
-      message: "No se pudo conectar con OpenAI. Revisa la conexión de red y vuelve a intentarlo.",
+      message: "No se pudo conectar con el proveedor LLM. Revisa la conexión de red y el endpoint configurado.",
+    });
+    expect(normalizeOpenAIError({ status: 503, message: "Service unavailable" }).code).toBe(
+      "NETWORK_UNAVAILABLE",
+    );
+  });
+
+  it("returns actionable Ollama guidance for a local connection failure", () => {
+    const error = normalizeOpenAIError(new TypeError("fetch failed"), {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen2.5-coder:7b",
+      providerKind: "ollama",
+      apiKeySource: "none",
+      apiKeyRequired: false,
+    });
+
+    expect(error).toEqual({
+      code: "NETWORK_UNAVAILABLE",
+      message: "No se pudo conectar con Ollama. Ejecuta `ollama serve` y verifica que el puerto 11434 esté disponible.",
     });
   });
 });
@@ -367,11 +386,11 @@ describe("AskService provider integration", () => {
       }));
       expect(published).toContainEqual(expect.objectContaining({
         type: "capabilities.updated",
-        payload: {
+        payload: expect.objectContaining({
           askMode: "local",
           askProviderStatus: "insufficient_quota",
           askNotice: expect.stringMatching(/cuota/),
-        },
+        }),
       }));
       expect(ask.mode).toBe("local");
       expect(ask.providerStatus).toBe("insufficient_quota");
@@ -384,6 +403,7 @@ describe("AskService provider integration", () => {
       expect(JSON.stringify(database.loadAiMessages("thread-quota"))).not.toContain(
         "partial remote answer",
       );
+      await vi.waitFor(() => expect(ask.mode).toBe("openai"));
 
       const secondCompleted = waitForEvent(
         events,
@@ -399,7 +419,7 @@ describe("AskService provider integration", () => {
         "request-local-after-quota",
       );
       await secondCompleted;
-      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests).toHaveLength(2);
     } finally {
       unsubscribe();
       ask.close();
@@ -408,7 +428,7 @@ describe("AskService provider integration", () => {
     }
   });
 
-  it("keeps non-quota provider failures classified without silently changing modes", async () => {
+  it("falls back in the same turn when credentials are rejected", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-ask-invalid-key-"));
     const database = new ConstelixDatabase(":memory:");
     database.upsertWorkspace("workspace", root);
@@ -422,28 +442,138 @@ describe("AskService provider integration", () => {
       { provider: new FailingProvider("invalid_api_key", 401, "bad key") },
     );
     try {
-      const failed = waitForEvent(events, (event) => event.type === "ask.turn.error");
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
       const capabilitiesUpdated = waitForEvent(
         events,
         (event) => event.type === "capabilities.updated",
       );
       ask.startTurn("thread-invalid", "Explain", "request-invalid");
-      const event = await failed;
+      const event = await completed;
       await expect(capabilitiesUpdated).resolves.toMatchObject({
         payload: {
-          askMode: "openai",
+          askMode: "local",
           askProviderStatus: "invalid_api_key",
           askNotice: expect.stringMatching(/rechazó la clave/),
         },
       });
-      expect(event.payload).toMatchObject({ code: "INVALID_API_KEY" });
-      expect(ask.mode).toBe("openai");
+      expect(event.payload).toMatchObject({ type: "completed", mode: "local" });
+      expect(ask.mode).toBe("local");
       expect(ask.providerStatus).toBe("invalid_api_key");
       expect(ask.notice).toMatch(/rechazó la clave/);
     } finally {
       ask.close();
       events.close();
       database.close();
+    }
+  });
+
+  it.each([
+    {
+      label: "rate limit",
+      code: "rate_limit_exceeded",
+      status: 429,
+      message: "Too many requests",
+      providerStatus: "rate_limited",
+      notice: /límite temporal/,
+    },
+    {
+      label: "Ollama connection failure",
+      code: "ECONNREFUSED",
+      status: 0,
+      message: "Connection error",
+      providerStatus: "network_unavailable",
+      notice: /ollama serve.*11434/i,
+    },
+  ])("falls back in the same turn on $label", async ({
+    code,
+    status,
+    message,
+    providerStatus,
+    notice,
+  }) => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-recoverable-"));
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    const events = new EventBus();
+    const provider = new FailingProvider(code, status, message);
+    const ask = new AskService(
+      "workspace",
+      root,
+      createGraphFacade([]),
+      database,
+      events,
+      {
+        baseUrl: "http://127.0.0.1:11434/v1",
+        model: "qwen2.5-coder:7b",
+        provider,
+      },
+    );
+    try {
+      const fallback = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "fallback",
+      );
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+
+      ask.startTurn("thread-recoverable", "Explain", "request-recoverable");
+
+      await expect(fallback).resolves.toMatchObject({
+        payload: {
+          type: "fallback",
+          to: "local",
+          discardPartial: true,
+        },
+      });
+      await expect(completed).resolves.toMatchObject({
+        payload: { type: "completed", mode: "local" },
+      });
+      await vi.waitFor(() => expect(ask.mode).toBe("openai"));
+      expect(ask.providerStatus).toBe(providerStatus);
+      expect(ask.notice).toMatch(notice);
+      expect(database.loadAiMessages("thread-recoverable").map(({ role }) => role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+
+      const retried = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed" &&
+          event.payload.requestId === "request-retry",
+      );
+      ask.startTurn("thread-recoverable", "Retry", "request-retry");
+      await expect(retried).resolves.toMatchObject({
+        payload: { type: "completed", mode: "local" },
+      });
+      expect(provider.calls).toBe(2);
+      expect(database.loadAiMessages("thread-recoverable").map(({ role }) => role)).toEqual([
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+      ]);
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -804,6 +934,56 @@ describe("AskService provider integration", () => {
       fixture.database.close();
     }
   });
+
+  it("falls back locally when the configured provider reaches its timeout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-timeout-"));
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    const events = new EventBus();
+    const ask = new AskService(
+      "workspace",
+      root,
+      createGraphFacade([]),
+      database,
+      events,
+      { provider: new AbortWrappingProvider(), turnTimeoutMs: 25 },
+    );
+
+    try {
+      const fallback = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "fallback",
+      );
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+      ask.startTurn("thread-timeout", "Explain", "request-timeout");
+
+      await expect(fallback).resolves.toMatchObject({
+        payload: {
+          type: "fallback",
+          code: "NETWORK_UNAVAILABLE",
+          discardPartial: true,
+        },
+      });
+      await expect(completed).resolves.toMatchObject({
+        payload: { type: "completed", mode: "local" },
+      });
+      expect(ask.mode).toBe("openai");
+      expect(ask.providerStatus).toBe("network_unavailable");
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
 });
 
 class ScriptedProvider implements AIProvider {
@@ -845,6 +1025,28 @@ class BlockingProvider implements AIProvider {
   }
 }
 
+class AbortWrappingProvider implements AIProvider {
+  async stream(
+    _request: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<AsyncIterable<Record<string, unknown>>> {
+    return (async function* () {
+      await new Promise<void>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException("Request was aborted", "AbortError"));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Request was aborted", "AbortError")),
+          { once: true },
+        );
+      });
+      yield { type: "response.completed", response: { output: [] } };
+    })();
+  }
+}
+
 class QuotaProvider implements AIProvider {
   readonly requests: Array<Record<string, unknown>> = [];
 
@@ -870,6 +1072,8 @@ class QuotaProvider implements AIProvider {
 }
 
 class FailingProvider implements AIProvider {
+  calls = 0;
+
   constructor(
     private readonly code: string,
     private readonly status: number,
@@ -877,6 +1081,7 @@ class FailingProvider implements AIProvider {
   ) {}
 
   async stream(): Promise<AsyncIterable<Record<string, unknown>>> {
+    this.calls += 1;
     const error = new Error(this.message) as Error & {
       code: string;
       status: number;

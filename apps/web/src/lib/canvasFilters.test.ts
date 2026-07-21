@@ -89,6 +89,7 @@ function editorPanel(): WorkspaceNode {
     position: { x: 0, y: 0 },
     data: {
       panelType: "editor",
+      dock: "floating",
       title: "Editor",
       relativePath: "src/index.ts",
       language: "typescript",

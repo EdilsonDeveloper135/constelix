@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ChokidarOptions, FSWatcher } from "chokidar";
 import { PROTOCOL_VERSION, type GraphSnapshot } from "@constelix/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AnalyzerWorkerClient } from "./analyzer-worker-client.js";
 import { ConstelixDatabase } from "./database.js";
 import { EventBus } from "./events.js";
 import {
@@ -772,6 +773,47 @@ describe("WorkspaceIndexer incremental updates", () => {
       database.close();
     }
   }, 15_000);
+
+  it("cancels an active analyzer request before awaiting index work", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-index-close-active-"));
+    temporaryRoots.push(root);
+    await writeFile(join(root, "main.ts"), "export const pending = true;\n");
+
+    let rejectAnalysis: ((error: Error) => void) | undefined;
+    const analyze = vi
+      .spyOn(AnalyzerWorkerClient.prototype, "analyze")
+      .mockImplementation(
+        () => new Promise((_, reject) => {
+          rejectAnalysis = reject;
+        }),
+      );
+    const closeAnalyzer = vi
+      .spyOn(AnalyzerWorkerClient.prototype, "close")
+      .mockImplementation(async () => {
+        rejectAnalysis?.(new Error("Analyzer cancelled during indexer shutdown."));
+      });
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    const events = new EventBus();
+    const watcher = createFakeWatcher();
+    const indexer = new WorkspaceIndexer("workspace", root, database, events, {
+      watcherFactory: () => watcher as unknown as FSWatcher,
+    });
+
+    try {
+      await indexer.start();
+      watcher.emit("ready");
+      await waitForStatus(indexer, (status) => status.phase === "parsing");
+
+      await expect(indexer.close()).resolves.toBeUndefined();
+      expect(closeAnalyzer).toHaveBeenCalledTimes(1);
+    } finally {
+      analyze.mockRestore();
+      closeAnalyzer.mockRestore();
+      events.close();
+      database.close();
+    }
+  });
 });
 
 async function waitForReadyRevision(

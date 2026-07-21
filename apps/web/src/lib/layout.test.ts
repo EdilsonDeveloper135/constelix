@@ -73,6 +73,7 @@ function editorPanel(x: number, y: number): WorkspaceNode {
     style: { width: 480, height: 300 },
     data: {
       panelType: "editor",
+      dock: "floating",
       title: "Editor",
       relativePath: "src/index.ts",
       language: "typescript",
