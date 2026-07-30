@@ -15,7 +15,7 @@ import {
   demoToolPanels,
 } from "../data/demo";
 import { AgentRequestError, apiClient } from "../lib/api";
-import { clearEditorDraftsForWorkspace } from "../lib/editorDrafts";
+import { closeMonacoLspConnections } from "../lib/lsp";
 import { graphRecordsToFlowEdges, graphRecordsToFlowNodes } from "../lib/graph";
 import {
   layoutSemanticNodes,
@@ -160,6 +160,7 @@ interface WorkspaceState {
   resetActTask: () => void;
   saveLayout: () => void;
   flushLayout: () => void;
+  saveLayoutNow: () => Promise<void>;
 }
 
 interface HydrationGuards {
@@ -392,7 +393,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         indexedFileCount: demoIndexStatus.filesIndexed,
       }
     : emptyWorkspaceSummary,
-  onboardingOpen: false,
+  onboardingOpen: true,
   notices: [],
   connection: "connecting",
   demoMode: startsInDemoMode,
@@ -500,12 +501,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const sameWorkspace =
       previous.remoteHydrated && previous.workspaceId === payload.workspace.id;
     const preserveSessionState = sameWorkspace;
-    if (!sameWorkspace && previous.workspaceId) {
-      clearEditorDraftsForWorkspace(previous.workspaceId);
-      for (const runtime of Object.values(previous.terminalRuntimes)) {
-        void apiClient.deleteTerminal(runtime.terminalId).catch(() => undefined);
-      }
-    }
     const preserveGraphState =
       sameWorkspace &&
       (Boolean(guards.preserveGraph) ||
@@ -649,7 +644,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       preserveActState,
       preserveSessionState,
     );
-    set({
+    const applyHydration = () => set({
       workspaceId: payload.workspace.id,
       workspaceName: payload.workspace.name,
       askThreadId: `${payload.workspace.id}:main`,
@@ -749,6 +744,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         ? previous.canvasFilters
         : { nodeKind: "all", extension: "all" },
     });
+    if (apiClient.hasToken) {
+      apiClient.commitHydratedWorkspace(payload.session.id, applyHydration);
+    } else {
+      applyHydration();
+    }
     if (!guards.preserveTerminals) {
       for (const terminal of payload.terminals) {
         if (terminal.panelId && !terminalPanelIds.has(terminal.panelId)) {
@@ -763,72 +763,76 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   reconcileGraph: async () => {
     if (get().demoMode || !apiClient.hasToken) return;
+    reconcileAgain = true;
     if (reconcilePromise) {
-      reconcileAgain = true;
       return reconcilePromise;
     }
-    const epochs = {
-      graph: graphTransportEpoch,
-      ask: askTransportEpoch,
-      act: actTransportEpoch,
-      index: indexTransportEpoch,
-      terminal: terminalTransportEpoch,
-      connection: connectionTransportEpoch,
-      actCapability: actCapabilityTransportEpoch,
-      askCapability: askCapabilityTransportEpoch,
-    };
-    const controller = new AbortController();
-    reconcileAbortController = controller;
-    set({ graphReconciling: true });
-    reconcilePromise = retryWithDelays(
-      (signal) => apiClient.bootstrap(signal),
-      {
-        signal: controller.signal,
-        retryDelaysMs: BOOTSTRAP_RETRY_DELAYS_MS,
-        shouldRetry: (error) =>
-          get().connection !== "degraded" &&
-          isTransientBootstrapError(error),
-      },
-    )
-      .then((payload) => {
-        get().hydrateBootstrap(payload, {
-          preserveGraph: graphTransportEpoch !== epochs.graph,
-          preserveAsk: askTransportEpoch !== epochs.ask,
-          preserveAct: actTransportEpoch !== epochs.act,
-          preserveIndex: indexTransportEpoch !== epochs.index,
-          preserveTerminals: terminalTransportEpoch !== epochs.terminal,
-          preserveConnection:
-            connectionTransportEpoch !== epochs.connection,
-          preserveActCapability:
-            actCapabilityTransportEpoch !== epochs.actCapability,
-          preserveAskCapability:
-            askCapabilityTransportEpoch !== epochs.askCapability,
-        });
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) return;
-        set((state) => ({
-          ...(connectionTransportEpoch === epochs.connection
-            ? { connection: "degraded" as const }
-            : { connection: state.connection }),
-          graphReconciling: false,
-          assistantError:
-            error instanceof Error
-              ? error.message
-              : "No se pudo reconciliar el grafo.",
-        }));
-      })
-      .finally(() => {
-        if (reconcileAbortController === controller) {
-          reconcileAbortController = null;
+
+    reconcilePromise = (async () => {
+      set({ graphReconciling: true });
+      try {
+        while (reconcileAgain) {
+          reconcileAgain = false;
+          const epochs = {
+            graph: graphTransportEpoch,
+            ask: askTransportEpoch,
+            act: actTransportEpoch,
+            index: indexTransportEpoch,
+            terminal: terminalTransportEpoch,
+            connection: connectionTransportEpoch,
+            actCapability: actCapabilityTransportEpoch,
+            askCapability: askCapabilityTransportEpoch,
+          };
+          const controller = new AbortController();
+          reconcileAbortController = controller;
+          try {
+            const payload = await retryWithDelays(
+              (signal) => apiClient.bootstrap(signal),
+              {
+                signal: controller.signal,
+                retryDelaysMs: BOOTSTRAP_RETRY_DELAYS_MS,
+                shouldRetry: (error) =>
+                  get().connection !== "degraded" &&
+                  isTransientBootstrapError(error),
+              },
+            );
+            get().hydrateBootstrap(payload, {
+              preserveGraph: graphTransportEpoch !== epochs.graph,
+              preserveAsk: askTransportEpoch !== epochs.ask,
+              preserveAct: actTransportEpoch !== epochs.act,
+              preserveIndex: indexTransportEpoch !== epochs.index,
+              preserveTerminals:
+                terminalTransportEpoch !== epochs.terminal,
+              preserveConnection:
+                connectionTransportEpoch !== epochs.connection,
+              preserveActCapability:
+                actCapabilityTransportEpoch !== epochs.actCapability,
+              preserveAskCapability:
+                askCapabilityTransportEpoch !== epochs.askCapability,
+            });
+          } catch (error: unknown) {
+            if (!isAbortError(error)) {
+              set((state) => ({
+                ...(connectionTransportEpoch === epochs.connection
+                  ? { connection: "degraded" as const }
+                  : { connection: state.connection }),
+                assistantError:
+                  error instanceof Error
+                    ? error.message
+                    : "No se pudo reconciliar el grafo.",
+              }));
+            }
+          } finally {
+            if (reconcileAbortController === controller) {
+              reconcileAbortController = null;
+            }
+          }
         }
+      } finally {
         reconcilePromise = null;
         set({ graphReconciling: false });
-        if (reconcileAgain) {
-          reconcileAgain = false;
-          void get().reconcileGraph();
-        }
-      });
+      }
+    })();
     return reconcilePromise;
   },
 
@@ -839,6 +843,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           get().remoteHydrated ? "connected" : "connecting",
         );
         set({ demoMode: false });
+        void get().reconcileGraph();
+        break;
+      case "workspace.changed":
+        closeMonacoLspConnections();
+        reconcileAbortController?.abort();
+        connectionTransportEpoch += 1;
+        set({
+          connection: "connecting",
+          remoteHydrated: false,
+          graphReconciling: true,
+        });
         void get().reconcileGraph();
         break;
       case "index.progress": {
@@ -2041,6 +2056,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       pinnedSemanticNodeIds: state.pinnedSemanticNodeIds,
     }), true).catch(() => undefined);
   },
+
+  saveLayoutNow: async () => {
+    if (get().demoMode) return;
+    if (layoutTimer !== null) {
+      window.clearTimeout(layoutTimer);
+      layoutTimer = null;
+    }
+    const state = get();
+    await apiClient.saveLayout(serializeWorkspaceLayout({
+      nodes: state.nodes,
+      assistantMode: state.assistantMode,
+      collapsedNodeIds: state.collapsedNodeIds,
+      pinnedSemanticNodeIds: state.pinnedSemanticNodeIds,
+    }));
+  },
 }));
 
 async function recoverEvidenceGraph(
@@ -2185,6 +2215,9 @@ function isTransientBootstrapError(error: unknown): boolean {
     (error instanceof AgentRequestError &&
       (error.status === 408 ||
         error.status === 429 ||
+        (error.status === 409 &&
+          (error.code === "WORKSPACE_SWITCH_IN_PROGRESS" ||
+            error.code === "WORKSPACE_SESSION_CHANGED")) ||
         error.status >= 500))
   );
 }

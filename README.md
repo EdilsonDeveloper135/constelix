@@ -34,6 +34,23 @@ Editor and Assistant can dock on the right and Terminal can dock at the bottom,
 outside the transformable semantic canvas. Each panel can return to floating
 canvas mode, and the selected placement persists with the workspace layout.
 
+## Workspaces and language intelligence
+
+Use the workspace identity in the Topbar to open a recent project, enter an
+absolute path, or browse local folders. Constelix activates the candidate
+workspace before closing the current one, so a failed switch leaves the
+existing graph and tools intact. Unsaved editor drafts require an explicit
+preserve or discard decision.
+
+Monaco connects to language servers supervised by the local agent:
+
+- `typescript-language-server` for TypeScript and JavaScript.
+- Pyright for Python.
+
+Diagnostics, hover, completion and autoimports, definition, references, and
+cross-file navigation remain local. The status bar reports when a server is
+connecting, ready, unavailable, or has fallen back to basic Monaco behavior.
+
 ## LLM settings
 
 Open **Settings** in the dashboard to configure:
@@ -66,6 +83,7 @@ pnpm test
 pnpm build
 pnpm test:e2e
 pnpm benchmark
+pnpm smoke:lsp
 pnpm smoke:package
 ```
 
@@ -81,7 +99,7 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.4.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.5.tgz
 constelix /absolute/path/to/a/project
 ```
 
@@ -93,6 +111,8 @@ The package requires Node.js 24 on macOS. The production agent binds to a random
   bounded evidence and snippets selected by the agent for that turn; an Ollama
   loopback endpoint keeps those requests on the machine.
 - Workspace data is stored under macOS Application Support, never inside the opened repository.
+- Recent workspaces are stored in a private global catalog; every activation
+  creates a new session that isolates late REST, event, PTY, and LSP traffic.
 - An entered LLM credential travels once to the loopback agent, is never
   returned or persisted by the browser, and never enters SQLite, logs, the
   terminal environment, or the Codex environment. The agent stores it outside

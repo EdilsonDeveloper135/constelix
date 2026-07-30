@@ -1,5 +1,6 @@
 import {
   Bot,
+  ChevronDown,
   Command,
   Eye,
   Pencil,
@@ -18,6 +19,7 @@ import {
   workspaceModeLabel,
 } from "../../lib/workspacePresentation";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
+import { useWorkspaceManagerStore } from "../../store/useWorkspaceManagerStore";
 
 export const Topbar = memo(function Topbar() {
   const workspaceName = useWorkspaceStore((state) => state.workspaceName);
@@ -32,6 +34,10 @@ export const Topbar = memo(function Topbar() {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const setCommandPaletteOpen = useWorkspaceStore((state) => state.setCommandPaletteOpen);
   const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
+  const selectorOpen = useWorkspaceManagerStore((state) => state.selectorOpen);
+  const openWorkspaceSelector = useWorkspaceManagerStore(
+    (state) => state.openSelector,
+  );
 
   const connected = connection === "connected";
 
@@ -42,10 +48,22 @@ export const Topbar = memo(function Topbar() {
         <span>Constelix</span>
       </div>
       <div className="topbar-divider" />
-      <div className="workspace-identity" title={rootPath}>
-        <strong>{workspaceName}</strong>
-        <span>{rootPath}</span>
-      </div>
+      <button
+        className="workspace-identity workspace-identity--trigger"
+        type="button"
+        title={rootPath}
+        aria-label={`Cambiar workspace. Actual: ${workspaceName}`}
+        aria-haspopup="dialog"
+        aria-expanded={selectorOpen}
+        data-workspace-trigger
+        onClick={() => void openWorkspaceSelector()}
+      >
+        <span>
+          <strong>{workspaceName}</strong>
+          <small>{rootPath}</small>
+        </span>
+        <ChevronDown aria-hidden="true" size={13} />
+      </button>
       <div className="topbar-divider topbar-divider--compact" />
       <div className={`connection-status connection-status--${connection}`} role="status">
         {connected ? <Wifi aria-hidden="true" size={13} /> : <WifiOff aria-hidden="true" size={13} />}

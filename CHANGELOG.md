@@ -1,5 +1,43 @@
 # Changelog
 
+## [v0.0.5] - 2026-07-29
+
+### Added
+
+- LSP local supervisado para TypeScript, JavaScript y Python, integrado con Monaco para diagnósticos, hover, completado y autoimports, definición, referencias y navegación entre archivos.
+- Selector accesible de workspaces con recientes persistentes, explorador paginado de carpetas, apertura por ruta y cambio transaccional sin recargar el dashboard.
+- Sesiones de workspace explícitas que aíslan REST, eventos, PTY, LSP, Ask, Codex, watcher y SQLite durante un cambio en caliente.
+- Leases enriquecidos con identidad de proceso, ejecutable, versión, inicio, heartbeat, detección de locks obsoletos y liberación forzada mediante confirmación protegida.
+- Smoke real de los servidores TypeScript y Pyright, pruebas de lifecycle A→B→A, aislamiento de respuestas antiguas y documentación del protocolo y modelo de amenazas.
+
+### Fixed
+
+- El cambio de workspace conserva borradores por ID, cierra recursos del runtime anterior y revierte completamente si el candidato no puede activarse.
+- Monaco vuelve a reconocer `FILE_CONFLICT` por código estable y mantiene intacto el borrador cuando el archivo cambia en disco.
+- El catálogo global ya no modifica permisos de directorios padre preexistentes; solo crea directorios privados y mantiene su base SQLite en `0600`.
+- Los avisos de borradores y conflictos de lock reciben foco explícito, permanecen dentro del diálogo modal y restauran el foco al cerrarse.
+- Una herramienta recién desanclada se reencuadra automáticamente y ya no puede quedar fuera del viewport del canvas.
+- Las URI y mensajes LSP se median, limitan y redactan antes de cruzar el WebSocket autenticado; las respuestas de una sesión anterior se descartan.
+- Las rutas API codificadas, las sesiones REST/LSP ausentes u obsoletas y los métodos LSP con efectos ya no pueden eludir las fronteras de autenticación o workspace.
+- La inicialización LSP fuerza la raíz activa, usa el runtime TypeScript incluido y acota tanto la entrada stdio como la salida pendiente del navegador.
+- El modo global de solo lectura se conserva en cada hot-swap y vuelve a bloquear escrituras en el nuevo workspace.
+- La activación devuelve sesión y bootstrap de forma atómica; otras pestañas ponen sus operaciones en cuarentena hasta hidratar el nuevo workspace.
+- La paginación de carpetas consume cursores opacos autenticados, invalida listados mutados y permite cargar más de 100 directorios sin omisiones silenciosas.
+- Una respuesta de bootstrap o apertura atrasada ya no puede sustituir una transición más reciente; la hidratación de UI y la confirmación del transporte quedan acopladas.
+- Los eventos de la nueva sesión recibidos durante la cuarentena fuerzan una reconciliación autoritativa al confirmar el cambio, sin perder deltas tempranos.
+- La confirmación de un cambio con borradores queda ligada a la sesión de origen y revalida tareas Act, transición y guardado antes de descartar estado.
+- El onboarding explícito ya no reaparece durante una reconciliación transitoria ni intercepta interacciones del canvas.
+- Los fallos de limpieza posteriores a una activación confirmada se auditan sin revertir al runtime anterior, y todas las rutas de estado se mantienen fuera de cada repositorio.
+
+### Known issues
+
+- Los servidores de lenguaje incluidos cubren únicamente TypeScript, JavaScript y Python y se ejecutan como procesos locales del mismo usuario.
+- La generación depende de que el proveedor remoto tenga credenciales, cuota y red, o de que el daemon local y el modelo configurado estén disponibles.
+- Vite continúa advirtiendo sobre chunks grandes de Monaco y ELK.
+- Permanece una carrera TOCTOU residual frente a otro proceso hostil ejecutado con la misma cuenta de macOS.
+- Mover una herramienta entre dock y canvas recrea su vista; el borrador y la PTY sobreviven, pero cierto estado visual puede reiniciarse.
+- El soporte sigue limitado a macOS y el índice semántico conserva sus límites de seguridad predeterminados.
+
 ## [v0.0.4] - 2026-07-21
 
 ### Added

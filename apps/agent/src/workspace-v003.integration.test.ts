@@ -28,6 +28,7 @@ const MONOREPO_FIXTURE = fileURLToPath(
   new URL("../../../tests/fixtures/v003-monorepo-workspace/", import.meta.url),
 );
 const temporaryRoots: string[] = [];
+const workspaceSessions = new WeakMap<RunningAgentServer, string>();
 
 afterEach(async () => {
   await Promise.all(
@@ -450,6 +451,12 @@ function headers(
   return {
     host: new URL(server.origin).host,
     authorization: `Bearer ${server.capabilityToken}`,
+    ...(workspaceSessions.get(server)
+      ? {
+          "x-constelix-workspace-session":
+            workspaceSessions.get(server)!,
+        }
+      : {}),
     ...(json ? { "content-type": "application/json" } : {}),
   };
 }
@@ -485,7 +492,9 @@ async function bootstrap(
     headers: headers(server, false),
   });
   expect(response.statusCode).toBe(200);
-  return response.json() as BootstrapPayload;
+  const payload = response.json() as BootstrapPayload;
+  workspaceSessions.set(server, payload.session.id);
+  return payload;
 }
 
 async function waitUntil(
@@ -512,6 +521,9 @@ function isOutside(root: string, candidate: string): boolean {
 }
 
 interface BootstrapPayload {
+  session: {
+    id: string;
+  };
   summary: {
     projectTypes: string[];
     languages: string[];

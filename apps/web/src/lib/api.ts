@@ -6,10 +6,15 @@ import {
   GraphSnapshotSchema,
   LlmPublicConfigurationSchema,
   LocalAskResultSchema,
+  LspAvailabilitySchema,
   PanelStateSchema,
   ServerEventSchema,
   TerminalSessionSchema,
   TerminalOutputSnapshotSchema,
+  WorkspaceBrowseResponseSchema,
+  WorkspaceListResponseSchema,
+  WorkspaceOpenResponseSchema,
+  WorkspaceSessionSchema,
   WorkspaceSummarySchema,
   type ActApproveRequest,
   type ActTask as ContractActTask,
@@ -21,7 +26,11 @@ import {
   type LlmConfigurationUpdate,
   type LlmPublicConfiguration,
   type PanelState,
-  type TerminalCreateRequest
+  type TerminalCreateRequest,
+  type WorkspaceBrowseResponse,
+  type WorkspaceListResponse,
+  type WorkspaceOpenRequest,
+  type WorkspaceOpenResponse,
 } from "@constelix/contracts";
 
 import { PROTOCOL_VERSION, type AgentEvent, type BootstrapPayload } from "../types";
@@ -30,7 +39,14 @@ import { readCapabilityToken } from "./auth";
 type EventListener = (event: AgentEvent) => void;
 type SocketConnectionState = "connecting" | "connected" | "disconnected";
 type ConnectionListener = (state: SocketConnectionState) => void;
+type ReconciliationListener = () => void;
 const MAX_KEEPALIVE_BODY_BYTES = 60 * 1024;
+type HydratedWorkspaceOpenResponse = Omit<
+  WorkspaceOpenResponse,
+  "bootstrap"
+> & {
+  bootstrap: BootstrapPayload;
+};
 
 export class AgentRequestError extends Error {
   constructor(
@@ -39,25 +55,84 @@ export class AgentRequestError extends Error {
     readonly code?: string,
     readonly recoverable = true,
     readonly severity: "info" | "warning" | "error" = "error",
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = "AgentRequestError";
   }
 }
 
-class ConstelixApiClient {
-  private readonly token = readCapabilityToken();
+interface RequestOptions {
+  allowWorkspaceTransition?: boolean;
+  omitWorkspaceSession?: boolean;
+}
+
+export class ConstelixApiClient {
+  private readonly token: string | null;
+  private workspaceSessionId: string | null = null;
+  private pendingWorkspaceSessionId: string | null = null;
+  private workspaceEpoch = 0;
   private socket: WebSocket | null = null;
   private listeners = new Set<EventListener>();
   private connectionListeners = new Set<ConnectionListener>();
+  private reconciliationListeners = new Set<ReconciliationListener>();
+  private missedPendingSessionEvents = false;
   private reconnectTimer: number | null = null;
   private shouldReconnect = true;
+
+  constructor(token: string | null = readCapabilityToken()) {
+    this.token = token;
+  }
 
   get hasToken(): boolean {
     return Boolean(this.token);
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  get sessionId(): string | null {
+    return this.workspaceSessionId;
+  }
+
+  get workspaceTransitioning(): boolean {
+    return this.pendingWorkspaceSessionId !== null;
+  }
+
+  lspSocketUrl(language: "typescript" | "javascript" | "python"): string {
+    if (!this.token) throw new Error("El agente local no proporcionó una capacidad LSP.");
+    if (this.pendingWorkspaceSessionId || !this.workspaceSessionId) {
+      throw new Error(
+        "El workspace todavía no terminó de reconciliarse.",
+      );
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = new URL(
+      `${protocol}//${window.location.host}/api/v1/lsp`,
+    );
+    url.searchParams.set("token", this.token);
+    url.searchParams.set("language", language);
+    if (this.workspaceSessionId) {
+      url.searchParams.set("session", this.workspaceSessionId);
+    }
+    return url.toString();
+  }
+
+  async request<T>(
+    path: string,
+    init: RequestInit = {},
+    options: RequestOptions = {},
+  ): Promise<T> {
+    if (
+      this.pendingWorkspaceSessionId &&
+      options.allowWorkspaceTransition !== true
+    ) {
+      throw new AgentRequestError(
+        "El workspace está cambiando; espera a que termine la reconciliación.",
+        409,
+        "WORKSPACE_TRANSITION_PENDING",
+        true,
+        "info",
+      );
+    }
+    const requestEpoch = this.workspaceEpoch;
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (init.body !== undefined && init.body !== null) {
@@ -65,10 +140,18 @@ class ConstelixApiClient {
     }
     headers.set("X-Constelix-Protocol", String(PROTOCOL_VERSION));
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    if (
+      this.workspaceSessionId &&
+      options.omitWorkspaceSession !== true
+    ) {
+      headers.set("X-Constelix-Workspace-Session", this.workspaceSessionId);
+    }
 
     const response = await fetch(`/api/v1${path}`, { ...init, headers });
+    this.assertCurrentWorkspaceEpoch(requestEpoch);
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
+      this.assertCurrentWorkspaceEpoch(requestEpoch);
       const parsed = parseAgentErrorDetail(detail);
       throw new AgentRequestError(
         parsed.message || `El agente respondió ${response.status}`,
@@ -76,18 +159,78 @@ class ConstelixApiClient {
         parsed.code,
         parsed.recoverable,
         parsed.severity,
+        parsed.details,
       );
     }
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const payload = (await response.json()) as T;
+    this.assertCurrentWorkspaceEpoch(requestEpoch);
+    return payload;
   }
 
   async bootstrap(signal?: AbortSignal): Promise<BootstrapPayload> {
-    const response = await this.request<unknown>(
-      "/bootstrap",
-      signal ? { signal } : {},
-    );
-    return parseBootstrapPayload(response);
+    let response: unknown;
+    try {
+      response = await this.request<unknown>(
+        "/bootstrap",
+        signal ? { signal } : {},
+        {
+          allowWorkspaceTransition: true,
+          omitWorkspaceSession: this.pendingWorkspaceSessionId !== null,
+        },
+      );
+    } catch (error) {
+      const activeSession = activeSessionFromChangedError(error);
+      if (activeSession) {
+        this.beginWorkspaceTransition(activeSession.id);
+      }
+      throw error;
+    }
+    const payload = parseBootstrapPayload(response);
+    this.beginWorkspaceTransition(payload.session.id);
+    return payload;
+  }
+
+  async listWorkspaces(): Promise<WorkspaceListResponse> {
+    const response = await this.request<unknown>("/workspaces");
+    return WorkspaceListResponseSchema.parse(response);
+  }
+
+  async browseDirectories(
+    path: string,
+    options: { showHidden?: boolean; cursor?: string } = {},
+  ): Promise<WorkspaceBrowseResponse> {
+    const query = new URLSearchParams({ path });
+    if (options.showHidden) query.set("showHidden", "true");
+    if (options.cursor) query.set("cursor", options.cursor);
+    const response = await this.request<unknown>(`/fs/browse?${query.toString()}`);
+    return WorkspaceBrowseResponseSchema.parse(response);
+  }
+
+  async openWorkspace(
+    input: WorkspaceOpenRequest,
+  ): Promise<HydratedWorkspaceOpenResponse> {
+    const response = await this.request<unknown>("/workspaces/open", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    const parsed = WorkspaceOpenResponseSchema.parse(response);
+    const bootstrap = parseBootstrapPayload(parsed.bootstrap);
+    if (
+      bootstrap.session.id !== parsed.session.id ||
+      bootstrap.workspace.id !== parsed.session.workspaceId
+    ) {
+      throw new AgentRequestError(
+        "La activación devolvió una sesión y un bootstrap inconsistentes.",
+        409,
+        "WORKSPACE_SESSION_CHANGED",
+      );
+    }
+    this.beginWorkspaceTransition(parsed.session.id);
+    return {
+      ...parsed,
+      bootstrap,
+    };
   }
 
   async queryGraph(rootIds: string[], cursor?: string): Promise<GraphSnapshot> {
@@ -286,10 +429,89 @@ class ConstelixApiClient {
     return () => this.connectionListeners.delete(listener);
   }
 
+  subscribeWorkspaceReconciliation(
+    listener: ReconciliationListener,
+  ): () => void {
+    this.reconciliationListeners.add(listener);
+    return () => this.reconciliationListeners.delete(listener);
+  }
+
   sendEvent(event: Record<string, unknown>): boolean {
-    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    if (
+      this.pendingWorkspaceSessionId ||
+      !this.workspaceSessionId ||
+      this.socket?.readyState !== WebSocket.OPEN
+    ) {
+      return false;
+    }
     this.socket.send(JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...event }));
     return true;
+  }
+
+  /**
+   * Validates the staged transition, applies the UI hydration synchronously,
+   * and only then makes the new session available to scoped transports.
+   */
+  commitHydratedWorkspace(
+    sessionId: string,
+    applyHydration?: () => void,
+  ): void {
+    const parsedSessionId =
+      WorkspaceSessionSchema.shape.id.parse(sessionId);
+    const pendingSessionId = this.pendingWorkspaceSessionId;
+    if (pendingSessionId && pendingSessionId !== parsedSessionId) {
+      throw new AgentRequestError(
+        "La UI intentó confirmar una sesión distinta a la transición activa.",
+        409,
+        "WORKSPACE_SESSION_CHANGED",
+      );
+    }
+    if (
+      pendingSessionId === null &&
+      this.workspaceSessionId !== parsedSessionId
+    ) {
+      throw new AgentRequestError(
+        "La UI intentó confirmar una sesión que no fue preparada por el transporte.",
+        409,
+        "WORKSPACE_SESSION_CHANGED",
+      );
+    }
+    applyHydration?.();
+    const changed = this.workspaceSessionId !== parsedSessionId;
+    const reconcileAfterCommit = this.missedPendingSessionEvents;
+    this.workspaceSessionId = parsedSessionId;
+    this.pendingWorkspaceSessionId = null;
+    this.missedPendingSessionEvents = false;
+    if (changed && pendingSessionId === null) {
+      this.workspaceEpoch += 1;
+    }
+    if (reconcileAfterCommit) {
+      queueMicrotask(() => {
+        this.reconciliationListeners.forEach((listener) => listener());
+      });
+    }
+  }
+
+  private beginWorkspaceTransition(sessionId: string): boolean {
+    if (
+      this.workspaceSessionId === sessionId &&
+      this.pendingWorkspaceSessionId === null
+    ) {
+      return false;
+    }
+    if (this.pendingWorkspaceSessionId === sessionId) return false;
+    this.pendingWorkspaceSessionId = sessionId;
+    this.missedPendingSessionEvents = false;
+    this.workspaceEpoch += 1;
+    return true;
+  }
+
+  private assertCurrentWorkspaceEpoch(requestEpoch: number): void {
+    if (requestEpoch === this.workspaceEpoch) return;
+    throw new DOMException(
+      "La respuesta pertenece a una sesión de workspace anterior.",
+      "AbortError",
+    );
   }
 
   private openSocket(): void {
@@ -305,6 +527,30 @@ class ConstelixApiClient {
         if (!event) return;
         if (event.type === "connection.ready") {
           this.publishConnection("connected");
+          this.listeners.forEach((listener) => listener(event));
+          return;
+        }
+        if (event.type === "workspace.changed") {
+          if (this.beginWorkspaceTransition(event.payload.session.id)) {
+            this.listeners.forEach((listener) => listener(event));
+          }
+          return;
+        }
+        if (this.pendingWorkspaceSessionId) {
+          if (
+            !event.sessionId ||
+            event.sessionId === this.pendingWorkspaceSessionId
+          ) {
+            this.missedPendingSessionEvents = true;
+          }
+          return;
+        }
+        if (
+          event.sessionId &&
+          (!this.workspaceSessionId ||
+            event.sessionId !== this.workspaceSessionId)
+        ) {
+          return;
         }
         this.listeners.forEach((listener) => listener(event));
       } catch {
@@ -358,6 +604,10 @@ export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
   }
   const workspaceRecord = requireRecord(record.workspace, "workspace");
   const workspaceId = requireString(workspaceRecord.id, "workspace.id");
+  const session = WorkspaceSessionSchema.parse(record.session);
+  if (session.workspaceId !== workspaceId) {
+    throw new Error("El agente devolvió una sesión asociada a otro workspace.");
+  }
   const workspaceName = requireString(workspaceRecord.name, "workspace.name");
   const rootPath = requireString(workspaceRecord.rootPath, "workspace.rootPath");
   const mode = requireString(workspaceRecord.mode, "workspace.mode");
@@ -462,6 +712,7 @@ export function parseBootstrapPayload(raw: unknown): BootstrapPayload {
       : parseCapabilities(record.capabilities);
   return {
     protocolVersion: PROTOCOL_VERSION,
+    session,
     workspace: {
       id: workspaceId,
       name: workspaceName,
@@ -505,7 +756,25 @@ function parseCapabilities(raw: unknown): NonNullable<BootstrapPayload["capabili
     ...(record.codexVersion === undefined
       ? {}
       : { codexVersion: requireString(record.codexVersion, "capabilities.codexVersion") }),
+    ...(record.lsp === undefined
+      ? {}
+      : { lsp: LspAvailabilitySchema.parse(record.lsp) }),
   };
+}
+
+function activeSessionFromChangedError(error: unknown) {
+  if (
+    !(error instanceof AgentRequestError) ||
+    error.code !== "WORKSPACE_SESSION_CHANGED" ||
+    typeof error.details !== "object" ||
+    error.details === null ||
+    Array.isArray(error.details)
+  ) {
+    return undefined;
+  }
+  const candidate = (error.details as Record<string, unknown>).activeSession;
+  const parsed = WorkspaceSessionSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function parseAgentErrorDetail(detail: string): {
@@ -513,13 +782,18 @@ export function parseAgentErrorDetail(detail: string): {
   code?: string;
   recoverable: boolean;
   severity: "info" | "warning" | "error";
+  details?: unknown;
 } {
   if (!detail.trim()) {
     return { message: "", recoverable: true, severity: "error" };
   }
   try {
     const parsed = JSON.parse(detail) as unknown;
-    const record = requireRecord(parsed, "error");
+    const envelope = requireRecord(parsed, "error envelope");
+    const record =
+      typeof envelope.error === "object" && envelope.error !== null
+        ? requireRecord(envelope.error, "error")
+        : envelope;
     return {
       message:
         typeof record.message === "string" && record.message.trim()
@@ -534,6 +808,7 @@ export function parseAgentErrorDetail(detail: string): {
         record.severity === "error"
           ? record.severity
           : "error",
+      ...(record.details === undefined ? {} : { details: record.details }),
     };
   } catch {
     return { message: detail, recoverable: true, severity: "error" };

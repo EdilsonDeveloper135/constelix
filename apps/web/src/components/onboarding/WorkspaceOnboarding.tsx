@@ -25,7 +25,7 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
     (state) => state.acknowledgeOnboarding,
   );
 
-  if (demoMode || (remoteHydrated && !onboardingOpen)) return null;
+  if (demoMode || !onboardingOpen) return null;
   const progress = Math.round(index.progress * 100);
   const ready = index.phase === "ready";
 

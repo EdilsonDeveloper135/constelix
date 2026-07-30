@@ -8,13 +8,23 @@ import {
   GraphConfidenceSchema,
   GraphNodeSchema,
   GraphQuerySchema,
+  LspAvailabilitySchema,
+  LspLanguageSchema,
   LlmConfigurationUpdateSchema,
   LlmPublicConfigurationSchema,
   PanelStateSchema,
   PROTOCOL_VERSION,
+  RecentWorkspaceSchema,
   ServerEventSchema,
+  WorkspaceBrowseResponseSchema,
   WorkspaceIdSchema,
+  WorkspaceListResponseSchema,
+  WorkspaceLockConflictSchema,
+  WorkspaceOpenRequestSchema,
+  WorkspaceOpenResponseSchema,
+  WorkspaceSessionSchema,
   WorkspaceSummarySchema,
+  WorkspaceTargetSchema,
 } from "./index.js";
 
 describe("protocol contracts", () => {
@@ -177,6 +187,207 @@ describe("protocol contracts", () => {
       estimatedFileCount: 32,
       omittedFilesTruncated: false,
     });
+  });
+
+  it("keeps workspace sessions strict, stable, and safe to publish", () => {
+    const session = WorkspaceSessionSchema.parse({
+      id: "161c08c7-ad9b-47df-94b7-86db634a1f4f",
+      workspaceId: "0123456789abcdef01234567",
+      activatedAt: "2026-07-25T20:30:00.000Z",
+    });
+
+    expect(session.workspaceId).toBe("0123456789abcdef01234567");
+    expect(() => WorkspaceSessionSchema.parse({
+      ...session,
+      canonicalRoot: "/Users/developer/private-project",
+    })).toThrow();
+    expect(() => WorkspaceSessionSchema.parse({
+      ...session,
+      id: "not-a-uuid",
+    })).toThrow();
+  });
+
+  it("bounds public workspace recents and never accepts canonical roots", () => {
+    const session = {
+      id: "161c08c7-ad9b-47df-94b7-86db634a1f4f",
+      workspaceId: "0123456789abcdef01234567",
+      activatedAt: "2026-07-25T20:30:00.000Z",
+    };
+    const recent = {
+      protocolVersion: PROTOCOL_VERSION,
+      workspaceId: "abcdef0123456789abcdef01",
+      name: "Proyecto Ω",
+      displayPath: "~/Projects/Proyecto Ω",
+      lastOpenedAt: "2026-07-25T20:31:00.000Z",
+      availability: "available" as const,
+      lastMode: "edit" as const,
+    };
+
+    expect(RecentWorkspaceSchema.parse(recent)).toEqual(recent);
+    expect(() => RecentWorkspaceSchema.parse({
+      ...recent,
+      canonicalRoot: "/Users/developer/Projects/Proyecto Ω",
+    })).toThrow();
+    expect(WorkspaceListResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      activeSession: session,
+      recents: Array.from({ length: 12 }, (_, index) => ({
+        ...recent,
+        workspaceId: index.toString(16).padStart(24, "0"),
+      })),
+    }).recents).toHaveLength(12);
+    expect(() => WorkspaceListResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      activeSession: session,
+      recents: Array.from({ length: 13 }, (_, index) => ({
+        ...recent,
+        workspaceId: index.toString(16).padStart(24, "0"),
+      })),
+    })).toThrow();
+  });
+
+  it("validates absolute workspace targets and session-bound open requests", () => {
+    const target = WorkspaceTargetSchema.parse({
+      kind: "path",
+      path: "/Users/developer/Projects/Proyecto con espacios",
+    });
+    const request = WorkspaceOpenRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: "17384852-376d-4a5d-9476-59d1070f0f8b",
+      expectedSessionId: "161c08c7-ad9b-47df-94b7-86db634a1f4f",
+      target,
+      lockResolution: {
+        action: "force-release",
+        expectedLockId: "6422c1c1-5188-461f-98c0-e1a9560ecdb3",
+        acknowledgeRisk: true,
+      },
+    });
+
+    expect(request.target).toEqual(target);
+    expect(() => WorkspaceTargetSchema.parse({
+      kind: "path",
+      path: "relative/project",
+    })).toThrow();
+    expect(() => WorkspaceTargetSchema.parse({
+      kind: "path",
+      path: "/tmp/project\0escape",
+    })).toThrow();
+    expect(() => WorkspaceOpenRequestSchema.parse({
+      ...request,
+      expectedSessionId: "stale-session",
+    })).toThrow();
+    expect(WorkspaceOpenResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      session: {
+        id: "3c4fb9db-4cb4-44b5-91d4-6eb0a97d9ea7",
+        workspaceId: "abcdef0123456789abcdef01",
+        activatedAt: "2026-07-25T20:32:00.000Z",
+      },
+      bootstrap: {},
+    }).session.workspaceId).toBe("abcdef0123456789abcdef01");
+  });
+
+  it("validates safe directory-only browse pages and their cursor bounds", () => {
+    const page = WorkspaceBrowseResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      path: "/Users/developer/Projects",
+      parentPath: "/Users/developer",
+      entries: [{
+        name: "Proyecto Ω",
+        path: "/Users/developer/Projects/Proyecto Ω",
+        symlink: false,
+      }, {
+        name: "linked-project",
+        path: "/Users/developer/Projects/linked-project",
+        symlink: true,
+      }],
+      cursor: "opaque-signed-cursor",
+      truncated: true,
+    });
+
+    expect(page.entries.map((entry) => entry.symlink)).toEqual([false, true]);
+    expect(() => WorkspaceBrowseResponseSchema.parse({
+      ...page,
+      entries: [{
+        name: "escape",
+        path: "../outside",
+        symlink: false,
+      }],
+    })).toThrow();
+    expect(() => WorkspaceBrowseResponseSchema.parse({
+      ...page,
+      entries: Array.from({ length: 201 }, (_, index) => ({
+        name: `directory-${index}`,
+        path: `/tmp/directory-${index}`,
+        symlink: false,
+      })),
+    })).toThrow();
+    expect(() => WorkspaceBrowseResponseSchema.parse({
+      ...page,
+      cursor: "",
+    })).toThrow();
+    expect(() => WorkspaceBrowseResponseSchema.parse({
+      ...page,
+      cursor: undefined,
+      truncated: true,
+    })).toThrow();
+    expect(() => WorkspaceBrowseResponseSchema.parse({
+      ...page,
+      truncated: false,
+    })).toThrow();
+  });
+
+  it("constrains LSP availability to supported languages and strict statuses", () => {
+    const availability = LspAvailabilitySchema.parse({
+      javascript: { available: true },
+      typescript: { available: true },
+      python: {
+        available: false,
+        reason: "No se encontró pyright en PATH.",
+      },
+    });
+
+    expect(availability.python.available).toBe(false);
+    expect(LspLanguageSchema.options).toEqual([
+      "javascript",
+      "typescript",
+      "python",
+    ]);
+    expect(() => LspLanguageSchema.parse("go")).toThrow();
+    expect(() => LspAvailabilitySchema.parse({
+      ...availability,
+      go: { available: true },
+    })).toThrow();
+    expect(() => LspAvailabilitySchema.parse({
+      ...availability,
+      python: {
+        available: false,
+        reason: "",
+      },
+    })).toThrow();
+  });
+
+  it("represents workspace lock ambiguity without exposing private paths", () => {
+    const conflict = WorkspaceLockConflictSchema.parse({
+      conflictId: "85a8118f-a9db-40e9-a32e-9a68b5800bbb",
+      lockId: "6422c1c1-5188-461f-98c0-e1a9560ecdb3",
+      workspaceId: "abcdef0123456789abcdef01",
+      displayPath: "~/Projects/locked-project",
+      status: "ambiguous",
+      forceAllowed: true,
+      pid: 4812,
+      agentVersion: "v0.0.5",
+      heartbeatAt: "2026-07-25T20:31:30.000Z",
+    });
+
+    expect(conflict).toMatchObject({
+      status: "ambiguous",
+      forceAllowed: true,
+    });
+    expect(() => WorkspaceLockConflictSchema.parse({
+      ...conflict,
+      canonicalRoot: "/Users/developer/Projects/locked-project",
+    })).toThrow();
   });
 
   it("represents local Ask results without claiming generated reasoning", () => {

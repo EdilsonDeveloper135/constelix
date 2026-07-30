@@ -32,6 +32,7 @@ try {
     authorization: `Bearer ${server.capabilityToken}`,
     host: `127.0.0.1:${server.port}`,
     "content-type": "application/json",
+    "x-constelix-workspace-session": coldStatus.sessionId,
   };
   const incrementalSamplesMs: number[] = [];
   let latestRevision = coldStatus.revision;
@@ -107,14 +108,19 @@ function percentile(values: readonly number[], quantile: number): number {
 }
 
 interface HealthPayload {
+  session: { id: string };
   index: { phase: string; total: number; revision: number };
+}
+
+interface BenchmarkIndexStatus extends HealthPayload["index"] {
+  sessionId: string;
 }
 
 async function waitForReady(
   server: Awaited<ReturnType<typeof startAgentServer>>,
   afterRevision: number,
   timeoutMs: number
-): Promise<HealthPayload["index"]> {
+): Promise<BenchmarkIndexStatus> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     const response = await server.app.inject({
@@ -129,7 +135,12 @@ async function waitForReady(
       throw new Error(`Health probe failed with HTTP ${response.statusCode}: ${response.body}`);
     }
     const payload = response.json<HealthPayload>();
-    if (payload.index.phase === "ready" && payload.index.revision > afterRevision) return payload.index;
+    if (
+      payload.index.phase === "ready" &&
+      payload.index.revision > afterRevision
+    ) {
+      return { ...payload.index, sessionId: payload.session.id };
+    }
     if (payload.index.phase === "error") throw new Error("Benchmark indexing entered the error state.");
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }

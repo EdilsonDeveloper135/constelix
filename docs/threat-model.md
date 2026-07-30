@@ -10,14 +10,30 @@
 5. Act mode can execute code and access the network after the user approves a turn.
 6. A manual terminal is an explicit user-controlled process; read-only terminals
    receive an additional macOS filesystem-write sandbox.
+7. The authenticated folder browser intentionally exposes absolute local
+   directory paths to the dashboard so the user can select a workspace.
+8. TypeScript Language Server and Pyright are same-user child processes that
+   parse untrusted repository content and project configuration.
 
 ## Enforced controls
 
 - Bind only to `127.0.0.1`.
 - Require bearer authentication for REST. Validate the capability query token,
   exact `Origin`, and exact `Host` before completing a WebSocket upgrade.
+- Classify API requests using both the decoded path and Fastify's resolved
+  route template, so percent-encoded aliases cannot bypass authentication.
+- Scope browser work to the active workspace session. The dashboard sends
+  `X-Constelix-Workspace-Session` on REST and a session UUID on LSP; stale
+  or missing scoped sessions fail, and workspace events carry a
+  session/workspace pair. During a hot swap the client quarantines scoped
+  requests and events, aborts in-flight reconciliation, rejects responses from
+  older transport generations, and confirms the new session only around the
+  synchronous validated UI hydration.
 - Canonicalize the workspace before deriving its 24-character ID or lock, capture
   its device/inode identity, and stop operational services if that identity changes.
+- Construct and start a candidate runtime before making it current. On failure,
+  close the candidate and preserve the prior runtime; after success, close all
+  old Ask, Codex, PTY, LSP, watcher, database, and lease resources.
 - Propagate that descriptor through scanner, indexer, Ask, PTY, and Codex, and
   revalidate it immediately before filesystem reads or process execution.
 - Reject traversal, NUL bytes, absolute request paths, and symlinks escaping the workspace.
@@ -26,6 +42,19 @@
 - Use optimistic hashes and atomic renames for editor writes.
 - Keep SQLite, locks, layouts, conversations, and audit data in a per-workspace
   Application Support directory outside the opened repository.
+- Maintain a v1 workspace lease with an opaque lock ID, PID, process boot time,
+  executable path, workspace identity, and a 5-second heartbeat. Combine
+  liveness, executable identity, heartbeat, and device/inode checks instead of
+  trusting a recyclable PID.
+- Auto-remove only locks classified as safely stale. Never force an active
+  owner. For ambiguous locks, require explicit risk acknowledgement and the
+  exact observed lock ID, then compare owner and file identity again under an
+  exclusive guard before deletion.
+- Limit folder browsing to readable directories, hide dot-prefixed entries by
+  default, bound each response, and authenticate pagination cursors with an
+  agent-secret HMAC tied to the directory, filter, offset, and sorted listing
+  hash. A changed listing invalidates continuation instead of silently skipping
+  entries.
 - Exclude environment files, credentials, keys, dependencies, binaries, and generated outputs from automatic AI context.
 - Treat `LLM_API_KEY`, `OPENAI_API_KEY`, and equivalent provider credentials as
   write-only at protocol boundaries. Never return or inject them through
@@ -48,6 +77,19 @@
   are launched through `sandbox-exec` with filesystem writes denied.
 - Give Codex no additional writable roots and reject escalation beyond the workspace.
 - Expire Act approvals at completion, cancellation, or 15 minutes of inactivity.
+- Authenticate the LSP WebSocket during upgrade and bind it to the active
+  session. Accept only strict JSON-RPC envelopes and `constelix:` document URIs,
+  canonicalize mapped paths, reject raw browser `file:` URIs, and suppress
+  server locations outside the workspace.
+- Force every LSP initialize root to the canonical active workspace and expose
+  only document synchronization, diagnostics, completion, hover, definition,
+  references, and cancellation. TypeScript uses the packaged trusted tsserver
+  with plugins and automatic type acquisition disabled.
+- Bound LSP headers, client/server messages, queued stdin, and pending browser
+  output; parse fragmented output without repeatedly copying an entire message.
+  Allow only one session per language-server family. Start language servers
+  with an environment allowlist, never forward stderr, and terminate them on
+  disconnect, hot swap, or shutdown.
 
 ## Accepted residual risk
 
@@ -64,6 +106,11 @@ URL to browser history or application logs, but local browser developer tools
 and a process already controlling the browser remain inside the trusted-machine
 assumption.
 
+Workspace session IDs prevent stale cross-workspace updates but do not add
+authentication or secrecy. The bearer capability still grants the authenticated
+local dashboard access to directory browsing, including absolute paths. This is
+acceptable only under the single-user, trusted-browser assumption.
+
 Act mode has network access by product decision. A malicious trusted repository may attempt to influence an agent into disclosing readable host data or performing an external side effect. The MVP therefore marks Act as suitable only for repositories the user trusts, sanitizes inherited environment variables, records a local audit trail, and requires a fresh approval for every turn.
 
 File mode `0600` prevents access by other macOS accounts, not by a hostile
@@ -76,6 +123,18 @@ Use Act only with trusted repositories and clear stored provider keys when they
 are not needed.
 
 Filesystem containment is designed for accidental traversal and repository-controlled symlinks, not for a second hostile process running as the same macOS user. Constelix revalidates canonical parents immediately before atomic writes, but Node.js does not expose a portable descriptor-relative rename API that completely removes the final path-check/write race. Do not open a workspace concurrently controlled by an untrusted local process.
+
+The v1 lease reduces false ownership caused by PID reuse, but it is not
+cryptographic process attestation. A hostile same-user process can inspect or
+modify lock files, imitate an executable, or race filesystem checks. Guarded
+compare-and-delete prevents ordinary stale UI actions from deleting a changed
+owner; operating-system account isolation remains the real boundary.
+
+Language servers run locally as the same user and are not placed in an OS
+sandbox in v0.0.5. URI mediation, environment filtering, and lifecycle
+supervision constrain Constelix's bridge, but they cannot make a vulnerable
+language server or malicious project configuration safe. Open only repositories
+you trust with installed language-server versions.
 
 The read-only PTY depends on the macOS `sandbox-exec` facility. Constelix fails
 closed if it is unavailable, but this control is defense in depth rather than a

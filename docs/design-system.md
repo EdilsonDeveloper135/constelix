@@ -18,13 +18,22 @@ This document records the approved visual concept as implementation tokens.
 - Dock and float controls are explicit, keyboard reachable, and expose their
   action and destination through an accessible name.
 - Adding or removing a dock changes the remaining canvas viewport, not semantic
-  node coordinates. v0.0.4 uses fixed responsive dock dimensions. Docked Monaco
+  node coordinates. v0.0.5 uses fixed responsive dock dimensions. Docked Monaco
   and xterm instances remain mounted across zoom and dock-tab switches.
 - Right-clicking a semantic node opens a focusable `menu`; it never executes a
   command by itself. Inspecting/selecting the node, exploring its relations,
   opening its file, or creating a terminal require an explicit selection.
 - Settings is a real modal surface with labeled Base URL, Model, and write-only
   API key fields. Saving never re-renders a stored credential in the browser.
+- The current workspace identity in the top bar is an explicit button. It opens
+  a modal selector with filtered recents, absolute-path entry, and a keyboard
+  navigable, progressively paginated local folder browser; no page reload is
+  required.
+- Workspace switching exposes validating and activating states, disables modal
+  dismissal while activation is in progress, and blocks a switch while Act is
+  running. Dirty editor drafts require an explicit preserve, discard, or cancel
+  choice. Ambiguous locks require a separate destructive confirmation; an
+  active lock never offers force release.
 - Dialogs and context menus trap focus while open, close with Escape, and return
   focus to their trigger.
 

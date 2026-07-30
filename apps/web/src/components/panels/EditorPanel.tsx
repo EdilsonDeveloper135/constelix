@@ -21,7 +21,7 @@ import {
 } from "react";
 import type { NodeProps } from "@xyflow/react";
 
-import { apiClient } from "../../lib/api";
+import { AgentRequestError, apiClient } from "../../lib/api";
 import {
   editorDraftIsDirty,
   getEditorDraft,
@@ -30,6 +30,13 @@ import {
   updateEditorDraft,
   type EditorDraft,
 } from "../../lib/editorDrafts";
+import {
+  attachMonacoLspDocument,
+  configureMonacoLsp,
+  constelixDocumentUri,
+  type LspDocumentStatus,
+  type MonacoLspDocument,
+} from "../../lib/lsp";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import type { EditorFlowNode, WorkspaceNode } from "../../types";
 import { PanelFrame } from "./PanelFrame";
@@ -187,6 +194,7 @@ export const EditorPanel = memo(function EditorPanel({
 }: EditorPanelProps) {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const remoteHydrated = useWorkspaceStore((state) => state.remoteHydrated);
+  const connection = useWorkspaceStore((state) => state.connection);
   const workspaceId = useWorkspaceStore((state) => state.workspaceId);
   const workspaceMode = useWorkspaceStore((state) => state.workspaceMode);
   const workspaceName = useWorkspaceStore((state) => state.workspaceName);
@@ -198,6 +206,10 @@ export const EditorPanel = memo(function EditorPanel({
   const [draft, setDraft] = useState(() =>
     initialDraft(workspaceId, data, demoMode),
   );
+  const [lspStatus, setLspStatus] =
+    useState<LspDocumentStatus>("connecting");
+  const [diagnosticCount, setDiagnosticCount] = useState(0);
+  const lspDocumentRef = useRef<MonacoLspDocument | null>(null);
   const pathRef = useRef(data.relativePath);
   const saveRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -223,6 +235,11 @@ export const EditorPanel = memo(function EditorPanel({
       workspaceName,
     ],
   );
+
+  useEffect(() => () => {
+    lspDocumentRef.current?.dispose();
+    lspDocumentRef.current = null;
+  }, [data.relativePath, workspaceId]);
 
   const patchDraft = useCallback(
     (
@@ -291,6 +308,14 @@ export const EditorPanel = memo(function EditorPanel({
     const relativePath = pathRef.current;
     const current = getEditorDraft(workspaceId, relativePath);
     if (!current || current.status === "saving") return;
+    if (!demoMode && (!remoteHydrated || connection !== "connected")) {
+      patchDraft(relativePath, {
+        status: "error",
+        errorMessage:
+          "Espera a que termine la reconciliación del workspace antes de guardar.",
+      });
+      return;
+    }
     if (workspaceMode === "read") {
       patchDraft(relativePath, {
         status: "error",
@@ -336,18 +361,23 @@ export const EditorPanel = memo(function EditorPanel({
     } catch (error) {
       const message =
         error instanceof Error ? error.message.toLowerCase() : "";
+      const conflict =
+        (error instanceof AgentRequestError &&
+          error.code === "FILE_CONFLICT") ||
+        message.includes("conflict") ||
+        message.includes("hash") ||
+        message.includes("changed on disk");
       patchDraft(relativePath, {
-        status:
-          message.includes("conflict") || message.includes("hash")
-            ? "conflict"
-            : "error",
+        status: conflict ? "conflict" : "error",
         errorMessage:
           error instanceof Error ? error.message : "No se pudo guardar.",
       });
     }
   }, [
     demoMode,
+    connection,
     patchDraft,
+    remoteHydrated,
     updateEditorPanel,
     workspaceId,
     workspaceMode,
@@ -356,6 +386,9 @@ export const EditorPanel = memo(function EditorPanel({
 
   const reloadFromDisk = useCallback(async () => {
     const relativePath = pathRef.current;
+    if (!demoMode && (!remoteHydrated || connection !== "connected")) {
+      return;
+    }
     patchDraft(relativePath, { status: "loading" });
     try {
       const file = await apiClient.readFile(relativePath);
@@ -380,13 +413,22 @@ export const EditorPanel = memo(function EditorPanel({
         errorMessage: "No se pudo recargar el archivo.",
       });
     }
-  }, [patchDraft, updateEditorPanel]);
+  }, [
+    connection,
+    demoMode,
+    patchDraft,
+    remoteHydrated,
+    updateEditorPanel,
+  ]);
 
   const overwriteDisk = useCallback(async () => {
     const relativePath = pathRef.current;
     const current = getEditorDraft(workspaceId, relativePath);
     if (!current) return;
     if (workspaceMode === "read") return;
+    if (!demoMode && (!remoteHydrated || connection !== "connected")) {
+      return;
+    }
     patchDraft(relativePath, { status: "saving" });
     try {
       const disk = await apiClient.readFile(relativePath);
@@ -422,7 +464,10 @@ export const EditorPanel = memo(function EditorPanel({
       });
     }
   }, [
+    connection,
+    demoMode,
     patchDraft,
+    remoteHydrated,
     updateEditorPanel,
     workspaceId,
     workspaceMode,
@@ -467,6 +512,8 @@ export const EditorPanel = memo(function EditorPanel({
             onClick={() => void save()}
             disabled={
               workspaceMode === "read" ||
+              (!demoMode &&
+                (!remoteHydrated || connection !== "connected")) ||
               !dirty ||
               draft.status === "loading" ||
               draft.status === "saving"
@@ -578,7 +625,7 @@ export const EditorPanel = memo(function EditorPanel({
           >
             <MonacoEditor
               key={`${workspaceId}:${data.relativePath}:${data.revealLine ?? 0}`}
-              path={`constelix://${workspaceId}/${encodeURI(data.relativePath)}`}
+              path={constelixDocumentUri(workspaceId, data.relativePath)}
               language={draft.language || languageFromPath(data.relativePath)}
               value={draft.content}
               onChange={(value) => {
@@ -613,6 +660,29 @@ export const EditorPanel = memo(function EditorPanel({
                 });
               }}
               onMount={(editor, monaco) => {
+                configureMonacoLsp(
+                  monaco,
+                  (relativePath, line, column) => {
+                    const workspace = useWorkspaceStore.getState();
+                    workspace.openFile(relativePath);
+                    workspace.updateEditorPanel({
+                      revealLine: line,
+                      revealColumn: column,
+                    });
+                  },
+                );
+                lspDocumentRef.current?.dispose();
+                lspDocumentRef.current = attachMonacoLspDocument(
+                  monaco,
+                  editor.getModel()!,
+                  draft.language || languageFromPath(data.relativePath),
+                  {
+                    status: setLspStatus,
+                    diagnostics: (_uri, diagnostics) => {
+                      setDiagnosticCount(diagnostics.length);
+                    },
+                  },
+                );
                 editor.addCommand(
                   monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
                   () => void saveRef.current(),
@@ -620,7 +690,7 @@ export const EditorPanel = memo(function EditorPanel({
                 if (data.revealLine) {
                   editor.setPosition({
                     lineNumber: data.revealLine,
-                    column: 1,
+                    column: data.revealColumn ?? 1,
                   });
                   editor.revealLineInCenter(data.revealLine);
                 }
@@ -659,7 +729,21 @@ export const EditorPanel = memo(function EditorPanel({
         <span>UTF-8</span>
         <span>LF</span>
         <span>{draft.language}</span>
+        <span
+          className={`editor-lsp-status editor-lsp-status--${lspStatus}`}
+          title="Estado del servidor de lenguaje local"
+        >
+          LSP {lspStatusLabel(lspStatus)}
+          {diagnosticCount ? ` · ${diagnosticCount}` : ""}
+        </span>
       </footer>
     </PanelFrame>
   );
 });
+
+function lspStatusLabel(status: LspDocumentStatus): string {
+  if (status === "ready") return "listo";
+  if (status === "connecting") return "conectando";
+  if (status === "error") return "con error";
+  return "no disponible";
+}

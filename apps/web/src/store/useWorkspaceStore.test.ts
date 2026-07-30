@@ -20,9 +20,11 @@ import {
   getEditorDraft,
   getOrCreateEditorDraft,
 } from "../lib/editorDrafts";
+import { AgentRequestError } from "../lib/api";
 
 const apiMock = vi.hoisted(() => ({
   hasToken: true,
+  commitHydratedWorkspace: vi.fn(),
   bootstrap: vi.fn(),
   queryGraph: vi.fn(),
   queryGraphPage: vi.fn(),
@@ -41,6 +43,7 @@ vi.mock("../lib/api", () => ({
     constructor(
       message: string,
       readonly status: number,
+      readonly code?: string,
     ) {
       super(message);
     }
@@ -115,9 +118,184 @@ beforeEach(() => {
   apiMock.deleteTerminal.mockResolvedValue(undefined);
   apiMock.saveLayout.mockResolvedValue(undefined);
   apiMock.sendEvent.mockReturnValue(true);
+  apiMock.commitHydratedWorkspace.mockImplementation(
+    (_sessionId: string, applyHydration?: () => void) => {
+      applyHydration?.();
+    },
+  );
 });
 
 describe("workspace bootstrap reconciliation", () => {
+  it("reconciles a workspace.changed event from another local tab", async () => {
+    const switched = bootstrapPayload({
+      workspaceId: "workspace-two",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+    });
+    apiMock.bootstrap.mockResolvedValue(switched);
+    apiMock.commitHydratedWorkspace.mockImplementation(
+      (sessionId: string, applyHydration: () => void) => {
+        expect(sessionId).toBe(switched.session.id);
+        expect(useWorkspaceStore.getState()).toMatchObject({
+          workspaceId: "workspace-one",
+          remoteHydrated: false,
+        });
+        applyHydration();
+        expect(useWorkspaceStore.getState()).toMatchObject({
+          workspaceId: "workspace-two",
+          remoteHydrated: true,
+        });
+      },
+    );
+    useWorkspaceStore.setState({
+      remoteHydrated: true,
+      demoMode: false,
+      connection: "connected",
+      workspaceId: "workspace-one",
+    });
+
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "workspace-changed",
+      timestamp: "2026-07-25T12:00:00.000Z",
+      type: "workspace.changed",
+      sessionId: switched.session.id,
+      workspaceId: switched.workspace.id,
+      payload: { session: switched.session },
+    });
+
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      connection: "connecting",
+      remoteHydrated: false,
+    });
+    await vi.waitFor(() => {
+      expect(useWorkspaceStore.getState().workspaceId).toBe("workspace-two");
+    });
+    expect(apiMock.bootstrap).toHaveBeenCalledOnce();
+    expect(apiMock.commitHydratedWorkspace).toHaveBeenCalledWith(
+      switched.session.id,
+      expect.any(Function),
+    );
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      connection: "connected",
+      remoteHydrated: true,
+    });
+  });
+
+  it("does not commit the transport session when bootstrap hydration fails", () => {
+    const corrupted = {
+      ...bootstrapPayload({
+        workspaceId: "workspace-two",
+        sessionId: "00000000-0000-4000-8000-000000000002",
+      }),
+      graph: {
+        ...bootstrapPayload().graph,
+        nodes: null,
+      },
+    } as unknown as BootstrapPayload;
+
+    expect(() =>
+      useWorkspaceStore.getState().hydrateBootstrap(corrupted),
+    ).toThrow();
+    expect(apiMock.commitHydratedWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("drains an aborted reconciliation before resolving the changed workspace", async () => {
+    const switched = bootstrapPayload({
+      workspaceId: "workspace-two",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+    });
+    let firstSignal: AbortSignal | undefined;
+    apiMock.bootstrap
+      .mockImplementationOnce((signal: AbortSignal) => {
+        firstSignal = signal;
+        return new Promise<BootstrapPayload>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+        });
+      })
+      .mockResolvedValueOnce(switched);
+    useWorkspaceStore.setState({
+      remoteHydrated: true,
+      demoMode: false,
+      connection: "connected",
+      workspaceId: "workspace-one",
+    });
+
+    const firstReconciliation =
+      useWorkspaceStore.getState().reconcileGraph();
+    await vi.waitFor(() => {
+      expect(apiMock.bootstrap).toHaveBeenCalledOnce();
+    });
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "workspace-changed-aborts-bootstrap",
+      timestamp: "2026-07-25T12:00:00.000Z",
+      type: "workspace.changed",
+      sessionId: switched.session.id,
+      workspaceId: switched.workspace.id,
+      payload: { session: switched.session },
+    });
+
+    await firstReconciliation;
+    expect(firstSignal?.aborted).toBe(true);
+    expect(apiMock.bootstrap).toHaveBeenCalledTimes(2);
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      workspaceId: "workspace-two",
+      remoteHydrated: true,
+      connection: "connected",
+      graphReconciling: false,
+    });
+  });
+
+  it("retries a cross-tab bootstrap while the server finishes a workspace switch", async () => {
+    vi.useFakeTimers();
+    const switched = bootstrapPayload({
+      workspaceId: "workspace-two",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+    });
+    apiMock.bootstrap
+      .mockRejectedValueOnce(
+        new AgentRequestError(
+          "Workspace switch is still committing.",
+          409,
+          "WORKSPACE_SWITCH_IN_PROGRESS",
+        ),
+      )
+      .mockResolvedValueOnce(switched);
+    useWorkspaceStore.setState({
+      remoteHydrated: true,
+      demoMode: false,
+      connection: "connected",
+      workspaceId: "workspace-one",
+    });
+
+    useWorkspaceStore.getState().handleAgentEvent({
+      protocolVersion: 1,
+      eventId: "workspace-changed-during-cleanup",
+      timestamp: "2026-07-25T12:00:00.000Z",
+      type: "workspace.changed",
+      sessionId: switched.session.id,
+      workspaceId: switched.workspace.id,
+      payload: { session: switched.session },
+    });
+
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      workspaceId: "workspace-one",
+      remoteHydrated: false,
+      connection: "connecting",
+    });
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.waitFor(() => {
+      expect(useWorkspaceStore.getState().workspaceId).toBe("workspace-two");
+    });
+    expect(apiMock.bootstrap).toHaveBeenCalledTimes(2);
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      remoteHydrated: true,
+      connection: "connected",
+    });
+  });
+
   it("does not let a late bootstrap overwrite a newer socket disconnection", async () => {
     const pendingBootstrap = deferred<BootstrapPayload>();
     apiMock.bootstrap.mockReturnValue(pendingBootstrap.promise);
@@ -278,7 +456,7 @@ describe("workspace bootstrap reconciliation", () => {
     });
   });
 
-  it("destroys all workspace-scoped frontend state when switching from A to B", () => {
+  it("resets active workspace state while retaining explicitly preserved drafts", () => {
     const workspaceA = bootstrapPayload();
     workspaceA.workspace = {
       ...workspaceA.workspace,
@@ -347,8 +525,11 @@ describe("workspace bootstrap reconciliation", () => {
       actTask: null,
       terminalRuntimes: {},
     });
-    expect(getEditorDraft("workspace-a", "src/a.ts")).toBeUndefined();
-    expect(apiMock.deleteTerminal).toHaveBeenCalledWith("terminal-a");
+    expect(getEditorDraft("workspace-a", "src/a.ts")).toMatchObject({
+      content: "changed",
+      savedContent: "original",
+    });
+    expect(apiMock.deleteTerminal).not.toHaveBeenCalledWith("terminal-a");
   });
 
   it("keeps paginated and expanded nodes when reconnecting at the same revision", () => {
@@ -640,14 +821,21 @@ function bootstrapPayload(options: {
   revision?: number;
   nodes?: GraphNode[];
   cursor?: string;
+  workspaceId?: string;
+  sessionId?: string;
   capabilities?: NonNullable<BootstrapPayload["capabilities"]>;
   activeActTask?: ContractActTask | null;
   layout?: BootstrapPayload["layout"];
 } = {}): BootstrapPayload {
   return {
     protocolVersion: 1,
+    session: {
+      id: options.sessionId ?? "00000000-0000-4000-8000-000000000001",
+      workspaceId: options.workspaceId ?? "workspace-one",
+      activatedAt: "2026-01-01T00:00:00.000Z",
+    },
     workspace: {
-      id: "workspace-one",
+      id: options.workspaceId ?? "workspace-one",
       name: "Fixture",
       rootPath: "/tmp/fixture",
       mode: "edit",
@@ -665,7 +853,7 @@ function bootstrapPayload(options: {
     },
     graph: {
       protocolVersion: 1,
-      workspaceId: "workspace-one",
+      workspaceId: options.workspaceId ?? "workspace-one",
       revision: options.revision ?? 1,
       nodes: options.nodes ?? [graphNode("base")],
       edges: [],

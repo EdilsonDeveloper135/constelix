@@ -6,12 +6,14 @@ import type {
   EvidencePath as ContractEvidencePath,
   GraphSnapshot as ContractGraphSnapshot,
   LocalAskResult,
+  LspAvailability,
   PanelDock as ContractPanelDock,
   PanelState,
   ServerEvent,
   SourceRange,
   TerminalSession,
   WorkspaceAccessMode,
+  WorkspaceSession,
   WorkspaceSummary,
 } from "@constelix/contracts";
 
@@ -73,6 +75,7 @@ export interface EditorPanelData extends Record<string, unknown> {
   contentHash?: string;
   anchorNodeId?: string;
   revealLine?: number;
+  revealColumn?: number;
   collapsed?: boolean;
   expandedHeight?: number;
 }
@@ -139,6 +142,7 @@ export interface IndexStatus {
 
 export interface BootstrapPayload {
   protocolVersion: 1;
+  session: WorkspaceSession;
   workspace: {
     id: string;
     name: string;
@@ -165,6 +169,7 @@ export interface BootstrapPayload {
     codexReason?: string;
     codexChecking?: boolean;
     codexVersion?: string;
+    lsp?: LspAvailability;
   };
 }
 

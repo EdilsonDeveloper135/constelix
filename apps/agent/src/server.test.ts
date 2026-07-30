@@ -22,7 +22,7 @@ describe("local agent HTTP boundary", () => {
       webDistPath: join(parent, "missing-web-dist"),
       askOptions: { apiKey: "" },
     });
-    const headers = {
+    let headers: Record<string, string> = {
       host: new URL(server.origin).host,
       authorization: "Bearer read-mode-capability",
       "content-type": "application/json",
@@ -49,6 +49,11 @@ describe("local agent HTTP boundary", () => {
         },
       });
       expect(JSON.stringify(bootstrap.json())).not.toContain(root);
+      headers = {
+        ...headers,
+        "x-constelix-workspace-session":
+          (bootstrap.json() as { session: { id: string } }).session.id,
+      };
 
       const read = await server.app.inject({
         method: "POST",
@@ -144,7 +149,7 @@ describe("local agent HTTP boundary", () => {
         },
       },
     });
-    const headers = {
+    let headers: Record<string, string> = {
       host: new URL(server.origin).host,
       authorization: "Bearer llm-settings-capability",
       "content-type": "application/json",
@@ -152,18 +157,28 @@ describe("local agent HTTP boundary", () => {
 
     try {
       let indexPhase = "idle";
+      let sessionId = "";
       for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {
         const health = await server.app.inject({
           method: "GET",
           url: "/api/v1/health",
           headers,
         });
-        indexPhase = (health.json() as { index: { phase: string } }).index.phase;
+        const healthPayload = health.json() as {
+          index: { phase: string };
+          session: { id: string };
+        };
+        indexPhase = healthPayload.index.phase;
+        sessionId = healthPayload.session.id;
         if (indexPhase !== "ready") {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
       }
       expect(indexPhase).toBe("ready");
+      headers = {
+        ...headers,
+        "x-constelix-workspace-session": sessionId,
+      };
 
       const initial = await server.app.inject({
         method: "GET",
@@ -384,6 +399,24 @@ describe("local agent HTTP boundary", () => {
         headers: { host },
       });
       expect(unauthorized.statusCode).toBe(401);
+      const encodedUnauthorized = await server.app.inject({
+        method: "GET",
+        url: "/%61pi/v1/health",
+        headers: { host },
+      });
+      expect(encodedUnauthorized.statusCode).toBe(401);
+      const encodedMutation = await server.app.inject({
+        method: "PUT",
+        url: "/%61pi/v1/files/write",
+        headers: { host, "content-type": "application/json" },
+        payload: {
+          protocolVersion: 1,
+          relativePath: "main.ts",
+          content: "unauthorized\n",
+          expectedContentHash: "invalid",
+        },
+      });
+      expect(encodedMutation.statusCode).toBe(401);
 
       const authorized = await server.app.inject({
         method: "GET",
@@ -392,15 +425,22 @@ describe("local agent HTTP boundary", () => {
       });
       expect(authorized.statusCode).toBe(200);
       expect(authorized.json()).toMatchObject({ protocolVersion: 1, status: "ok" });
+      const scopedHeaders = {
+        host,
+        authorization: "Bearer test-capability",
+        "content-type": "application/json",
+        "x-constelix-workspace-session":
+          (authorized.json() as { session: { id: string } }).session.id,
+      };
+      const {
+        "content-type": _contentType,
+        ...scopedHeadersWithoutContent
+      } = scopedHeaders;
 
       const read = await server.app.inject({
         method: "POST",
         url: "/api/v1/files/read",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: { protocolVersion: 1, relativePath: "main.ts" },
       });
       expect(read.statusCode).toBe(200);
@@ -414,11 +454,7 @@ describe("local agent HTTP boundary", () => {
       const write = await server.app.inject({
         method: "PUT",
         url: "/api/v1/files/write",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           relativePath: "main.ts",
@@ -431,11 +467,7 @@ describe("local agent HTTP boundary", () => {
       const conflict = await server.app.inject({
         method: "PUT",
         url: "/api/v1/files/write",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           relativePath: "main.ts",
@@ -448,11 +480,7 @@ describe("local agent HTTP boundary", () => {
       const traversal = await server.app.inject({
         method: "POST",
         url: "/api/v1/files/read",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: { protocolVersion: 1, relativePath: "../secret" },
       });
       expect(traversal.statusCode).toBe(403);
@@ -460,11 +488,7 @@ describe("local agent HTTP boundary", () => {
       const layout = await server.app.inject({
         method: "PUT",
         url: "/api/v1/layout",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           panels: [{
@@ -484,11 +508,7 @@ describe("local agent HTTP boundary", () => {
       const invalidLayout = await server.app.inject({
         method: "PUT",
         url: "/api/v1/layout",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           panels: [{ id: "legacy-panel", position: { x: 0, y: 0 } }],
@@ -499,11 +519,7 @@ describe("local agent HTTP boundary", () => {
       const unsupportedActScope = await server.app.inject({
         method: "POST",
         url: "/api/v1/act/tasks",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           objective: "Inspect the project.",
@@ -518,11 +534,7 @@ describe("local agent HTTP boundary", () => {
       const actTask = await server.app.inject({
         method: "POST",
         url: "/api/v1/act/tasks",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {
           protocolVersion: 1,
           objective: "Inspect the project without approving the turn.",
@@ -540,10 +552,7 @@ describe("local agent HTTP boundary", () => {
       const bootstrapWithActiveTask = await server.app.inject({
         method: "GET",
         url: "/api/v1/bootstrap",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-        },
+        headers: scopedHeaders,
       });
       expect(bootstrapWithActiveTask.statusCode).toBe(200);
       expect(bootstrapWithActiveTask.json()).toMatchObject({
@@ -566,11 +575,7 @@ describe("local agent HTTP boundary", () => {
       const approvalWithoutConsent = await server.app.inject({
         method: "POST",
         url: `/api/v1/act/tasks/${actTaskId}/approve`,
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: { protocolVersion: 1, taskId: actTaskId },
       });
       expect(approvalWithoutConsent.statusCode).toBe(400);
@@ -578,11 +583,7 @@ describe("local agent HTTP boundary", () => {
       const invalidCancellation = await server.app.inject({
         method: "POST",
         url: `/api/v1/act/tasks/${actTaskId}/cancel`,
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: {},
       });
       expect(invalidCancellation.statusCode).toBe(400);
@@ -590,11 +591,7 @@ describe("local agent HTTP boundary", () => {
       const cancellation = await server.app.inject({
         method: "POST",
         url: `/api/v1/act/tasks/${actTaskId}/cancel`,
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: { protocolVersion: 1 },
       });
       expect(cancellation.statusCode).toBe(200);
@@ -603,11 +600,7 @@ describe("local agent HTTP boundary", () => {
       const terminal = await server.app.inject({
         method: "POST",
         url: "/api/v1/terminals",
-        headers: {
-          host,
-          authorization: "Bearer test-capability",
-          "content-type": "application/json",
-        },
+        headers: scopedHeaders,
         payload: { protocolVersion: 1, cwd: ".", columns: 80, rows: 24 },
       });
       expect(terminal.statusCode).toBe(201);
@@ -623,7 +616,7 @@ describe("local agent HTTP boundary", () => {
         const output = await server.app.inject({
           method: "GET",
           url: `/api/v1/terminals/${terminalId}/output?after=0`,
-          headers: { host, authorization: "Bearer test-capability" },
+          headers: scopedHeaders,
         });
         expect(output.statusCode).toBe(200);
         terminalOutput = output.json() as typeof terminalOutput;
@@ -639,7 +632,7 @@ describe("local agent HTTP boundary", () => {
       const removedTerminal = await server.app.inject({
         method: "DELETE",
         url: `/api/v1/terminals/${terminalId}`,
-        headers: { host, authorization: "Bearer test-capability" },
+        headers: scopedHeadersWithoutContent,
       });
       expect(removedTerminal.statusCode).toBe(204);
 
@@ -653,7 +646,7 @@ describe("local agent HTTP boundary", () => {
         };
       });
       const socket = await server.app.injectWS(
-        "/api/v1/events?token=test-capability",
+        "/%61pi/v1/events?token=test-capability",
         { headers: { host, origin: server.origin } },
         {
           onInit: (candidate) => {
@@ -701,6 +694,10 @@ describe("local agent HTTP boundary", () => {
         { headers: { host, origin: server.origin } },
       )).rejects.toThrow("Unexpected server response: 401");
       await expect(server.app.injectWS(
+        "/%61pi/v1/events",
+        { headers: { host, origin: server.origin } },
+      )).rejects.toThrow("Unexpected server response: 401");
+      await expect(server.app.injectWS(
         "/api/v1/events?token=incorrect-capability",
         { headers: { host, origin: server.origin } },
       )).rejects.toThrow("Unexpected server response: 401");
@@ -717,13 +714,35 @@ describe("local agent HTTP boundary", () => {
         { headers: { host: "attacker.invalid", origin: server.origin } },
       )).rejects.toThrow("Unexpected server response: 403");
 
+      for (const query of [
+        "",
+        "&session=",
+        "&session=00000000-0000-4000-8000-000000000000",
+      ]) {
+        let resolveClose: ((code: number) => void) | undefined;
+        const closed = new Promise<number>((resolve) => {
+          resolveClose = resolve;
+        });
+        const lspSocket = await server.app.injectWS(
+          `/api/v1/lsp?token=test-capability&language=typescript${query}`,
+          { headers: { host, origin: server.origin } },
+          {
+            onInit: (candidate) => {
+              candidate.once("close", (code: number) => resolveClose?.(code));
+            },
+          },
+        );
+        await expect(closed).resolves.toBe(4409);
+        lspSocket.close();
+      }
+
       let indexPhase = "idle";
       for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
         const health = await server.app.inject({
           method: "GET",
           url: "/api/v1/health",
-          headers: { host, authorization: "Bearer test-capability" },
+          headers: scopedHeaders,
         });
         indexPhase = (health.json() as { index: { phase: string } }).index.phase;
       }
@@ -732,7 +751,7 @@ describe("local agent HTTP boundary", () => {
       const bootstrap = await server.app.inject({
         method: "GET",
         url: "/api/v1/bootstrap",
-        headers: { host, authorization: "Bearer test-capability" },
+        headers: scopedHeaders,
       });
       expect(bootstrap.statusCode).toBe(200);
       const payload = bootstrap.json() as {
@@ -803,6 +822,17 @@ describe("local agent HTTP boundary", () => {
         }),
       ).rejects.toThrow("El workspace ya está abierto por otra instancia de Constelix.");
 
+      const firstBootstrap = await first.app.inject({
+        method: "GET",
+        url: "/api/v1/bootstrap",
+        headers: {
+          host: firstHost,
+          authorization: "Bearer restart-capability",
+        },
+      });
+      const firstSessionId =
+        (firstBootstrap.json() as { session: { id: string } }).session.id;
+
       const saved = await first.app.inject({
         method: "PUT",
         url: "/api/v1/layout",
@@ -810,6 +840,7 @@ describe("local agent HTTP boundary", () => {
           host: firstHost,
           authorization: "Bearer restart-capability",
           "content-type": "application/json",
+          "x-constelix-workspace-session": firstSessionId,
         },
         payload: { protocolVersion: 1, panels: [panel] },
       });

@@ -1,13 +1,15 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { chmod, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import { ZodError } from "zod";
 import {
   ActApproveRequestSchema,
   ActTaskRequestSchema,
@@ -17,34 +19,42 @@ import {
   GraphQuerySchema,
   LayoutWriteRequestSchema,
   LlmConfigurationUpdateSchema,
+  LspLanguageSchema,
   PROTOCOL_VERSION,
   ProtocolOnlyRequestSchema,
   TerminalCreateRequestSchema,
+  WorkspaceOpenRequestSchema,
+  WorkspaceSessionSchema,
   type ActTask,
+  type WorkspaceLockConflict,
 } from "@constelix/contracts";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from "fastify";
+import { ZodError } from "zod";
+
 import {
-  AskService,
   OpenAIUnavailableError,
   type AskServiceOptions,
 } from "./ask.js";
 import {
-  CodexManager,
   CodexUnavailableError,
   type CodexManagerOptions,
 } from "./codex.js";
-import { ConstelixDatabase } from "./database.js";
-import { EventBus } from "./events.js";
 import {
   FileConflictError,
   FileTooLargeError,
   readWorkspaceTextFile,
   writeWorkspaceTextFile,
 } from "./files.js";
-import { WorkspaceIndexer } from "./indexer.js";
+import { LlmConfigurationError } from "./llm-config.js";
 import {
-  LlmConfigurationError,
-  LlmConfigurationStore,
-} from "./llm-config.js";
+  LspProtocolError,
+  LspSessionLimitError,
+  LspUnavailableError,
+} from "./lsp.js";
 import {
   detectSupportedLanguage,
   type ScanWorkspaceOptions,
@@ -54,18 +64,30 @@ import {
   WorkspaceIdentityError,
   WorkspaceReadOnlyError,
   WorkspaceValidationError,
-  assertWorkspaceIdentity,
   createWorkspaceId as createCanonicalWorkspaceId,
-  inspectWorkspace,
   redactLocalPaths,
   redactSecrets,
   summarizeWorkspacePath,
-  type WorkspaceDescriptor,
 } from "./security.js";
 import {
   ReadOnlyTerminalUnavailableError,
-  TerminalManager,
 } from "./terminals.js";
+import {
+  WorkspaceBrowserError,
+} from "./workspace-browser.js";
+import {
+  RecentWorkspaceNotFoundError,
+  WorkspaceOpenLockConflictError,
+  WorkspaceRuntimeManager,
+  WorkspaceSessionChangedError,
+  WorkspaceSwitchInProgressError,
+} from "./workspace-manager.js";
+import type { WorkspaceRuntime } from "./workspace-runtime.js";
+import {
+  WorkspaceLeaseLostError,
+  WorkspaceLockExpectedOwnerError,
+  WorkspaceLockGuardTimeoutError,
+} from "./workspace-lock.js";
 
 export interface AgentServerOptions {
   workspaceRoot: string;
@@ -79,6 +101,7 @@ export interface AgentServerOptions {
    */
   storageDirectory?: string;
   databasePath?: string;
+  globalDatabasePath?: string;
   webDistPath?: string;
   devOrigin?: string;
   askOptions?: AskServiceOptions;
@@ -96,476 +119,602 @@ export interface RunningAgentServer {
   close(): Promise<void>;
 }
 
-export async function startAgentServer(options: AgentServerOptions): Promise<RunningAgentServer> {
-  const workspace = await inspectWorkspace(options.workspaceRoot, {
-    forceReadOnly: options.readOnly,
+export async function startAgentServer(
+  options: AgentServerOptions,
+): Promise<RunningAgentServer> {
+  const capabilityToken =
+    options.capabilityToken ?? randomBytes(32).toString("base64url");
+  const manager = await WorkspaceRuntimeManager.create({
+    workspaceRoot: options.workspaceRoot,
+    ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+    ...(options.storageDirectory
+      ? { storageDirectory: options.storageDirectory }
+      : {}),
+    ...(options.databasePath ? { databasePath: options.databasePath } : {}),
+    ...(options.globalDatabasePath
+      ? { globalDatabasePath: options.globalDatabasePath }
+      : {}),
+    ...(options.askOptions ? { askOptions: options.askOptions } : {}),
+    ...(options.codexOptions ? { codexOptions: options.codexOptions } : {}),
+    ...(options.indexerScanOptions
+      ? { indexerScanOptions: options.indexerScanOptions }
+      : {}),
+    agentVersion: "v0.0.5",
   });
-  const workspaceRoot = workspace.canonicalRoot;
-  const workspaceId = workspace.workspaceId;
-  const capabilityToken = options.capabilityToken ?? randomBytes(32).toString("base64url");
-  const storageDirectory =
-    options.storageDirectory ??
-    resolve(
-      homedir(),
-      "Library",
-      "Application Support",
-      "Constelix",
-      "workspaces",
-      workspaceId,
-    );
-  assertStatePathOutsideWorkspace(workspaceRoot, storageDirectory, "storageDirectory");
-  if (options.databasePath && options.databasePath !== ":memory:") {
-    assertStatePathOutsideWorkspace(workspaceRoot, options.databasePath, "databasePath");
-  }
-  await mkdir(storageDirectory, { recursive: true, mode: 0o700 });
-  await chmod(storageDirectory, 0o700);
-  const lock = await WorkspaceLock.acquire(
-    resolve(storageDirectory, "agent.lock"),
-    workspaceId,
-  );
-  let database: ConstelixDatabase | undefined;
-  let events: EventBus | undefined;
-  let indexer: WorkspaceIndexer | undefined;
-  let terminals: TerminalManager | undefined;
-  let ask: AskService | undefined;
-  let llmConfigurationStore: LlmConfigurationStore | undefined;
-  let codex: CodexManager | undefined;
-  let app: FastifyInstance | undefined;
-  let identityMonitor: NodeJS.Timeout | undefined;
-  try {
-    database = new ConstelixDatabase(
-      options.databasePath ?? resolve(storageDirectory, "constelix.sqlite"),
-    );
-    database.upsertWorkspace(workspaceId, workspaceRoot);
-    events = new EventBus((payload) => sanitizePublicPayload(payload, workspaceRoot));
-    indexer = new WorkspaceIndexer(workspaceId, workspace, database, events, {
-      assertWorkspace: () => assertWorkspaceIdentity(workspace),
-      ...(options.indexerScanOptions === undefined
-        ? {}
-        : { scanOptions: options.indexerScanOptions }),
-    });
-    terminals = new TerminalManager(workspace, events);
-    llmConfigurationStore = new LlmConfigurationStore(storageDirectory);
-    const llmConfiguration = await llmConfigurationStore.load();
-    ask = new AskService(
-      workspaceId,
-      workspace,
-      indexer.graph,
-      database,
-      events,
-      {
-        configuration: llmConfiguration,
-        ...options.askOptions,
-      },
-    );
-    if (!workspace.readOnly) {
-      codex = new CodexManager(
-        workspaceId,
-        workspace,
-        events,
-        database,
-        options.codexOptions,
-      );
-      void codex.availability();
-    }
-    app = Fastify({
-      logger: false,
-      bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
-    });
-  } catch (error) {
-    await cleanupAgentResources({
-      app,
-      ask,
-      codex,
-      terminals,
-      indexer,
-      events,
-      database,
-      lock,
-    }).catch(() => undefined);
-    throw error;
-  }
-
+  const events = manager.globalEvents;
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
+  });
+  let closing = false;
   let cleanupPromise: Promise<void> | undefined;
+
   const cleanup = (): Promise<void> => {
-    if (cleanupPromise) return cleanupPromise;
-    if (identityMonitor) {
-      clearInterval(identityMonitor);
-      identityMonitor = undefined;
-    }
-    cleanupPromise = cleanupAgentResources({
-      app,
-      ask,
-      codex,
-      terminals,
-      indexer,
-      events,
-      database,
-      lock,
-    });
+    cleanupPromise ??= closeServerResources();
     return cleanupPromise;
+  };
+  const closeServerResources = async (): Promise<void> => {
+    closing = true;
+    let firstError: unknown;
+    const attempt = async (
+      action: () => void | Promise<void>,
+    ): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        firstError ??= error;
+      }
+    };
+    events.close();
+    await attempt(() => manager.close());
+    await attempt(() => app.close());
+    if (firstError !== undefined) throw firstError;
   };
 
   try {
     await app.register(fastifyWebsocket, {
-      options: { maxPayload: 512 * 1024, perMessageDeflate: false },
+      options: { maxPayload: 1024 * 1024, perMessageDeflate: false },
     });
 
-  let boundOrigin: string | undefined;
-  const allowedOrigins = new Set<string>();
-  if (options.dev) {
-    allowedOrigins.add(options.devOrigin ?? "http://127.0.0.1:5173");
-    allowedOrigins.add("http://localhost:5173");
-  }
+    let boundOrigin: string | undefined;
+    const allowedOrigins = new Set<string>();
+    if (options.dev) {
+      allowedOrigins.add(options.devOrigin ?? "http://127.0.0.1:5173");
+      allowedOrigins.add("http://localhost:5173");
+    }
 
-  app.addHook("onRequest", async (request, reply) => {
-    if (!request.url.startsWith("/api/")) return;
-    const pathname = requestPathname(request.url);
-    const origin = request.headers.origin;
-    if (origin && !allowedOrigins.has(origin) && origin !== boundOrigin) {
-      return reply.code(403).send(errorBody("INVALID_ORIGIN", "Request origin is not allowed."));
-    }
-    if (boundOrigin && request.headers.host !== new URL(boundOrigin).host) {
-      return reply.code(403).send(errorBody("INVALID_HOST", "Request host is not allowed."));
-    }
-    if (request.method === "OPTIONS") {
+    app.addHook("onRequest", async (request, reply) => {
+      const pathname = requestPathname(request.url);
+      if (!isApiRequest(request, pathname)) return;
+      if (closing) {
+        return reply
+          .code(503)
+          .send(errorBody("AGENT_CLOSING", "El agente local se está cerrando."));
+      }
+      const origin = request.headers.origin;
+      if (
+        origin &&
+        !allowedOrigins.has(origin) &&
+        origin !== boundOrigin
+      ) {
+        return reply
+          .code(403)
+          .send(errorBody("INVALID_ORIGIN", "Request origin is not allowed."));
+      }
+      if (
+        boundOrigin &&
+        request.headers.host !== new URL(boundOrigin).host
+      ) {
+        return reply
+          .code(403)
+          .send(errorBody("INVALID_HOST", "Request host is not allowed."));
+      }
+      if (request.method === "OPTIONS") {
+        if (origin && allowedOrigins.has(origin)) addCors(reply, origin);
+        return reply.code(204).send();
+      }
+      if (pathname === "/api/v1/events" || pathname === "/api/v1/lsp") {
+        if (
+          !origin ||
+          (!allowedOrigins.has(origin) && origin !== boundOrigin)
+        ) {
+          return reply.code(403).send(
+            errorBody(
+              "INVALID_ORIGIN",
+              "A valid WebSocket origin is required.",
+            ),
+          );
+        }
+        if (!hasWebSocketCapability(request.url, capabilityToken)) {
+          return reply.code(401).send(
+            errorBody(
+              "UNAUTHORIZED",
+              "A valid WebSocket capability token is required.",
+            ),
+          );
+        }
+        await manager.current.assertHealthy();
+        return;
+      }
+      if (!hasCapability(request, capabilityToken)) {
+        return reply.code(401).send(
+          errorBody("UNAUTHORIZED", "A valid capability token is required."),
+        );
+      }
+      const requestedSession = requestSessionId(request);
+      if (
+        !isWorkspaceSessionOptionalRequest(pathname, request.method) &&
+        !WorkspaceSessionSchema.shape.id.safeParse(requestedSession).success
+      ) {
+        throw new WorkspaceSessionChangedError(manager.current.session);
+      }
+      const runtime = manager.capture(requestedSession);
+      if (!isGlobalWorkspaceControlRequest(pathname, request.method)) {
+        await runtime.assertHealthy();
+      }
+    });
+
+    app.addHook("onSend", async (request, reply, payload) => {
+      const origin = request.headers.origin;
       if (origin && allowedOrigins.has(origin)) addCors(reply, origin);
-      return reply.code(204).send();
-    }
-    if (pathname === "/api/v1/events") {
-      if (!origin || (!allowedOrigins.has(origin) && origin !== boundOrigin)) {
-        return reply.code(403).send(errorBody("INVALID_ORIGIN", "A valid WebSocket origin is required."));
-      }
-      if (!hasWebSocketCapability(request.url, capabilityToken)) {
-        return reply.code(401).send(errorBody("UNAUTHORIZED", "A valid WebSocket capability token is required."));
-      }
-      await assertWorkspaceIdentity(workspace);
-      return;
-    }
-    if (!hasCapability(request, capabilityToken)) {
-      return reply.code(401).send(errorBody("UNAUTHORIZED", "A valid capability token is required."));
-    }
-    await assertWorkspaceIdentity(workspace);
-  });
-
-  app.addHook("onSend", async (request, reply, payload) => {
-    const origin = request.headers.origin;
-    if (origin && allowedOrigins.has(origin)) addCors(reply, origin);
-    reply.header("Cache-Control", request.url.startsWith("/api/") ? "no-store" : "no-cache");
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("Referrer-Policy", "no-referrer");
-    reply.header("Cross-Origin-Resource-Policy", "same-origin");
-    return payload;
-  });
-
-  app.get("/api/v1/events", { websocket: true }, (socket) => {
-    events.attachAuthenticated(socket as never);
-    void assertWorkspaceIdentity(workspace).catch(() => {
-      socket.close(4409, "Workspace root changed");
-    });
-  });
-
-  app.get("/api/v1/health", async () => ({
-    protocolVersion: PROTOCOL_VERSION,
-    status: "ok",
-    workspaceId,
-    index: indexer.status,
-  }));
-
-  app.get("/api/v1/bootstrap", async () => {
-    const graph = indexer.graph.snapshot(500);
-    const savedLayout = database.loadLayout(workspaceId) ?? { revision: 0, panels: [] };
-    const codexAvailability = codex?.peekAvailability() ?? {
-      available: false,
-      checking: false,
-      reason: "Actuar está deshabilitado en Modo Lectura.",
-    };
-    const activeActTask = codex?.activeTask ?? null;
-    const total = indexer.status.total;
-    return {
-      protocolVersion: PROTOCOL_VERSION,
-      workspace: {
-        id: workspaceId,
-        name: basename(workspaceRoot),
-        rootPath: summarizeWorkspacePath(workspaceRoot),
-        mode: workspace.mode,
-        readOnly: workspace.readOnly,
-      },
-      summary: indexer.status.summary,
-      graph,
-      layout: savedLayout.panels,
-      layoutState: savedLayout,
-      conversation: database.loadAiMessages(`${workspaceId}:main`, workspaceId),
-      activeAskTurnIds: ask.activeTurnIds,
-      activeActTask: activeActTask
-        ? toPublicActTask(activeActTask, workspaceRoot)
-        : null,
-      index: {
-        ...indexer.status,
-        progress: total === 0 ? 0 : indexer.status.completed / total,
-        filesIndexed: indexer.indexedFileCount,
-        symbolsIndexed: indexer.graph.nodeCount,
-        edgesIndexed: indexer.graph.edgeCount,
-      },
-      terminals: terminals.list(),
-      capabilities: {
-        ask: true,
-        askMode: ask.mode,
-        askProviderStatus: ask.providerStatus,
-        askNotice: ask.notice,
-        llm: ask.llmConfiguration,
-        act: !workspace.readOnly && codexAvailability.available,
-        terminal: true,
-        codexReason: codexAvailability.reason,
-        codexChecking: codexAvailability.checking,
-        codexVersion: codexAvailability.version,
-        model: ask.model,
-        languages: ["javascript", "typescript", "python"],
-      },
-    };
-  });
-
-  app.get("/api/v1/settings/llm", async () => ask.llmConfiguration);
-
-  app.put("/api/v1/settings/llm", async (request) => {
-    const input = LlmConfigurationUpdateSchema.parse(request.body);
-    if (!llmConfigurationStore) {
-      throw new LlmConfigurationError("El almacenamiento de configuración LLM no está disponible.");
-    }
-    const configuration = await llmConfigurationStore.update(input);
-    const publicConfiguration = ask.reconfigure(configuration);
-    database.audit(workspaceId, "settings", "llm.update", "success", {
-      baseUrl: publicConfiguration.baseUrl,
-      model: publicConfiguration.model,
-      providerKind: publicConfiguration.providerKind,
-      apiKeyAction: input.apiKey.action,
-      apiKeyConfigured: publicConfiguration.apiKeyConfigured,
-    });
-    return publicConfiguration;
-  });
-
-  app.post("/api/v1/graph/query", async (request) => {
-    const query = GraphQuerySchema.parse(request.body);
-    return indexer.query(query);
-  });
-
-  app.post("/api/v1/files/read", async (request) => {
-    const input = FileReadRequestSchema.parse(request.body);
-    const file = await readWorkspaceTextFile(workspace, input.relativePath);
-    return {
-      protocolVersion: PROTOCOL_VERSION,
-      relativePath: input.relativePath,
-      content: file.content,
-      contentHash: file.contentHash,
-      language: detectSupportedLanguage(input.relativePath) ?? "unknown",
-      size: file.sizeBytes,
-      modifiedAt: new Date(file.mtimeMs).toISOString(),
-    };
-  });
-
-  app.put("/api/v1/files/write", async (request) => {
-    const input = FileWriteRequestSchema.parse(request.body);
-    const file = await writeWorkspaceTextFile(workspace, {
-      relativePath: input.relativePath,
-      content: input.content,
-      expectedContentHash: input.expectedContentHash,
-    });
-    database.audit(workspaceId, "file", "write", "success", {
-      relativePath: input.relativePath,
-      sizeBytes: file.sizeBytes,
-    });
-    indexer.notifyPathChanged(input.relativePath, 25);
-    return {
-      protocolVersion: PROTOCOL_VERSION,
-      relativePath: input.relativePath,
-      contentHash: file.contentHash,
-      modifiedAt: new Date(file.mtimeMs).toISOString(),
-      graphRevision: indexer.graph.revision,
-    };
-  });
-
-  app.put("/api/v1/layout", async (request) => {
-    const input = LayoutWriteRequestSchema.parse(request.body);
-    const revision = input.revision ?? indexer.graph.revision;
-    const saved = database.saveLayout(workspaceId, revision, input.panels);
-    return { protocolVersion: PROTOCOL_VERSION, saved, revision };
-  });
-
-  app.post("/api/v1/terminals", async (request, reply) => {
-    const input = TerminalCreateRequestSchema.parse(request.body);
-    const terminal = await terminals.create({
-      cwd: input.cwd,
-      cols: input.columns,
-      rows: input.rows,
-      ...(input.shell === undefined ? {} : { shell: input.shell }),
-      ...(input.panelId === undefined ? {} : { panelId: input.panelId }),
-    });
-    database.audit(workspaceId, "terminal", "create", "success", { cwd: input.cwd ?? "." });
-    return reply.code(201).send({ protocolVersion: PROTOCOL_VERSION, ...terminal });
-  });
-
-  app.get<{
-    Params: { id: string };
-    Querystring: { after?: string };
-  }>("/api/v1/terminals/:id/output", async (request, reply) => {
-    const parsedAfter = Number.parseInt(request.query.after ?? "0", 10);
-    const afterSequence = Number.isFinite(parsedAfter) && parsedAfter >= 0 ? parsedAfter : 0;
-    const output = terminals.readOutput(request.params.id, afterSequence);
-    if (!output) return reply.code(404).send(errorBody("NOT_FOUND", "Terminal not found."));
-    return reply.send({
-      protocolVersion: PROTOCOL_VERSION,
-      terminalId: request.params.id,
-      ...output,
-    });
-  });
-
-  app.delete<{ Params: { id: string } }>("/api/v1/terminals/:id", async (request, reply) => {
-    const removed = terminals.remove(request.params.id);
-    if (!removed) return reply.code(404).send(errorBody("NOT_FOUND", "Terminal not found."));
-    return reply.code(204).send();
-  });
-
-  app.post<{ Params: { id: string } }>(
-    "/api/v1/ask/threads/:id/turns",
-    async (request, reply) => {
-      const input = AskTurnRequestSchema.parse(request.body);
-      if (input.threadId !== request.params.id) {
-        return reply.code(400).send(errorBody("THREAD_MISMATCH", "Thread id does not match URL."));
-      }
-      if (!input.threadId.startsWith(`${workspaceId}:`)) {
-        return reply.code(403).send(
-          errorBody(
-            "THREAD_WORKSPACE_MISMATCH",
-            "The Ask thread belongs to a different workspace.",
-            false,
-          ),
-        );
-      }
-      return reply
-        .code(202)
-        .send(
-          ask.startTurn(
-            request.params.id,
-            input.prompt,
-            input.requestId,
-            input.selectedNodeIds,
-          ),
-        );
-    },
-  );
-
-  app.post("/api/v1/act/tasks", async (request, reply) => {
-    if (workspace.readOnly) throw new WorkspaceReadOnlyError();
-    const input = ActTaskRequestSchema.parse(request.body);
-    if (!isSupportedActScope(input.capabilities)) {
-      return reply.code(400).send(
-        errorBody(
-          "UNSUPPORTED_ACT_SCOPE",
-          "The MVP supports only the explicit read, write, and command capability set.",
-        ),
+      reply.header(
+        "Cache-Control",
+        isApiRequest(request) ? "no-store" : "no-cache",
       );
-    }
-    if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
-    const task = codex.createTask(input.objective, input.capabilities);
-    return reply.code(201).send(toPublicActTask(task, workspaceRoot));
-  });
-
-  app.post<{ Params: { id: string } }>(
-    "/api/v1/act/tasks/:id/approve",
-    async (request, reply) => {
-      if (workspace.readOnly) throw new WorkspaceReadOnlyError();
-      const input = ActApproveRequestSchema.parse(request.body);
-      if (input.taskId !== request.params.id) {
-        return reply.code(400).send(errorBody("TASK_MISMATCH", "Task id does not match URL."));
-      }
-      if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
-      return toPublicActTask(
-        await codex.approve(request.params.id),
-        workspaceRoot,
-      );
-    },
-  );
-
-  app.post<{ Params: { id: string } }>(
-    "/api/v1/act/tasks/:id/cancel",
-    async (request) => {
-      if (workspace.readOnly) throw new WorkspaceReadOnlyError();
-      ProtocolOnlyRequestSchema.parse(request.body);
-      if (!codex) throw new CodexUnavailableError("Codex is unavailable.");
-      return toPublicActTask(
-        await codex.cancel(request.params.id),
-        workspaceRoot,
-      );
-    },
-  );
-
-  app.setErrorHandler((error, request, reply) => {
-    const normalizedError = error instanceof Error ? error : new Error("Unknown agent error.");
-    const mapped = mapError(normalizedError, workspaceRoot);
-    database.audit(workspaceId, "http", `${request.method} ${request.routeOptions.url}`, "failed", {
-      code: mapped.code,
+      reply.header("X-Content-Type-Options", "nosniff");
+      reply.header("Referrer-Policy", "no-referrer");
+      reply.header("Cross-Origin-Resource-Policy", "same-origin");
+      return payload;
     });
-    const safeMessage = redactLocalPaths(
-      redactSecrets(mapped.message),
-      workspaceRoot,
+
+    app.get("/api/v1/events", { websocket: true }, (socket) => {
+      events.attachAuthenticated(socket as never);
+      void manager.current.assertHealthy().catch(() => {
+        socket.close(4409, "Workspace isolation changed");
+      });
+    });
+
+    app.get<{
+      Querystring: { language?: string; session?: string };
+    }>("/api/v1/lsp", { websocket: true }, (socket, request) => {
+      const language = LspLanguageSchema.safeParse(request.query.language);
+      if (!language.success) {
+        socket.close(4400, "Unsupported language");
+        return;
+      }
+      const session = WorkspaceSessionSchema.shape.id.safeParse(
+        request.query.session,
+      );
+      if (!session.success) {
+        socket.close(4409, "Workspace session required");
+        return;
+      }
+      let runtime: WorkspaceRuntime;
+      try {
+        runtime = manager.capture(session.data);
+      } catch {
+        socket.close(4409, "Workspace session changed");
+        return;
+      }
+      void runtime.lsp
+        .attach(socket as never, language.data)
+        .catch((error: unknown) => {
+          const code =
+            error instanceof LspSessionLimitError ? 4429 : 4410;
+          socket.close(code, safeSocketReason(error));
+        });
+    });
+
+    app.get("/api/v1/health", async (request) => {
+      const runtime = captureRequest(manager, request);
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        status: "ok",
+        workspaceId: runtime.workspaceId,
+        session: runtime.session,
+        index: runtime.indexer.status,
+      };
+    });
+
+    app.get("/api/v1/bootstrap", async (request) =>
+      buildBootstrap(captureRequest(manager, request))
     );
-    void reply
-      .code(mapped.status)
-      .send(errorBody(mapped.code, safeMessage, mapped.recoverable));
-  });
 
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const bundledWebDist = resolve(moduleDirectory, "web");
-  const monorepoWebDist = resolve(moduleDirectory, "../../web/dist");
-  const defaultWebDist = existsSync(resolve(bundledWebDist, "index.html"))
-    ? bundledWebDist
-    : monorepoWebDist;
-  const webDist = options.webDistPath ?? defaultWebDist;
-  if (existsSync(resolve(webDist, "index.html"))) {
-    await app.register(fastifyStatic, {
-      root: webDist,
-      prefix: "/",
-      wildcard: false,
+    app.get("/api/v1/workspaces", async (request) => {
+      const runtime = captureRequest(manager, request);
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        activeSession: runtime.session,
+        recents: await manager.listRecentWorkspaces(),
+      };
     });
-    app.setNotFoundHandler((request, reply) => {
-      if (request.url.startsWith("/api/")) {
-        return reply.code(404).send(errorBody("NOT_FOUND", "API route not found."));
+
+    app.post("/api/v1/workspaces/open", async (request) => {
+      const input = WorkspaceOpenRequestSchema.parse(request.body);
+      const headerSession = requestSessionId(request);
+      if (headerSession && headerSession !== input.expectedSessionId) {
+        throw new WorkspaceSessionChangedError(manager.current.session);
       }
-      return (reply as FastifyReply & { sendFile(path: string): FastifyReply }).sendFile("index.html");
+      const runtime = await manager.open({
+        target: input.target,
+        expectedSessionId: input.expectedSessionId,
+        ...(input.readOnly === undefined
+          ? {}
+          : { readOnly: input.readOnly }),
+        ...(input.lockResolution === undefined
+          ? {}
+          : { lockResolution: input.lockResolution }),
+      });
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        session: runtime.session,
+        bootstrap: buildBootstrap(runtime),
+      };
     });
-  } else {
-    app.get("/", async () => ({
-      name: "Constelix local agent",
-      status: "ready",
-      message: options.dev ? "Use the Vite development server on port 5173." : "Web assets are not built.",
-    }));
-  }
 
-    await app.listen({ host: "127.0.0.1", port: options.port ?? (options.dev ? 4321 : 0) });
+    app.get<{
+      Querystring: {
+        path?: string;
+        showHidden?: string;
+        cursor?: string;
+        limit?: string;
+      };
+    }>("/api/v1/fs/browse", async (request) => {
+      captureRequest(manager, request);
+      const showHidden = parseBooleanQuery(
+        request.query.showHidden,
+        "showHidden",
+      );
+      const limit = parsePositiveIntegerQuery(request.query.limit, "limit");
+      const page = await manager.browse({
+        path: request.query.path || homedir(),
+        ...(showHidden === undefined ? {} : { showHidden }),
+        ...(request.query.cursor ? { cursor: request.query.cursor } : {}),
+        ...(limit === undefined ? {} : { limit }),
+      });
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        path: page.path,
+        parentPath: page.parentPath ?? null,
+        entries: page.entries
+          .filter((entry) => entry.readable)
+          .map((entry) => ({
+            name: entry.name,
+            path: entry.path,
+            symlink: entry.symbolicLink,
+          })),
+        ...(page.nextCursor ? { cursor: page.nextCursor } : {}),
+        truncated: page.truncated,
+      };
+    });
+
+    app.get("/api/v1/settings/llm", async (request) =>
+      captureRequest(manager, request).ask.llmConfiguration
+    );
+
+    app.put("/api/v1/settings/llm", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = LlmConfigurationUpdateSchema.parse(request.body);
+      const configuration =
+        await runtime.llmConfigurationStore.update(input);
+      const publicConfiguration = runtime.ask.reconfigure(configuration);
+      runtime.database.audit(
+        runtime.workspaceId,
+        "settings",
+        "llm.update",
+        "success",
+        {
+          baseUrl: publicConfiguration.baseUrl,
+          model: publicConfiguration.model,
+          providerKind: publicConfiguration.providerKind,
+          apiKeyAction: input.apiKey.action,
+          apiKeyConfigured: publicConfiguration.apiKeyConfigured,
+        },
+      );
+      return publicConfiguration;
+    });
+
+    app.post("/api/v1/graph/query", async (request) => {
+      const runtime = captureRequest(manager, request);
+      return runtime.indexer.query(GraphQuerySchema.parse(request.body));
+    });
+
+    app.post("/api/v1/files/read", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = FileReadRequestSchema.parse(request.body);
+      const file = await readWorkspaceTextFile(
+        runtime.workspace,
+        input.relativePath,
+      );
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        relativePath: input.relativePath,
+        content: file.content,
+        contentHash: file.contentHash,
+        language: detectSupportedLanguage(input.relativePath) ?? "unknown",
+        size: file.sizeBytes,
+        modifiedAt: new Date(file.mtimeMs).toISOString(),
+      };
+    });
+
+    app.put("/api/v1/files/write", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = FileWriteRequestSchema.parse(request.body);
+      const file = await writeWorkspaceTextFile(runtime.workspace, {
+        relativePath: input.relativePath,
+        content: input.content,
+        expectedContentHash: input.expectedContentHash,
+      });
+      runtime.database.audit(
+        runtime.workspaceId,
+        "file",
+        "write",
+        "success",
+        {
+          relativePath: input.relativePath,
+          sizeBytes: file.sizeBytes,
+        },
+      );
+      runtime.indexer.notifyPathChanged(input.relativePath, 25);
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        relativePath: input.relativePath,
+        contentHash: file.contentHash,
+        modifiedAt: new Date(file.mtimeMs).toISOString(),
+        graphRevision: runtime.indexer.graph.revision,
+      };
+    });
+
+    app.put("/api/v1/layout", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = LayoutWriteRequestSchema.parse(request.body);
+      const revision =
+        input.revision ?? runtime.indexer.graph.revision;
+      const saved = runtime.database.saveLayout(
+        runtime.workspaceId,
+        revision,
+        input.panels,
+      );
+      return { protocolVersion: PROTOCOL_VERSION, saved, revision };
+    });
+
+    app.post("/api/v1/terminals", async (request, reply) => {
+      const runtime = captureRequest(manager, request);
+      const input = TerminalCreateRequestSchema.parse(request.body);
+      const terminal = await runtime.terminals.create({
+        cwd: input.cwd,
+        cols: input.columns,
+        rows: input.rows,
+        ...(input.shell === undefined ? {} : { shell: input.shell }),
+        ...(input.panelId === undefined ? {} : { panelId: input.panelId }),
+      });
+      runtime.database.audit(
+        runtime.workspaceId,
+        "terminal",
+        "create",
+        "success",
+        { cwd: input.cwd ?? "." },
+      );
+      return reply
+        .code(201)
+        .send({ protocolVersion: PROTOCOL_VERSION, ...terminal });
+    });
+
+    app.get<{
+      Params: { id: string };
+      Querystring: { after?: string };
+    }>("/api/v1/terminals/:id/output", async (request, reply) => {
+      const runtime = captureRequest(manager, request);
+      const parsedAfter = Number.parseInt(request.query.after ?? "0", 10);
+      const afterSequence =
+        Number.isFinite(parsedAfter) && parsedAfter >= 0 ? parsedAfter : 0;
+      const output = runtime.terminals.readOutput(
+        request.params.id,
+        afterSequence,
+      );
+      if (!output) {
+        return reply
+          .code(404)
+          .send(errorBody("NOT_FOUND", "Terminal not found."));
+      }
+      return reply.send({
+        protocolVersion: PROTOCOL_VERSION,
+        terminalId: request.params.id,
+        ...output,
+      });
+    });
+
+    app.delete<{ Params: { id: string } }>(
+      "/api/v1/terminals/:id",
+      async (request, reply) => {
+        const runtime = captureRequest(manager, request);
+        const removed = runtime.terminals.remove(request.params.id);
+        if (!removed) {
+          return reply
+            .code(404)
+            .send(errorBody("NOT_FOUND", "Terminal not found."));
+        }
+        return reply.code(204).send();
+      },
+    );
+
+    app.post<{ Params: { id: string } }>(
+      "/api/v1/ask/threads/:id/turns",
+      async (request, reply) => {
+        const runtime = captureRequest(manager, request);
+        const input = AskTurnRequestSchema.parse(request.body);
+        if (input.threadId !== request.params.id) {
+          return reply.code(400).send(
+            errorBody("THREAD_MISMATCH", "Thread id does not match URL."),
+          );
+        }
+        if (!input.threadId.startsWith(`${runtime.workspaceId}:`)) {
+          return reply.code(403).send(
+            errorBody(
+              "THREAD_WORKSPACE_MISMATCH",
+              "The Ask thread belongs to a different workspace.",
+              false,
+            ),
+          );
+        }
+        return reply
+          .code(202)
+          .send(
+            runtime.ask.startTurn(
+              request.params.id,
+              input.prompt,
+              input.requestId,
+              input.selectedNodeIds,
+            ),
+          );
+      },
+    );
+
+    app.post("/api/v1/act/tasks", async (request, reply) => {
+      const runtime = captureRequest(manager, request);
+      if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+      const input = ActTaskRequestSchema.parse(request.body);
+      if (!isSupportedActScope(input.capabilities)) {
+        return reply.code(400).send(
+          errorBody(
+            "UNSUPPORTED_ACT_SCOPE",
+            "The MVP supports only the explicit read, write, and command capability set.",
+          ),
+        );
+      }
+      if (!runtime.codex) {
+        throw new CodexUnavailableError("Codex is unavailable.");
+      }
+      const task = runtime.codex.createTask(
+        input.objective,
+        input.capabilities,
+      );
+      return reply
+        .code(201)
+        .send(toPublicActTask(task, runtime.workspaceRoot));
+    });
+
+    app.post<{ Params: { id: string } }>(
+      "/api/v1/act/tasks/:id/approve",
+      async (request, reply) => {
+        const runtime = captureRequest(manager, request);
+        if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+        const input = ActApproveRequestSchema.parse(request.body);
+        if (input.taskId !== request.params.id) {
+          return reply.code(400).send(
+            errorBody("TASK_MISMATCH", "Task id does not match URL."),
+          );
+        }
+        if (!runtime.codex) {
+          throw new CodexUnavailableError("Codex is unavailable.");
+        }
+        return toPublicActTask(
+          await runtime.codex.approve(request.params.id),
+          runtime.workspaceRoot,
+        );
+      },
+    );
+
+    app.post<{ Params: { id: string } }>(
+      "/api/v1/act/tasks/:id/cancel",
+      async (request) => {
+        const runtime = captureRequest(manager, request);
+        if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+        ProtocolOnlyRequestSchema.parse(request.body);
+        if (!runtime.codex) {
+          throw new CodexUnavailableError("Codex is unavailable.");
+        }
+        return toPublicActTask(
+          await runtime.codex.cancel(request.params.id),
+          runtime.workspaceRoot,
+        );
+      },
+    );
+
+    app.setErrorHandler((error, request, reply) => {
+      const normalized =
+        error instanceof Error ? error : new Error("Unknown agent error.");
+      const runtime = manager.current;
+      const mapped = mapError(normalized);
+      try {
+        runtime.database.audit(
+          runtime.workspaceId,
+          "http",
+          `${request.method} ${request.routeOptions.url}`,
+          "failed",
+          { code: mapped.code },
+        );
+      } catch {
+        // Error reporting must remain available during runtime teardown.
+      }
+      const safeMessage = redactLocalPaths(
+        redactSecrets(mapped.message),
+        runtime.workspaceRoot,
+      );
+      void reply
+        .code(mapped.status)
+        .send(
+          errorBody(
+            mapped.code,
+            safeMessage,
+            mapped.recoverable,
+            mapped.details,
+          ),
+        );
+    });
+
+    const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+    const bundledWebDist = resolve(moduleDirectory, "web");
+    const monorepoWebDist = resolve(moduleDirectory, "../../web/dist");
+    const defaultWebDist = existsSync(resolve(bundledWebDist, "index.html"))
+      ? bundledWebDist
+      : monorepoWebDist;
+    const webDist = options.webDistPath ?? defaultWebDist;
+    if (existsSync(resolve(webDist, "index.html"))) {
+      await app.register(fastifyStatic, {
+        root: webDist,
+        prefix: "/",
+        wildcard: false,
+      });
+      app.setNotFoundHandler((request, reply) => {
+        if (isApiRequest(request)) {
+          return reply
+            .code(404)
+            .send(errorBody("NOT_FOUND", "API route not found."));
+        }
+        return (
+          reply as FastifyReply & { sendFile(path: string): FastifyReply }
+        ).sendFile("index.html");
+      });
+    } else {
+      app.get("/", async () => ({
+        name: "Constelix local agent",
+        status: "ready",
+        message: options.dev
+          ? "Use the Vite development server on port 5173."
+          : "Web assets are not built.",
+      }));
+    }
+
+    await app.listen({
+      host: "127.0.0.1",
+      port: options.port ?? (options.dev ? 4321 : 0),
+    });
     const address = app.server.address();
-    if (!address || typeof address === "string") throw new Error("Unable to determine agent port.");
+    if (!address || typeof address === "string") {
+      throw new Error("Unable to determine agent port.");
+    }
     const port = address.port;
     boundOrigin = `http://127.0.0.1:${port}`;
     allowedOrigins.add(boundOrigin);
-    await indexer.start();
-    identityMonitor = startWorkspaceIdentityMonitor(
-      workspace,
-      events,
-      indexer,
-      terminals,
-      ask,
-      codex,
-    );
 
     return {
       app,
-      workspaceId,
+      workspaceId: manager.current.workspaceId,
       capabilityToken,
       port,
       origin: boundOrigin,
-      async close() {
-        await cleanup();
-      },
+      close: cleanup,
     };
   } catch (error) {
     await cleanup().catch(() => undefined);
@@ -573,76 +722,183 @@ export async function startAgentServer(options: AgentServerOptions): Promise<Run
   }
 }
 
-async function cleanupAgentResources(resources: {
-  app: FastifyInstance | undefined;
-  ask: AskService | undefined;
-  codex: CodexManager | undefined;
-  terminals: TerminalManager | undefined;
-  indexer: WorkspaceIndexer | undefined;
-  events: EventBus | undefined;
-  database: ConstelixDatabase | undefined;
-  lock: WorkspaceLock;
-}): Promise<void> {
-  let firstError: unknown;
-  const attempt = async (action: () => void | Promise<void>): Promise<void> => {
-    try {
-      await action();
-    } catch (error) {
-      firstError ??= error;
-    }
+function isGlobalWorkspaceControlRequest(
+  pathname: string,
+  method: string,
+): boolean {
+  return (
+    (pathname === "/api/v1/workspaces" && method === "GET") ||
+    (pathname === "/api/v1/workspaces/open" && method === "POST") ||
+    (pathname === "/api/v1/fs/browse" && method === "GET")
+  );
+}
+
+function isWorkspaceSessionOptionalRequest(
+  pathname: string,
+  method: string,
+): boolean {
+  return (
+    isGlobalWorkspaceControlRequest(pathname, method) ||
+    (pathname === "/api/v1/bootstrap" && method === "GET") ||
+    (pathname === "/api/v1/health" && method === "GET")
+  );
+}
+
+function buildBootstrap(runtime: WorkspaceRuntime): Record<string, unknown> {
+  const graph = runtime.indexer.graph.snapshot(500);
+  const savedLayout = runtime.database.loadLayout(runtime.workspaceId) ?? {
+    revision: 0,
+    panels: [],
   };
+  const codexAvailability = runtime.codex?.peekAvailability() ?? {
+    available: false,
+    checking: false,
+    reason: "Actuar está deshabilitado en Modo Lectura.",
+  };
+  const activeActTask = runtime.codex?.activeTask ?? null;
+  const total = runtime.indexer.status.total;
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    session: runtime.session,
+    workspace: {
+      id: runtime.workspaceId,
+      name: basename(runtime.workspaceRoot),
+      rootPath: summarizeWorkspacePath(runtime.workspaceRoot),
+      mode: runtime.workspace.mode,
+      readOnly: runtime.workspace.readOnly,
+    },
+    summary: runtime.indexer.status.summary,
+    graph,
+    layout: savedLayout.panels,
+    layoutState: savedLayout,
+    conversation: runtime.database.loadAiMessages(
+      `${runtime.workspaceId}:main`,
+      runtime.workspaceId,
+    ),
+    activeAskTurnIds: runtime.ask.activeTurnIds,
+    activeActTask: activeActTask
+      ? toPublicActTask(activeActTask, runtime.workspaceRoot)
+      : null,
+    index: {
+      ...runtime.indexer.status,
+      progress:
+        total === 0 ? 0 : runtime.indexer.status.completed / total,
+      filesIndexed: runtime.indexer.indexedFileCount,
+      symbolsIndexed: runtime.indexer.graph.nodeCount,
+      edgesIndexed: runtime.indexer.graph.edgeCount,
+    },
+    terminals: runtime.terminals.list(),
+    capabilities: {
+      ask: true,
+      askMode: runtime.ask.mode,
+      askProviderStatus: runtime.ask.providerStatus,
+      askNotice: runtime.ask.notice,
+      llm: runtime.ask.llmConfiguration,
+      act: !runtime.workspace.readOnly && codexAvailability.available,
+      terminal: true,
+      codexReason: codexAvailability.reason,
+      codexChecking: codexAvailability.checking,
+      codexVersion: codexAvailability.version,
+      model: runtime.ask.model,
+      languages: ["javascript", "typescript", "python"],
+      lsp: runtime.availability(),
+    },
+  };
+}
 
-  await attempt(() => resources.ask?.close());
-  await attempt(() => resources.codex?.close());
-  await attempt(() => resources.terminals?.close());
-  await attempt(async () => resources.indexer?.close());
-  await attempt(() => resources.events?.close());
-  await attempt(async () => resources.app?.close());
-  await attempt(() => resources.database?.close());
-  await attempt(() => resources.lock.release());
+function captureRequest(
+  manager: WorkspaceRuntimeManager,
+  request: FastifyRequest,
+): WorkspaceRuntime {
+  return manager.capture(requestSessionId(request));
+}
 
-  if (firstError !== undefined) throw firstError;
+function requestSessionId(request: FastifyRequest): string | undefined {
+  const value = request.headers["x-constelix-workspace-session"];
+  return typeof value === "string" && value ? value : undefined;
 }
 
 function hasCapability(request: FastifyRequest, token: string): boolean {
-  const authorization = request.headers.authorization;
-  return authorization === `Bearer ${token}`;
+  return request.headers.authorization === `Bearer ${token}`;
 }
 
 function requestPathname(value: string): string {
   try {
-    return new URL(value, "http://127.0.0.1").pathname;
+    return decodeURIComponent(
+      new URL(value, "http://127.0.0.1").pathname,
+    );
   } catch {
     return "";
   }
 }
 
-function hasWebSocketCapability(requestUrl: string, token: string): boolean {
+function isApiRequest(
+  request: FastifyRequest,
+  pathname = requestPathname(request.url),
+): boolean {
+  const routePath = request.routeOptions.url;
+  return (
+    pathname.startsWith("/api/") ||
+    (typeof routePath === "string" && routePath.startsWith("/api/"))
+  );
+}
+
+function hasWebSocketCapability(
+  requestUrl: string,
+  token: string,
+): boolean {
   let candidates: string[];
   try {
-    candidates = new URL(requestUrl, "http://127.0.0.1").searchParams.getAll("token");
+    candidates = new URL(
+      requestUrl,
+      "http://127.0.0.1",
+    ).searchParams.getAll("token");
   } catch {
     return false;
   }
-  return candidates.length === 1 && secureTokenEquals(candidates[0] ?? "", token);
+  return (
+    candidates.length === 1 &&
+    secureTokenEquals(candidates[0] ?? "", token)
+  );
 }
 
 function secureTokenEquals(candidate: string, expected: string): boolean {
   const candidateBytes = Buffer.from(candidate, "utf8");
   const expectedBytes = Buffer.from(expected, "utf8");
-  return candidateBytes.length === expectedBytes.length &&
-    timingSafeEqual(candidateBytes, expectedBytes);
+  return (
+    candidateBytes.length === expectedBytes.length &&
+    timingSafeEqual(candidateBytes, expectedBytes)
+  );
 }
 
 function addCors(reply: FastifyReply, origin: string): void {
   reply.header("Access-Control-Allow-Origin", origin);
-  reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Authorization,Content-Type");
+  reply.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,DELETE,OPTIONS",
+  );
+  reply.header(
+    "Access-Control-Allow-Headers",
+    "Authorization,Content-Type,X-Constelix-Protocol,X-Constelix-Workspace-Session",
+  );
   reply.header("Vary", "Origin");
 }
 
-function errorBody(code: string, message: string, recoverable = true): Record<string, unknown> {
-  return { protocolVersion: PROTOCOL_VERSION, error: { code, message, recoverable } };
+function errorBody(
+  code: string,
+  message: string,
+  recoverable = true,
+  details?: unknown,
+): Record<string, unknown> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    error: {
+      code,
+      message,
+      recoverable,
+      ...(details === undefined ? {} : { details }),
+    },
+  };
 }
 
 function isSupportedActScope(capabilities: readonly string[]): boolean {
@@ -655,56 +911,251 @@ function isSupportedActScope(capabilities: readonly string[]): boolean {
   );
 }
 
-function mapError(error: Error, workspaceRoot?: string): {
+function mapError(error: Error): {
   status: number;
   code: string;
   message: string;
   recoverable: boolean;
+  details?: unknown;
 } {
   if (error instanceof ZodError) {
-    return { status: 400, code: "INVALID_REQUEST", message: "Request validation failed.", recoverable: true };
+    return {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: "Request validation failed.",
+      recoverable: true,
+    };
   }
   if (error instanceof FileConflictError) {
-    return { status: 409, code: error.code, message: error.message, recoverable: true };
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
   if (error instanceof FileTooLargeError) {
-    return { status: 413, code: error.code, message: error.message, recoverable: true };
+    return {
+      status: 413,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
   if (error instanceof PathSecurityError) {
-    return { status: 403, code: error.code, message: error.message, recoverable: false };
+    return {
+      status: 403,
+      code: error.code,
+      message: error.message,
+      recoverable: false,
+    };
   }
   if (error instanceof WorkspaceReadOnlyError) {
-    return { status: 403, code: error.code, message: error.message, recoverable: true };
+    return {
+      status: 403,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
   if (error instanceof WorkspaceIdentityError) {
-    return { status: 409, code: error.code, message: error.message, recoverable: false };
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: false,
+    };
+  }
+  if (error instanceof WorkspaceOpenLockConflictError) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+      details: toPublicLockConflict(error),
+    };
+  }
+  if (error instanceof WorkspaceSessionChangedError) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+      details: { activeSession: error.activeSession },
+    };
+  }
+  if (error instanceof WorkspaceSwitchInProgressError) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
+  if (error instanceof WorkspaceLockExpectedOwnerError) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
+  if (
+    error instanceof WorkspaceLockGuardTimeoutError ||
+    error instanceof WorkspaceLeaseLostError
+  ) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: false,
+    };
+  }
+  if (error instanceof RecentWorkspaceNotFoundError) {
+    return {
+      status: 404,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
+  if (error instanceof WorkspaceBrowserError) {
+    const status =
+      error.code === "WORKSPACE_PATH_NOT_FOUND"
+        ? 404
+        : error.code === "WORKSPACE_PATH_UNREADABLE"
+          ? 403
+          : 400;
+    return {
+      status,
+      code: error.code,
+      message: error.message,
+      recoverable: error.recoverable,
+    };
   }
   if (error instanceof WorkspaceValidationError) {
     const status = error.code === "WORKSPACE_NOT_FOUND" ? 404 : 403;
-    return { status, code: error.code, message: error.message, recoverable: false };
+    return {
+      status,
+      code: error.code,
+      message: error.message,
+      recoverable: false,
+    };
   }
   if (error instanceof LlmConfigurationError) {
-    return { status: 400, code: error.code, message: error.message, recoverable: true };
+    return {
+      status: 400,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
-  if (error instanceof OpenAIUnavailableError || error instanceof CodexUnavailableError) {
-    return { status: 503, code: error.code, message: error.message, recoverable: true };
+  if (
+    error instanceof OpenAIUnavailableError ||
+    error instanceof CodexUnavailableError ||
+    error instanceof LspUnavailableError
+  ) {
+    return {
+      status: 503,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
+  if (
+    error instanceof LspSessionLimitError ||
+    error instanceof LspProtocolError
+  ) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
   if (error instanceof ReadOnlyTerminalUnavailableError) {
-    return { status: 503, code: error.code, message: error.message, recoverable: true };
+    return {
+      status: 503,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
   }
   const nodeError = error as NodeJS.ErrnoException;
   if (nodeError.code === "ENOENT") {
-    return { status: 404, code: "NOT_FOUND", message: "Resource not found.", recoverable: true };
+    return {
+      status: 404,
+      code: "NOT_FOUND",
+      message: "Resource not found.",
+      recoverable: true,
+    };
   }
   return {
     status: 500,
     code: "INTERNAL_ERROR",
-    message: redactLocalPaths(
-      redactSecrets(error.message || "Internal agent error."),
-      workspaceRoot,
-    ),
+    message: redactSecrets(error.message || "Internal agent error."),
     recoverable: true,
   };
+}
+
+function toPublicLockConflict(
+  error: WorkspaceOpenLockConflictError,
+): WorkspaceLockConflict {
+  const { inspection } = error;
+  const metadata = inspection.metadata;
+  const isVersionOne = metadata?.version === 1;
+  const forceAllowed =
+    inspection.classification === "ambiguous" &&
+    inspection.lockId !== undefined;
+  return {
+    conflictId: randomUUID(),
+    lockId: inspection.lockId ?? randomUUID(),
+    workspaceId: error.workspaceId,
+    displayPath: summarizeWorkspacePath(error.workspacePath),
+    status:
+      inspection.classification === "active" ? "active" : "ambiguous",
+    forceAllowed,
+    ...(metadata && metadata.pid > 0 ? { pid: metadata.pid } : {}),
+    ...(isVersionOne
+      ? { agentVersion: metadata.agentVersion }
+      : {}),
+    ...(inspection.heartbeatAt
+      ? { heartbeatAt: inspection.heartbeatAt }
+      : {}),
+  };
+}
+
+function parseBooleanQuery(
+  value: string | undefined,
+  label: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new WorkspaceBrowserError(
+    "WORKSPACE_PATH_INVALID",
+    `${label} debe ser true o false.`,
+  );
+}
+
+function parsePositiveIntegerQuery(
+  value: string | undefined,
+  label: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9]\d*$/u.test(value)) {
+    throw new WorkspaceBrowserError(
+      "WORKSPACE_BROWSE_LIMIT_INVALID",
+      `${label} debe ser un entero positivo.`,
+    );
+  }
+  return Number.parseInt(value, 10);
+}
+
+function safeSocketReason(error: unknown): string {
+  const message =
+    error instanceof Error ? error.message : "LSP unavailable";
+  return redactSecrets(message).slice(0, 120);
 }
 
 export function createWorkspaceId(root: string): string {
@@ -713,168 +1164,6 @@ export function createWorkspaceId(root: string): string {
   } catch {
     return createCanonicalWorkspaceId(resolve(root));
   }
-}
-
-function startWorkspaceIdentityMonitor(
-  workspace: WorkspaceDescriptor,
-  events: EventBus,
-  indexer: WorkspaceIndexer,
-  terminals: TerminalManager,
-  ask: AskService,
-  codex: CodexManager | undefined,
-): NodeJS.Timeout {
-  let checking = false;
-  let failed = false;
-  const timer = setInterval(() => {
-    if (checking || failed) return;
-    checking = true;
-    void assertWorkspaceIdentity(workspace)
-      .catch(() => {
-        failed = true;
-        events.publish("error", {
-          code: "WORKSPACE_ROOT_CHANGED",
-          message:
-            "La raíz del workspace cambió. Se detuvieron terminales, IA e indexación para proteger el aislamiento.",
-          recoverable: false,
-          severity: "error",
-        });
-        ask.close();
-        terminals.close();
-        codex?.close();
-        void indexer.close().catch(() => undefined);
-      })
-      .finally(() => {
-        checking = false;
-      });
-  }, 500);
-  timer.unref();
-  return timer;
-}
-
-class WorkspaceLock {
-  private constructor(
-    private readonly path: string,
-    private readonly handle: Awaited<ReturnType<typeof open>>,
-    private readonly nonce: string,
-  ) {}
-
-  static async acquire(path: string, workspaceId: string): Promise<WorkspaceLock> {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const handle = await open(path, "wx", 0o600);
-        const nonce = randomUUID();
-        await handle.writeFile(JSON.stringify({
-          pid: process.pid,
-          nonce,
-          workspaceId,
-          createdAt: new Date().toISOString(),
-        }));
-        await handle.sync();
-        return new WorkspaceLock(path, handle, nonce);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stale = false;
-        try {
-          const content = await readFile(path, "utf8");
-          const parsed = parseLockOwner(content);
-          const pid = parsed?.pid ?? Number.parseInt(content, 10);
-          if (!Number.isFinite(pid)) stale = true;
-          else process.kill(pid, 0);
-        } catch (checkError) {
-          const code = (checkError as NodeJS.ErrnoException).code;
-          stale = code === "ESRCH" || code === "ENOENT";
-        }
-        if (!stale) {
-          throw new Error(
-            "El workspace ya está abierto por otra instancia de Constelix.",
-          );
-        }
-        await unlink(path).catch(() => undefined);
-      }
-    }
-    throw new Error("Unable to acquire the workspace lock.");
-  }
-
-  async release(): Promise<void> {
-    await this.handle.close().catch(() => undefined);
-    try {
-      const owner = parseLockOwner(await readFile(this.path, "utf8"));
-      if (owner?.nonce === this.nonce) await unlink(this.path);
-    } catch {
-      // The lock may already be gone after a crash or external cleanup.
-    }
-  }
-}
-
-function parseLockOwner(
-  value: string,
-): { pid: number; nonce?: string } | undefined {
-  try {
-    const parsed = JSON.parse(value) as { pid?: unknown; nonce?: unknown };
-    if (typeof parsed.pid !== "number") return undefined;
-    return {
-      pid: parsed.pid,
-      ...(typeof parsed.nonce === "string" ? { nonce: parsed.nonce } : {}),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function assertStatePathOutsideWorkspace(
-  workspaceRoot: string,
-  candidatePath: string,
-  label: string,
-): void {
-  const projected = projectCanonicalPath(resolve(candidatePath));
-  if (isPathWithin(workspaceRoot, projected)) {
-    throw new WorkspaceValidationError(
-      "WORKSPACE_VALIDATION_FAILED",
-      `${label} debe estar fuera del workspace.`,
-    );
-  }
-}
-
-function projectCanonicalPath(candidatePath: string): string {
-  let cursor = candidatePath;
-  const suffix: string[] = [];
-  while (!existsSync(cursor)) {
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    suffix.unshift(basename(cursor));
-    cursor = parent;
-  }
-  return resolve(realpathSync(cursor), ...suffix);
-}
-
-function isPathWithin(root: string, candidate: string): boolean {
-  const fromRoot = relative(root, candidate);
-  return (
-    fromRoot === "" ||
-    (!isAbsolute(fromRoot) &&
-      fromRoot !== ".." &&
-      !fromRoot.startsWith(`..${sep}`))
-  );
-}
-
-function sanitizePublicPayload(
-  value: unknown,
-  workspaceRoot: string,
-): unknown {
-  if (typeof value === "string") {
-    return redactLocalPaths(redactSecrets(value), workspaceRoot);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizePublicPayload(item, workspaceRoot));
-  }
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      sanitizePublicPayload(item, workspaceRoot),
-    ]),
-  );
 }
 
 function toPublicActTask(

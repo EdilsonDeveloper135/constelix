@@ -89,7 +89,19 @@ export const PanelFrame = memo(function PanelFrame({
                   : "Anclar panel abajo"
             }
             aria-pressed={docked}
-            onClick={() => setPanelDock(id, docked ? "floating" : dockTarget)}
+            onClick={() => {
+              setPanelDock(id, docked ? "floating" : dockTarget);
+              if (docked) {
+                window.requestAnimationFrame(() => {
+                  void fitView({
+                    nodes: [{ id }],
+                    duration: 260,
+                    padding: 0.12,
+                    maxZoom: 1,
+                  });
+                });
+              }
+            }}
           >
             {docked ? (
               <Move aria-hidden="true" size={13} />

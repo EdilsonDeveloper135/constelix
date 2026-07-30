@@ -11,6 +11,8 @@ export interface LocalServerEvent {
   type: string;
   timestamp: string;
   payload: unknown;
+  sessionId?: string;
+  workspaceId?: string;
   [key: string]: unknown;
 }
 
@@ -34,7 +36,11 @@ export class EventBus {
     private readonly sanitizePayload: (payload: unknown) => unknown = (payload) => payload,
   ) {}
 
-  publish(type: string, payload: unknown): LocalServerEvent {
+  publish(
+    type: string,
+    payload: unknown,
+    context?: { sessionId: string; workspaceId: string },
+  ): LocalServerEvent {
     const safePayload = this.sanitizePayload(payload);
     const event: LocalServerEvent = {
       protocolVersion: 1,
@@ -42,6 +48,7 @@ export class EventBus {
       type,
       timestamp: new Date().toISOString(),
       payload: safePayload,
+      ...(context ?? {}),
     };
     this.#emitter.emit("event", event);
     const transportEvent = ServerEventSchema.safeParse(event);
@@ -54,7 +61,16 @@ export class EventBus {
     const serialized = JSON.stringify(transportEvent.data);
     for (const state of this.#sockets) {
       if (state.socket.readyState === 1) {
-        state.socket.send(serialized);
+        try {
+          state.socket.send(serialized);
+        } catch {
+          this.#sockets.delete(state);
+          try {
+            state.socket.close(1011, "WebSocket transport failed");
+          } catch {
+            // The failed socket is already detached.
+          }
+        }
       }
     }
     return event;
@@ -69,15 +85,25 @@ export class EventBus {
     const state: SocketState = { socket };
     this.#sockets.add(state);
 
-    socket.send(
-      JSON.stringify({
-        protocolVersion: 1,
-        eventId: randomUUID(),
-        type: "connection.ready",
-        timestamp: new Date().toISOString(),
-        payload: {},
-      } satisfies LocalServerEvent),
-    );
+    try {
+      socket.send(
+        JSON.stringify({
+          protocolVersion: 1,
+          eventId: randomUUID(),
+          type: "connection.ready",
+          timestamp: new Date().toISOString(),
+          payload: {},
+        } satisfies LocalServerEvent),
+      );
+    } catch {
+      this.#sockets.delete(state);
+      try {
+        socket.close(1011, "WebSocket transport failed");
+      } catch {
+        // The failed socket is already detached.
+      }
+      return;
+    }
 
     socket.on("message", (raw) => {
       try {
@@ -106,6 +132,10 @@ export class EventBus {
     return () => this.#emitter.off("client-message", listener);
   }
 
+  dispatchClientMessage(message: ClientEvent): void {
+    this.#emitter.emit("client-message", message);
+  }
+
   close(): void {
     for (const state of this.#sockets) {
       state.socket.close(1001, "Server shutting down");
@@ -125,6 +155,7 @@ const TRANSPORT_EVENT_TYPES = new Set([
   "capabilities.updated",
   "act.event",
   "error",
+  "workspace.changed",
 ]);
 
 function sendSocketError(
@@ -132,13 +163,21 @@ function sendSocketError(
   code: string,
   message: string,
 ): void {
-  socket.send(
-    JSON.stringify({
-      protocolVersion: 1,
-      eventId: randomUUID(),
-      type: "error",
-      timestamp: new Date().toISOString(),
-      payload: { code, message, recoverable: true },
-    } satisfies LocalServerEvent),
-  );
+  try {
+    socket.send(
+      JSON.stringify({
+        protocolVersion: 1,
+        eventId: randomUUID(),
+        type: "error",
+        timestamp: new Date().toISOString(),
+        payload: { code, message, recoverable: true },
+      } satisfies LocalServerEvent),
+    );
+  } catch {
+    try {
+      socket.close(1011, "WebSocket transport failed");
+    } catch {
+      // The failed socket cannot receive an error frame.
+    }
+  }
 }

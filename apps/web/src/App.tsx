@@ -8,14 +8,17 @@ import { GlobalNotice } from "./components/shell/GlobalNotice";
 import { Rail } from "./components/shell/Rail";
 import { SettingsModal } from "./components/shell/SettingsModal";
 import { Topbar } from "./components/shell/Topbar";
+import { WorkspaceSwitcherDialog } from "./components/shell/WorkspaceSwitcherDialog";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import { apiClient } from "./lib/api";
+import { closeMonacoLspConnections } from "./lib/lsp";
 import { useWorkspaceStore } from "./store/useWorkspaceStore";
 
 export const App = memo(function App() {
   useAgentBridge();
   const settingsOpen = useWorkspaceStore((state) => state.settingsOpen);
   const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
+  const workspaceId = useWorkspaceStore((state) => state.workspaceId);
   const [llmConfiguration, setLlmConfiguration] =
     useState<LlmPublicConfiguration | null>(null);
   const [llmConfigurationLoading, setLlmConfigurationLoading] = useState(
@@ -32,6 +35,7 @@ export const App = memo(function App() {
       return;
     }
     let current = true;
+    setLlmConfiguration(null);
     setLlmConfigurationLoading(true);
     setLlmConfigurationLoadError(undefined);
     void apiClient.getLlmConfiguration()
@@ -51,7 +55,11 @@ export const App = memo(function App() {
     return () => {
       current = false;
     };
-  }, [llmConfigurationLoadAttempt]);
+  }, [llmConfigurationLoadAttempt, workspaceId]);
+  useEffect(
+    () => () => closeMonacoLspConnections(),
+    [workspaceId],
+  );
   useEffect(() => {
     const flushLayout = () => useWorkspaceStore.getState().flushLayout();
     const flushWhenHidden = () => {
@@ -73,6 +81,7 @@ export const App = memo(function App() {
       <GlobalNotice />
       <WorkspaceOnboarding />
       <CommandPalette />
+      <WorkspaceSwitcherDialog />
       <SettingsModal
         open={settingsOpen}
         loading={llmConfigurationLoading}

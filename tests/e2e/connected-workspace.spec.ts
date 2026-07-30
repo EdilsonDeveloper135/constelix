@@ -2,6 +2,7 @@ import {
   access,
   cp,
   mkdtemp,
+  mkdir,
   readFile,
   rm,
   writeFile,
@@ -32,6 +33,7 @@ const webOrigin = `http://127.0.0.1:${webPort}`;
 let server: RunningAgentServer | undefined;
 let temporaryDirectory: string | undefined;
 let workspaceRoot: string | undefined;
+let paginationRoot: string | undefined;
 
 test.describe.configure({ mode: "serial" });
 
@@ -39,6 +41,13 @@ test.describe("workspace connected to the local agent", () => {
   test.beforeAll(async () => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "constelix-e2e-"));
     workspaceRoot = join(temporaryDirectory, "sample-workspace");
+    paginationRoot = join(temporaryDirectory, "many-folders");
+    await mkdir(paginationRoot);
+    await Promise.all(
+      Array.from({ length: 105 }, (_, index) =>
+        mkdir(join(paginationRoot!, `folder-${String(index).padStart(3, "0")}`))
+      ),
+    );
     await cp(fixtureRoot, workspaceRoot, { recursive: true });
     const databasePath = join(temporaryDirectory, "constelix.sqlite");
     const workspaceId = createWorkspaceId(workspaceRoot);
@@ -655,11 +664,19 @@ test.describe("workspace connected to the local agent", () => {
     await settingsButton.click();
     const settings = page.getByTestId("settings-modal");
     await expect(settings).toBeVisible();
-    await settings.getByLabel("URL base del LLM").fill(
+    const baseUrlInput = settings.locator('input[name="llmBaseUrl"]');
+    const modelInput = settings.locator('input[name="llmModel"]');
+    const apiKeyInput = settings.locator('input[name="llmApiKey"]');
+    await baseUrlInput.fill(
       "http://127.0.0.1:11434/v1",
     );
-    await settings.getByLabel("Modelo").fill("qwen2.5-coder:7b");
-    await settings.getByLabel("Clave de API (opcional)").fill(secret);
+    await expect(baseUrlInput).toHaveValue(
+      "http://127.0.0.1:11434/v1",
+    );
+    await modelInput.fill("qwen2.5-coder:7b");
+    await expect(modelInput).toHaveValue("qwen2.5-coder:7b");
+    await apiKeyInput.fill(secret);
+    await expect(apiKeyInput).toHaveValue(secret);
     await expect(settings.getByRole("button", { name: "Cargando…" })).toBeDisabled();
     const loadedResponse = page.waitForResponse(
       (response) =>
@@ -669,10 +686,10 @@ test.describe("workspace connected to the local agent", () => {
     );
     releaseSettingsLoad?.();
     await loadedResponse;
-    await expect(settings.getByLabel("URL base del LLM")).toHaveValue(
+    await expect(baseUrlInput).toHaveValue(
       "http://127.0.0.1:11434/v1",
     );
-    await expect(settings.getByLabel("Modelo")).toHaveValue(
+    await expect(modelInput).toHaveValue(
       "qwen2.5-coder:7b",
     );
 
@@ -731,6 +748,375 @@ test.describe("workspace connected to the local agent", () => {
       apiKeySource: "none",
     });
     expect(JSON.stringify(cleared)).not.toContain(secret);
+
+    const resetStatus = await page.evaluate(async (token) => {
+      const health = await fetch("/api/v1/health", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const active = await health.json() as { session: { id: string } };
+      const response = await fetch("/api/v1/settings/llm", {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-constelix-workspace-session": active.session.id,
+        },
+        body: JSON.stringify({
+          protocolVersion: 1,
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: { action: "clear" },
+        }),
+      });
+      return response.status;
+    }, capabilityToken);
+    expect(resetStatus).toBe(200);
+  });
+
+  test("exposes Topbar workspace state and keeps the workspace dialog keyboard-accessible", async ({
+    page,
+  }) => {
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+
+    const trigger = page.getByRole("button", {
+      name: "Cambiar workspace. Actual: sample-workspace",
+    });
+    await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByRole("status").filter({ hasText: "Agente local conectado" }),
+    ).toBeVisible();
+    const workspaceModes = page.getByLabel("Modos del workspace");
+    await expect(
+      workspaceModes.getByText("Edición", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      workspaceModes.getByText("Ask Local", { exact: true }),
+    ).toBeVisible();
+
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog).toHaveAttribute("aria-busy", "false");
+    await expect(dialog).toHaveAccessibleDescription(
+      "Abre una carpeta sin recargar Constelix.",
+    );
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    const recentFilter = dialog.getByRole("searchbox", {
+      name: "Filtrar workspaces recientes",
+    });
+    await expect(recentFilter).toBeFocused();
+    const recentWorkspace = dialog
+      .getByRole("button")
+      .filter({ hasText: "sample-workspace" })
+      .first();
+    await expect(recentWorkspace).toBeEnabled();
+
+    await recentFilter.fill("workspace que no existe");
+    await expect(
+      dialog.getByText("No hay workspaces recientes que coincidan."),
+    ).toBeVisible();
+    await recentFilter.fill("");
+    await expect(recentWorkspace).toBeVisible();
+
+    const browseResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/fs/browse" &&
+        response.status() === 200,
+    );
+    await dialog
+      .getByRole("button", { name: "Explorar carpeta personal" })
+      .click();
+    await browseResponse;
+    const openCurrent = dialog.getByRole("button", {
+      name: "Abrir esta carpeta",
+    });
+    await expect(openCurrent).toBeVisible();
+
+    const closeButton = dialog.getByRole("button", {
+      name: "Cerrar selector de workspace",
+    });
+    await closeButton.focus();
+    await closeButton.press("Shift+Tab");
+    await expect(openCurrent).toBeFocused();
+    await openCurrent.press("Tab");
+    await expect(closeButton).toBeFocused();
+
+    await closeButton.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    await trigger.click();
+    const reopenedDialog = page.getByRole("dialog", {
+      name: "Cambiar workspace",
+    });
+    const reopenRequest = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === "/api/v1/workspaces/open" &&
+        request.method() === "POST",
+    );
+    await reopenedDialog
+      .getByRole("button")
+      .filter({ hasText: "sample-workspace" })
+      .first()
+      .click();
+    const recentRequestBody = (await reopenRequest).postDataJSON() as {
+      target: { kind: string; workspaceId?: string };
+    };
+    expect(recentRequestBody.target).toMatchObject({
+      kind: "recent",
+      workspaceId: expect.any(String),
+    });
+    await expect(reopenedDialog).toHaveCount(0);
+  });
+
+  test("requires an explicit decision before switching with a dirty editor", async ({
+    page,
+  }) => {
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await page.getByRole("button", { name: "Archivos", exact: true }).click();
+    await page
+      .getByRole("button", { name: "index.ts", exact: true })
+      .click();
+    const editor = page.locator(".monaco-editor").first();
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.insertText("\n// borrador para cambio de workspace");
+    await expect(page.getByText("Modificado", { exact: true })).toBeVisible();
+
+    const trigger = page.getByRole("button", {
+      name: "Cambiar workspace. Actual: sample-workspace",
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
+    await dialog
+      .getByRole("button")
+      .filter({ hasText: "sample-workspace" })
+      .first()
+      .click();
+
+    const dirtyGuard = dialog.getByRole("alert");
+    await expect(dirtyGuard).toContainText("Hay cambios sin guardar");
+    await expect(dirtyGuard).toBeFocused();
+    await expect(
+      dirtyGuard.getByRole("button", { name: "Cancelar" }),
+    ).toBeVisible();
+    await expect(
+      dirtyGuard.getByRole("button", { name: "Descartar" }),
+    ).toBeVisible();
+    await expect(
+      dirtyGuard.getByRole("button", { name: "Conservar y cambiar" }),
+    ).toBeVisible();
+
+    await dirtyGuard.getByRole("button", { name: "Cancelar" }).click();
+    await expect(dirtyGuard).toHaveCount(0);
+    await expect(
+      dialog.getByRole("searchbox", {
+        name: "Filtrar workspaces recientes",
+      }),
+    ).toBeVisible();
+
+    await dialog
+      .getByRole("button")
+      .filter({ hasText: "sample-workspace" })
+      .first()
+      .click();
+    const preservedSwitch = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/workspaces/open" &&
+        response.status() === 200,
+    );
+    await dialog
+      .getByRole("button", { name: "Conservar y cambiar" })
+      .click();
+    await preservedSwitch;
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText("Modificado", { exact: true })).toBeVisible();
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+      "borrador para cambio de workspace",
+    );
+  });
+
+  test("loads every page of a large local directory listing", async ({ page }) => {
+    if (!paginationRoot) {
+      throw new Error("The pagination fixture was not initialized.");
+    }
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    await page.getByRole("button", {
+      name: "Cambiar workspace. Actual: sample-workspace",
+    }).click();
+    const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
+    await dialog.getByLabel("Ruta absoluta").fill(paginationRoot);
+    const firstPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/fs/browse" &&
+        !url.searchParams.has("cursor") &&
+        response.status() === 200
+      );
+    });
+    await dialog
+      .getByRole("button", { name: "Explorar carpeta personal" })
+      .click();
+    await firstPage;
+
+    await expect(
+      dialog.getByRole("button", { name: "folder-099" }),
+    ).toBeAttached();
+    await expect(
+      dialog.getByRole("button", { name: "folder-104" }),
+    ).toHaveCount(0);
+    const loadMore = dialog.getByRole("button", {
+      name: "Cargar más carpetas",
+    });
+    await expect(loadMore).toBeEnabled();
+    const secondPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/fs/browse" &&
+        url.searchParams.has("cursor") &&
+        response.status() === 200
+      );
+    });
+    await loadMore.click();
+    await secondPage;
+
+    const finalDirectory = dialog.getByRole("button", {
+      name: "folder-104",
+    });
+    await expect(finalDirectory).toBeAttached();
+    await finalDirectory.scrollIntoViewIfNeeded();
+    await expect(finalDirectory).toBeVisible();
+    await expect(loadMore).toHaveCount(0);
+  });
+
+  test("renders a lock conflict and sends the guarded force-release intent", async ({
+    page,
+  }) => {
+    await openConnectedWorkspace(page, {
+      expectedName: "sample-workspace",
+      expectedMode: "Edición",
+    });
+    const activeList = await page.evaluate(
+      async ({ token }) => {
+        const response = await fetch("/api/v1/workspaces", {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        return response.json() as Promise<{
+          protocolVersion: 1;
+          activeSession: {
+            id: string;
+            workspaceId: string;
+            activatedAt: string;
+          };
+        }>;
+      },
+      { token: capabilityToken },
+    );
+    const targetWorkspaceId = "abcdefabcdefabcdefabcdef";
+    const lockId = "b38cefe1-6435-4f36-ab6d-859af45da2b3";
+    const conflict = {
+      conflictId: "f497b469-84f2-4f35-93f0-2c5ec77fd54c",
+      lockId,
+      workspaceId: targetWorkspaceId,
+      displayPath: "~/Projects/locked-workspace",
+      status: "ambiguous",
+      forceAllowed: true,
+      pid: 4812,
+      agentVersion: "v0.0.5",
+      heartbeatAt: "2026-07-25T20:31:30.000Z",
+    };
+    await page.route("**/api/v1/workspaces", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          protocolVersion: 1,
+          activeSession: activeList.activeSession,
+          recents: [
+            {
+              protocolVersion: 1,
+              workspaceId: targetWorkspaceId,
+              name: "locked-workspace",
+              displayPath: "~/Projects/locked-workspace",
+              lastOpenedAt: "2026-07-25T20:30:00.000Z",
+              availability: "locked",
+              lastMode: "edit",
+            },
+          ],
+        }),
+      });
+    });
+
+    let openAttempt = 0;
+    let forcedRequestBody: unknown;
+    await page.route("**/api/v1/workspaces/open", async (route) => {
+      openAttempt += 1;
+      if (openAttempt === 2) {
+        forcedRequestBody = route.request().postDataJSON();
+      }
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          protocolVersion: 1,
+          error: {
+            code: "WORKSPACE_LOCK_CONFLICT",
+            message: "El lock del workspace requiere una resolución explícita.",
+            recoverable: true,
+            details: conflict,
+          },
+        }),
+      });
+    });
+
+    await page
+      .getByRole("button", {
+        name: "Cambiar workspace. Actual: sample-workspace",
+      })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
+    await dialog
+      .getByRole("button")
+      .filter({ hasText: "locked-workspace" })
+      .click();
+
+    const lockAlert = dialog.getByRole("alert");
+    await expect(lockAlert).toContainText("Workspace en uso");
+    await expect(lockAlert).toBeFocused();
+    await expect(lockAlert).toContainText("PID");
+    await expect(lockAlert).toContainText("4812");
+    await expect(lockAlert).toContainText("v0.0.5");
+    const forceButton = lockAlert.getByRole("button", {
+      name: "Forzar liberación",
+    });
+    await expect(forceButton).toBeVisible();
+    await forceButton.click();
+    await expect.poll(() => openAttempt).toBe(2);
+    expect(forcedRequestBody).toMatchObject({
+      target: {
+        kind: "recent",
+        workspaceId: targetWorkspaceId,
+      },
+      lockResolution: {
+        action: "force-release",
+        expectedLockId: lockId,
+        acknowledgeRisk: true,
+      },
+    });
+    await expect(lockAlert).toBeVisible();
   });
 
   test("enforces read-only UI, API, Act, and PTY boundaries", async ({ page }) => {
@@ -785,11 +1171,16 @@ test.describe("workspace connected to the local agent", () => {
 
     const writeAttempt = await page.evaluate(
       async ({ token }) => {
+        const health = await fetch("/api/v1/health", {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        const active = await health.json() as { session: { id: string } };
         const response = await fetch("/api/v1/files/write", {
           method: "PUT",
           headers: {
             authorization: `Bearer ${token}`,
             "content-type": "application/json",
+            "x-constelix-workspace-session": active.session.id,
           },
           body: JSON.stringify({
             protocolVersion: 1,
@@ -829,7 +1220,10 @@ test.describe("workspace connected to the local agent", () => {
     const errorRoot = join(temporaryDirectory, "v003-redacted-errors");
     await cp(readOnlyFixtureRoot, errorRoot, { recursive: true });
     workspaceRoot = errorRoot;
-    const leakedToken = "sk-constelixE2eSecretToken123456";
+    const leakedToken = [
+      "sk",
+      "constelixE2eSecretToken123456",
+    ].join("-");
     server = await startAgentServer({
       workspaceRoot: errorRoot,
       dev: true,

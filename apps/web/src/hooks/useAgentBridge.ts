@@ -22,6 +22,10 @@ export function useAgentBridge(): void {
         setConnection("degraded");
       }
     });
+    const unsubscribeReconciliation =
+      apiClient.subscribeWorkspaceReconciliation(() => {
+        void useWorkspaceStore.getState().reconcileGraph();
+      });
     const disconnect = apiClient.connect();
 
     if (!apiClient.hasToken) {
@@ -31,6 +35,7 @@ export function useAgentBridge(): void {
     return () => {
       unsubscribe();
       unsubscribeConnection();
+      unsubscribeReconciliation();
       disconnect();
     };
   }, [handleAgentEvent, setConnection]);

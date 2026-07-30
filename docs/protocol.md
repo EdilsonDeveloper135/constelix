@@ -1,8 +1,13 @@
 # Local protocol v1
 
-Constelix uses authenticated JSON over REST for commands and snapshots, plus a single authenticated WebSocket for graph deltas, index progress, PTY bytes, Ask streaming, and Codex events.
+Constelix uses authenticated JSON over REST for commands and snapshots, an
+authenticated event WebSocket for graph deltas, index progress, PTY bytes, Ask
+streaming, and Codex events, and a separate authenticated WebSocket for LSP
+JSON-RPC.
 
-Every body and event includes `protocolVersion: 1` and is validated with the schemas from `@constelix/contracts`.
+Every Constelix REST body and event includes `protocolVersion: 1` and is
+validated with the schemas from `@constelix/contracts`. LSP frames remain
+standard JSON-RPC 2.0 messages.
 
 ## Bootstrap
 
@@ -15,18 +20,95 @@ is rejected during the HTTP handshake, so no anonymous transient socket exists.
 After a successful upgrade the server sends `connection.ready`. The former
 authenticate-as-first-message flow and legacy flattened messages are rejected.
 
+## Workspace sessions
+
+Bootstrap returns a `session` containing a UUID `id`, the stable 24-character
+`workspaceId`, and `activatedAt`. The browser sends the UUID in
+`X-Constelix-Workspace-Session` on workspace-scoped REST requests and as the
+`session` query parameter on the LSP WebSocket. This is a consistency boundary,
+not an authentication credential: the capability token remains mandatory.
+Missing, malformed, and stale sessions are rejected. Health, bootstrap, and
+the authenticated global workspace controls are the only REST surfaces that do
+not require the session header.
+
+A request carrying an obsolete session fails with
+`WORKSPACE_SESSION_CHANGED` and includes the current public session. This keeps
+a late response from workspace A from mutating workspace B after a hot swap.
+Workspace-scoped server events carry top-level `sessionId` and `workspaceId`;
+the browser ignores events that do not match its active session. While a new
+session is pending, it rejects all scoped commands and events. A bootstrap may
+then omit the obsolete session header, but its response is still bound to the
+transport generation that initiated it. The global `workspace.changed` event
+carries the newly activated session.
+
+## Workspace discovery and activation
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/workspaces` | Return the active session and up to 12 recent workspaces with summarized paths, last mode, and availability. |
+| `GET /api/v1/fs/browse` | List readable directories for a local absolute path. Supports `showHidden`, `limit`, and an opaque `cursor`. |
+| `POST /api/v1/workspaces/open` | Activate a path or a recent-workspace ID without reloading the dashboard. |
+
+The directory browser defaults to the user's home directory, hides dot-prefixed
+entries, returns folders rather than files, and caps each page at 200 entries.
+Pagination cursors are signed and bound to the canonical directory and hidden
+file setting. They also include a signed hash of the sorted directory listing,
+so adding, removing, or renaming an entry invalidates the cursor instead of
+silently skipping a folder. `truncated: true` always includes a cursor, and the
+dashboard appends and de-duplicates pages on explicit request. Clients must not
+construct or reuse cursors for another directory.
+Candidate metadata inspection is separately budgeted per page, so a directory
+with many entries cannot force an unbounded number of canonicalization and
+workspace-detection operations in one request.
+
+An open request includes `requestId`, `expectedSessionId`, and exactly one
+target:
+
+```json
+{
+  "protocolVersion": 1,
+  "requestId": "uuid",
+  "expectedSessionId": "uuid",
+  "target": { "kind": "path", "path": "/absolute/project" }
+}
+```
+
+The agent canonicalizes and validates the target, creates and starts a candidate
+runtime, atomically makes it current, detaches the previous runtime, releases
+the switch barrier, and then emits `workspace.changed`. A failed candidate is
+closed and the previous workspace remains active. The public notification is
+emitted only after the old runtime has been detached, and the successful
+response contains both the
+new session and its bootstrap snapshot from the same activation. The browser
+quarantines scoped operations until that snapshot is validated and hydrated;
+validation, the synchronous Zustand update, and transport confirmation form one
+operation. A superseded response cannot replace a newer pending session. The
+browser never combines a switch response with a later independent bootstrap.
+Only one switch may run at a time. See
+[Workspace lifecycle](workspace-lifecycle.md) for resource and lock semantics.
+
+`WORKSPACE_LOCK_CONFLICT` may include a public conflict object. An active owner
+cannot be forced. An ambiguous owner may be retried only with
+`lockResolution.action: "force-release"`, the exact observed `expectedLockId`,
+and `acknowledgeRisk: true`; a changed owner makes the retry fail closed.
+
 ## Bootstrap reconciliation
 
 `GET /api/v1/bootstrap` is the authoritative reconnect snapshot. It returns the
-bounded graph, saved layout, conversation, active Ask turn IDs, the active Act
-task when one exists, recoverable terminal sessions, index status, and current
-capabilities. Public LLM state can include its base URL, model, provider kind,
+active workspace session, the bounded graph, saved layout, conversation, active
+Ask turn IDs, the active Act task when one exists, recoverable terminal
+sessions, index status, and current capabilities. Public LLM state can include
+its base URL, model, provider kind,
 whether a key is configured or required, and the key source; it never includes
 the key value. The workspace descriptor includes a stable ID, summarized path,
 `mode: "read" | "edit"`, and the equivalent `readOnly: boolean`. Clients reject
 inconsistent mode/boolean combinations. A bounded summary reports detected project types,
 languages, estimated/indexed files, warnings, and omitted files. Live events
-that arrive after a bootstrap request take precedence over that response.
+that arrive after a bootstrap request take precedence over that response. A
+workspace change aborts active reconciliation; if a response still arrives,
+its stale transport generation is rejected before hydration. A tab that missed
+the event learns the current public session from `WORKSPACE_SESSION_CHANGED`,
+enters quarantine, and retries bootstrap without the obsolete session header.
 
 The production scanner defaults to 10,000 eligible files, 2 MiB per file, and
 2 MiB of aggregate source content. Files beyond those bounds are omitted from
@@ -54,8 +136,46 @@ Each committed index update increments the workspace revision. `GraphDelta.previ
 - `capabilities.updated`: asynchronous Ask provider state and Codex compatibility
   results; either capability family may update independently.
 - `act.event`: approved task lifecycle and Codex activity.
+- `workspace.changed`: the new active session after a successful hot swap.
 
-Every server event uses `{ protocolVersion, eventId, timestamp, type, payload }`. REST bodies, WebSocket messages, and responses are validated at their boundary with shared Zod contracts.
+Every server event uses
+`{ protocolVersion, eventId, timestamp, sessionId?, workspaceId?, type, payload }`.
+REST bodies, WebSocket messages, and responses are validated at their boundary
+with shared Zod contracts.
+
+## Language Server Protocol
+
+The dashboard connects to
+`/api/v1/lsp?token=<capability>&session=<uuid>&language=<language>`, where
+`language` is `javascript`, `typescript`, or `python`. The HTTP upgrade applies
+the same exact token, `Origin`, and `Host` checks as the event socket. Browser
+frames are strict JSON-RPC 2.0 messages; the agent adds and parses the
+byte-counted `Content-Length` framing used by LSP over stdio.
+
+JavaScript and TypeScript share one
+[`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)
+process family. Python uses
+[`pyright`](https://github.com/microsoft/pyright). The dashboard registers
+Monaco diagnostics, completion, hover, definition, and reference providers.
+Availability is reported per language in bootstrap, so a missing server degrades
+the editor without disabling the rest of Constelix. The bridge follows
+[LSP 3.17](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/).
+
+The browser uses `constelix://<workspaceId>/<relative-path>` document URIs.
+Raw `file:` URIs from the browser are rejected. The agent canonicalizes every
+mapped path, rejects workspace escape, converts contained server URIs back to
+the Constelix scheme, and suppresses external file locations. Client messages,
+server messages, headers, queued stdin, and pending WebSocket output are
+bounded. The bridge accepts only initialize, document synchronization,
+completion, hover, definition, references, and cancellation; it does not expose
+server commands or arbitrary workspace methods. During initialize the agent
+replaces every client root with the canonical active workspace. TypeScript uses
+the packaged trusted `tsserver`, with plugins and automatic type acquisition
+disabled. Monaco's built-in language features remain available as a local
+fallback if the supervised process cannot start. Only one active socket per
+server family is allowed; disconnect, workspace switch, or agent shutdown
+terminates its child process, escalating from `SIGTERM` to `SIGKILL` after a
+short timeout.
 
 ## Panel placement and layout
 
@@ -120,3 +240,18 @@ Terminal session payloads expose `cwd` relative to the workspace. In read mode,
 the agent wraps the shell in a filesystem-write-denying macOS sandbox; if that
 sandbox is unavailable, terminal creation fails with
 `READ_ONLY_TERMINAL_UNAVAILABLE`.
+
+## v0.0.5 limitations
+
+- One agent process owns one active workspace. Switching is sequential rather
+  than a simultaneous multi-repository view.
+- Switching closes the old workspace's terminals, LSP processes, watcher, Ask
+  work, and Codex process. Terminal processes are not resumed.
+- Unsaved editor drafts can be kept per workspace only for the lifetime of the
+  current browser page; they are not durable crash recovery.
+- The local folder browser is a Constelix dialog, not the native macOS picker.
+  It lists directories only and intentionally returns absolute paths to the
+  authenticated local dashboard.
+- LSP support is limited to JS/TS and Python. v0.0.5 does not expose rename,
+  code actions, formatting, workspace symbols, semantic tokens, or other
+  language servers.

@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.4` el 2026-07-21.
+Actualizado para `v0.0.5` el 2026-07-29.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -31,7 +31,7 @@ Actualizado para `v0.0.4` el 2026-07-21.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.4 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.5 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -68,24 +68,51 @@ Actualizado para `v0.0.4` el 2026-07-21.
 - Mitigación: persistir borradores y sesiones por ID; una futura capa de portales
   conservará también el estado visual completo entre hosts.
 
+## KI-009 — Alcance y confianza de los servidores de lenguaje
+
+- Estado: limitación técnica y de seguridad aceptada.
+- Impacto: v0.0.5 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+  `typescript-language-server` y Pyright se ejecutan como procesos del usuario
+  local y analizan configuración y dependencias del workspace; no constituyen
+  una frontera frente a un repositorio hostil.
+- Mitigación: usar LSP solo con repositorios confiables. El agente fija las
+  implementaciones, fuerza la raíz, restringe métodos, sanea su entorno, media
+  URI, impone límites de mensajes y contrapresión, autentica el WebSocket y
+  termina cada proceso al cerrar o cambiar workspace.
+
+## KI-010 — Identidad de workspaces movidos y procesos durante el hot-swap
+
+- Estado: limitación de lifecycle aceptada.
+- Impacto: mover un repositorio cambia su identidad y deja la entrada reciente
+  anterior como no disponible. Un cambio de workspace termina las PTY y los
+  procesos LSP/Codex del runtime anterior; no se reanudan al regresar.
+- Mitigación: el selector informa disponibilidad, conserva borradores locales
+  por workspace y exige una decisión antes de cambiar con ediciones pendientes.
+  Las sesiones de procesos reanudables permanecen fuera de este checkpoint.
+
 ## Estado de pruebas
 
-La verificación de `v0.0.4` se ejecutó con Node.js 24.14.0 y pnpm 11.7.0:
+La verificación de `v0.0.5` se ejecutó con Node.js 24.18.0 y pnpm 11.7.0:
 
-- instalación congelada, `git diff --check`, version check, typecheck, build y
-  creación del tarball: correctos;
-- Vitest: 34 archivos y 219 pruebas correctas, incluidas las integraciones con
-  SQLite y sockets loopback;
-- Playwright: 13 de 13 escenarios correctos en Chromium, incluidos docking,
-  Monaco, PTY, conflictos externos, Settings y autenticación local;
+- instalación congelada, `git diff --check`, version check, typecheck, build,
+  smoke LSP y creación del tarball: correctos;
+- Vitest: 41 archivos y 296 pruebas correctas, incluidas las integraciones de
+  SQLite, locks, lifecycle A→B, aislamiento de sesión y transporte LSP;
+- Playwright: 17 de 17 escenarios correctos en Chromium, incluidos hot-swap,
+  recientes, paginación de carpetas, navegación, foco, borradores, locks,
+  Monaco y PTY;
 - benchmark de 10.000 archivos y 2.000.000 de líneas: indexación fría en
-  33.785 ms, actualización incremental p95 en 135 ms y PTY p95 en 0 ms, dentro
+  44.059 ms, actualización incremental p95 en 156 ms y PTY p95 en 0 ms, dentro
   de los presupuestos de 90 s, 1 s y 100 ms;
-- smoke del paquete: tarball `constelix-agent-0.0.4.tgz` instalado en un entorno
-  temporal, ruta con espacios y dashboard servido correctamente.
+- smoke LSP: diagnósticos y hover reales correctos con los servidores
+  TypeScript y Pyright incluidos;
+- smoke del paquete: tarball `constelix-agent-0.0.5.tgz` instalado en un entorno
+  temporal, ruta con espacios y dashboard servido correctamente;
+- QA renderizada: cambio A→B→A, selector, retorno de foco y LSP TypeScript/Python
+  verificados sin errores ni advertencias de consola.
 
 Los smokes reales de proveedores LLM y Codex siguen siendo opt-in porque
 requieren servicios externos, credenciales o un turno con efectos. Sus
 protocolos, fallbacks, sandbox y redacción se validan con dobles automatizados.
-Este checkpoint conserva las limitaciones KI-001, KI-003 a KI-008 y no se
+Este checkpoint conserva las limitaciones KI-001, KI-003 a KI-010 y no se
 declara libre de riesgos conocidos.

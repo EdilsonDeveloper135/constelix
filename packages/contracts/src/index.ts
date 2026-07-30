@@ -57,6 +57,129 @@ export const WorkspaceSummarySchema = z.object({
   omittedFilesTruncated: z.boolean().default(false)
 });
 
+export const WorkspaceSessionSchema = z.object({
+  id: z.string().uuid(),
+  workspaceId: WorkspaceIdSchema,
+  activatedAt: z.string().datetime()
+}).strict();
+
+export const WorkspaceAvailabilitySchema = z.enum([
+  "available",
+  "missing",
+  "unreadable",
+  "locked",
+  "unknown"
+]);
+
+export const RecentWorkspaceSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  workspaceId: WorkspaceIdSchema,
+  name: z.string().min(1).max(255),
+  displayPath: z.string().min(1).max(2_048),
+  lastOpenedAt: z.string().datetime(),
+  availability: WorkspaceAvailabilitySchema,
+  lastMode: WorkspaceAccessModeSchema
+}).strict();
+
+export const WorkspaceListResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  activeSession: WorkspaceSessionSchema,
+  recents: z.array(RecentWorkspaceSchema).max(12)
+}).strict();
+
+const AbsoluteWorkspacePathSchema = z.string()
+  .min(1)
+  .max(4_096)
+  .refine((value) => value.startsWith("/") && !value.includes("\0"), {
+    message: "Workspace paths must be absolute and cannot contain NUL bytes"
+  });
+
+export const WorkspaceTargetSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("path"),
+    path: AbsoluteWorkspacePathSchema
+  }).strict(),
+  z.object({
+    kind: z.literal("recent"),
+    workspaceId: WorkspaceIdSchema
+  }).strict()
+]);
+
+export const WorkspaceLockResolutionSchema = z.object({
+  action: z.literal("force-release"),
+  // v1 leases use UUIDs. Legacy v0 locks used nonces or synthetic ids, so
+  // the guarded force-release flow must preserve their exact opaque owner id.
+  expectedLockId: z.string().min(1).max(200),
+  acknowledgeRisk: z.literal(true)
+}).strict();
+
+export const WorkspaceOpenRequestSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  requestId: z.string().uuid(),
+  expectedSessionId: z.string().uuid(),
+  target: WorkspaceTargetSchema,
+  readOnly: z.boolean().optional(),
+  lockResolution: WorkspaceLockResolutionSchema.optional()
+}).strict();
+
+export const WorkspaceOpenResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  session: WorkspaceSessionSchema,
+  bootstrap: z.record(z.string(), z.unknown())
+}).strict();
+
+export const WorkspaceLockConflictSchema = z.object({
+  conflictId: z.string().uuid(),
+  lockId: z.string().min(1).max(200),
+  workspaceId: WorkspaceIdSchema,
+  displayPath: z.string().min(1).max(2_048),
+  status: z.enum(["active", "ambiguous"]),
+  forceAllowed: z.boolean(),
+  pid: z.number().int().positive().optional(),
+  agentVersion: z.string().min(1).max(100).optional(),
+  heartbeatAt: z.string().datetime().optional()
+}).strict();
+
+export const WorkspaceBrowseEntrySchema = z.object({
+  name: z.string().min(1).max(255),
+  path: AbsoluteWorkspacePathSchema,
+  symlink: z.boolean()
+}).strict();
+
+export const WorkspaceBrowseResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  path: AbsoluteWorkspacePathSchema,
+  parentPath: AbsoluteWorkspacePathSchema.nullable(),
+  entries: z.array(WorkspaceBrowseEntrySchema).max(200),
+  cursor: z.string().min(1).max(1_024).optional(),
+  truncated: z.boolean()
+}).strict().superRefine((page, context) => {
+  if (page.truncated !== Boolean(page.cursor)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["cursor"],
+      message: "A truncated browse page must include its continuation cursor.",
+    });
+  }
+});
+
+export const LspLanguageSchema = z.enum([
+  "javascript",
+  "typescript",
+  "python"
+]);
+
+export const LspServerStatusSchema = z.object({
+  available: z.boolean(),
+  reason: z.string().min(1).max(1_000).optional()
+}).strict();
+
+export const LspAvailabilitySchema = z.object({
+  javascript: LspServerStatusSchema,
+  typescript: LspServerStatusSchema,
+  python: LspServerStatusSchema
+}).strict();
+
 export const GraphNodeKindSchema = z.enum([
   "project",
   "folder",
@@ -436,7 +559,9 @@ export const TerminalOutputSnapshotSchema = z.object({
 const ServerEventBaseSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
   eventId: z.string().min(1),
-  timestamp: z.string().datetime()
+  timestamp: z.string().datetime(),
+  sessionId: z.string().uuid().optional(),
+  workspaceId: WorkspaceIdSchema.optional()
 });
 
 export const ServerEventSchema = z.discriminatedUnion("type", [
@@ -511,6 +636,12 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       recoverable: z.boolean(),
       severity: z.enum(["info", "warning", "error"]).default("error")
     })
+  }),
+  ServerEventBaseSchema.extend({
+    type: z.literal("workspace.changed"),
+    payload: z.object({
+      session: WorkspaceSessionSchema
+    }).strict()
   })
 ]);
 
@@ -542,6 +673,20 @@ export type WorkspaceAccessMode = z.infer<typeof WorkspaceAccessModeSchema>;
 export type WorkspaceWarning = z.infer<typeof WorkspaceWarningSchema>;
 export type WorkspaceOmittedFile = z.infer<typeof WorkspaceOmittedFileSchema>;
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummarySchema>;
+export type WorkspaceSession = z.infer<typeof WorkspaceSessionSchema>;
+export type WorkspaceAvailability = z.infer<typeof WorkspaceAvailabilitySchema>;
+export type RecentWorkspace = z.infer<typeof RecentWorkspaceSchema>;
+export type WorkspaceListResponse = z.infer<typeof WorkspaceListResponseSchema>;
+export type WorkspaceTarget = z.infer<typeof WorkspaceTargetSchema>;
+export type WorkspaceLockResolution = z.infer<typeof WorkspaceLockResolutionSchema>;
+export type WorkspaceOpenRequest = z.infer<typeof WorkspaceOpenRequestSchema>;
+export type WorkspaceOpenResponse = z.infer<typeof WorkspaceOpenResponseSchema>;
+export type WorkspaceLockConflict = z.infer<typeof WorkspaceLockConflictSchema>;
+export type WorkspaceBrowseEntry = z.infer<typeof WorkspaceBrowseEntrySchema>;
+export type WorkspaceBrowseResponse = z.infer<typeof WorkspaceBrowseResponseSchema>;
+export type LspLanguage = z.infer<typeof LspLanguageSchema>;
+export type LspServerStatus = z.infer<typeof LspServerStatusSchema>;
+export type LspAvailability = z.infer<typeof LspAvailabilitySchema>;
 export type Language = z.infer<typeof LanguageSchema>;
 export type GraphNodeKind = z.infer<typeof GraphNodeKindSchema>;
 export type GraphRelation = z.infer<typeof GraphRelationSchema>;

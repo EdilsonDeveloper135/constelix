@@ -5,7 +5,7 @@
 Constelix is a pnpm TypeScript monorepo:
 
 - `apps/web/`: React, React Flow, Monaco, xterm.js, Zustand, and Vite dashboard.
-- `apps/agent/`: CLI, Fastify/WebSocket server, indexer, SQLite, PTY, OpenAI, and Codex.
+- `apps/agent/`: CLI, server, indexer, SQLite, PTY, OpenAI, and Codex.
 - `packages/contracts/`: shared Zod schemas and protocol types.
 - `packages/analyzers/`: Tree-sitter analysis for JavaScript, TypeScript, and Python.
 - `packages/graph-core/`: graph queries, deltas, paths, and pagination.
@@ -26,12 +26,13 @@ Use Node.js 24 and pnpm 11.
 - `pnpm test:e2e`: run Playwright browser scenarios.
 - `pnpm build`: build packages, apps, and bundled CLI assets.
 - `pnpm benchmark`: verify indexing and PTY latency budgets.
+- `pnpm smoke:lsp`: start the bundled TypeScript and Python language servers.
 - `pnpm smoke:package`: pack, install, and launch the production CLI.
 - `pnpm check`: run version validation, typecheck, tests, and build.
 
 ## Coding Style & Naming Conventions
 
-Use strict TypeScript, ESM imports, two-space indentation, double quotes, and semicolons. Prefer small typed modules and Zod validation at process or network boundaries. Use `camelCase` for functions and variables, `PascalCase` for React components, classes, and types, and descriptive filenames such as `workspaceGraph.ts`. There is no separate formatter or linter gate; match nearby code and run `git diff --check`.
+Use strict TypeScript, ESM imports, two-space indentation, double quotes, and semicolons. Prefer small typed modules and Zod validation at boundaries. Use `camelCase` for functions and variables, `PascalCase` for components, classes, and types, and descriptive filenames such as `workspaceGraph.ts`. There is no separate formatter gate; match nearby code and run `git diff --check`.
 
 ## Testing Guidelines
 

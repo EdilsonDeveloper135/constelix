@@ -88,6 +88,15 @@ export function clearEditorDraftsForWorkspace(workspaceId: string): void {
   }
 }
 
+export function listDirtyEditorDrafts(workspaceId: string): EditorDraft[] {
+  const prefix = `${workspaceId}\u0000`;
+  return [...drafts.entries()]
+    .filter(([key, draft]) =>
+      key.startsWith(prefix) && draft.content !== draft.savedContent
+    )
+    .map(([, draft]) => draft);
+}
+
 export function clearEditorDraftsForTests(): void {
   drafts.clear();
 }

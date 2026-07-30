@@ -1,6 +1,6 @@
 {
   "name": "constelix",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": true,
   "description": "A local-first visual software engineering workspace.",
   "type": "module",
@@ -22,6 +22,7 @@
     "benchmark": "node --import tsx scripts/run-benchmark.ts && node --import tsx scripts/run-runtime-benchmark.ts",
     "benchmark:fixture": "node --import tsx scripts/generate-benchmark.ts",
     "smoke:codex": "node --import tsx scripts/smoke-codex.ts",
+    "smoke:lsp": "node --import tsx scripts/smoke-lsp.ts",
     "smoke:package": "node --import tsx scripts/smoke-packaged-cli.ts",
     "check": "pnpm version:check && pnpm typecheck && pnpm test && pnpm build"
   },
