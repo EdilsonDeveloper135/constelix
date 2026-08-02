@@ -17,7 +17,12 @@ import { InMemoryGraphStore, stableId } from "@constelix/graph-core";
 import { AnalyzerWorkerClient } from "./analyzer-worker-client.js";
 import type { ConstelixDatabase, IndexedFileRecord } from "./database.js";
 import type { EventBus } from "./events.js";
-import { FileTooLargeError, readWorkspaceTextFile } from "./files.js";
+import {
+  FileChangedDuringReadError,
+  FileTooLargeError,
+  InvalidTextFileError,
+  readWorkspaceTextFile,
+} from "./files.js";
 import {
   buildIgnoreMatcher,
   detectSupportedLanguage,
@@ -524,10 +529,12 @@ export class WorkspaceIndexer {
     try {
       await this.assertWorkspace();
       this.publishStatus("scanning", 0, changedPaths.length, "Applying filesystem changes");
-      const matcher = await buildIgnoreMatcher(this.workspace);
       const changedSources = new Map<string, ScannedSource>();
       const removedPaths = new Set<string>();
       const diagnostics: Array<{ relativePath?: string; message: string }> = [];
+      const matcher = await buildIgnoreMatcher(this.workspace, (diagnostic) => {
+        diagnostics.push(diagnostic);
+      });
       const sourceByteLimit = boundedSourceByteLimit(
         this.options.scanOptions?.maxTotalBytes,
       );
@@ -686,7 +693,8 @@ export class WorkspaceIndexer {
       if (code === "ENOENT") return undefined;
       if (
         error instanceof FileTooLargeError ||
-        (error instanceof Error && /binary files/i.test(error.message))
+        error instanceof InvalidTextFileError ||
+        error instanceof FileChangedDuringReadError
       ) {
         diagnostics.push({ relativePath, message: error.message });
         return undefined;

@@ -123,6 +123,7 @@ export class InMemoryGraphStore {
   private edges = new Map<string, GraphEdge>();
   private outbound = new Map<string, Set<string>>();
   private inbound = new Map<string, Set<string>>();
+  private cachedNodeOrder: GraphNode[] | null = null;
 
   constructor(workspace: string | GraphSnapshot) {
     if (typeof workspace === "string") {
@@ -166,6 +167,7 @@ export class InMemoryGraphStore {
     this.sourceTruncatedValue = snapshot.truncated;
     this.nodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
     this.edges = new Map(snapshot.edges.map((edge) => [edge.id, edge]));
+    this.cachedNodeOrder = null;
     this.rebuildAdjacency();
   }
 
@@ -184,15 +186,17 @@ export class InMemoryGraphStore {
     for (const node of [...delta.nodesAdded, ...delta.nodesUpdated]) nodes.set(node.id, node);
     for (const edge of [...delta.edgesAdded, ...delta.edgesUpdated]) edges.set(edge.id, edge);
 
+    const removedNodeIds = new Set(delta.nodeIdsRemoved);
     for (const [id, edge] of edges) {
       if (!nodes.has(edge.source) || !nodes.has(edge.target)) {
-        if (delta.nodeIdsRemoved.includes(edge.source) || delta.nodeIdsRemoved.includes(edge.target)) edges.delete(id);
+        if (removedNodeIds.has(edge.source) || removedNodeIds.has(edge.target)) edges.delete(id);
       }
     }
     this.assertIntegrity([...nodes.values()], [...edges.values()]);
     this.nodes = nodes;
     this.edges = edges;
     this.revisionValue = delta.revision;
+    this.cachedNodeOrder = null;
     this.rebuildAdjacency();
   }
 
@@ -233,7 +237,7 @@ export class InMemoryGraphStore {
         edges: [...this.edges.values()]
           .filter(
             (edge) =>
-              pageNodeIds.has(edge.source) || pageNodeIds.has(edge.target),
+              pageNodeIds.has(edge.source) && pageNodeIds.has(edge.target),
           )
           .sort((left, right) => left.id.localeCompare(right.id)),
       });
@@ -428,6 +432,7 @@ export class InMemoryGraphStore {
   }
 
   private connectedNodeOrder(): GraphNode[] {
+    if (this.cachedNodeOrder !== null) return this.cachedNodeOrder;
     const visited = new Set<string>();
     const ordered: GraphNode[] = [];
     const queue = [...this.defaultRootIds()];
@@ -457,6 +462,7 @@ export class InMemoryGraphStore {
     for (const node of [...this.nodes.values()].sort((left, right) => left.id.localeCompare(right.id))) {
       if (!visited.has(node.id)) ordered.push(node);
     }
+    this.cachedNodeOrder = ordered;
     return ordered;
   }
 

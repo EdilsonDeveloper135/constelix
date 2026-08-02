@@ -180,6 +180,24 @@ describe("WorkspaceBrowser", () => {
     ).rejects.toMatchObject({ code: "WORKSPACE_BROWSE_LIMIT_INVALID" });
   });
 
+  it("bounds directory enumeration before building a sortable listing", async () => {
+    const root = await temporaryDirectory();
+    await Promise.all([
+      mkdir(join(root, "alpha")),
+      mkdir(join(root, "beta")),
+      mkdir(join(root, "gamma")),
+    ]);
+    const browser = new WorkspaceBrowser({
+      cursorSecret,
+      maxDirectoryEntries: 2,
+    });
+
+    await expect(browser.browse({ path: root })).rejects.toMatchObject({
+      code: "WORKSPACE_BROWSE_TOO_LARGE",
+      recoverable: true,
+    });
+  });
+
   it("rejects tampered cursors and cursors from another browse context", async () => {
     const root = await temporaryDirectory();
     const other = join(root, "other");

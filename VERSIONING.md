@@ -55,12 +55,13 @@ git tag -a vMAJOR.MINOR.PATCH -m "Constelix vMAJOR.MINOR.PATCH"
 
 ## 5. Versión actual
 
-`v0.0.5`
+`v0.0.6`
 
 ## 6. Historial
 
 | Versión | Fecha | Descripción |
 |---|---|---|
+| `v0.0.6` | 2026-08-01 | Auditoría técnica integral, límites de recursos, dependencias seguras y robustez de archivos, eventos y configuración. |
 | `v0.0.5` | 2026-07-29 | LSP local para TypeScript/JavaScript/Python, cambio dinámico de workspace y leases recuperables. |
 | `v0.0.4` | 2026-07-21 | Paneles anclables, configuración LLM local, handshake WebSocket autenticado y fallback ampliado. |
 | `v0.0.3` | 2026-07-17 | Proyectos externos seguros, Ask Local offline, onboarding y aislamiento por workspace. |

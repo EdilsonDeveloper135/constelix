@@ -1,4 +1,3 @@
-import { opendir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import Parser from "tree-sitter";
 import JavaScript from "tree-sitter-javascript";
@@ -20,34 +19,8 @@ import {
 } from "@constelix/contracts";
 import { analysisEdgeId, analysisNodeId, analyzerStableId } from "./ids.js";
 
-const SUPPORTED_EXTENSIONS = new Set([
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".ts",
-  ".tsx",
-  ".mts",
-  ".cts",
-  ".py",
-  ".pyi",
-]);
-const DEFAULT_EXCLUDED_DIRECTORIES = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  ".venv",
-  "__pycache__",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "target",
-  "vendor"
-]);
-
 export interface AnalyzerDiagnostic {
-  code: "parse_error" | "missing_syntax" | "unsupported_language" | "read_error" | "file_limit" | "file_too_large";
+  code: "parse_error" | "missing_syntax" | "unsupported_language";
   severity: "warning" | "error";
   message: string;
   relativePath: string;
@@ -75,15 +48,6 @@ export interface AnalyzeFilesOptions {
 export interface TypeScriptResolutionOptions {
   baseUrl: string;
   paths: Record<string, readonly string[]>;
-}
-
-export interface AnalyzeWorkspaceOptions {
-  workspaceId?: string;
-  revision?: number;
-  projectName?: string;
-  maxFiles?: number;
-  maxFileBytes?: number;
-  excludedDirectories?: readonly string[];
 }
 
 export interface AnalysisResult {
@@ -292,70 +256,6 @@ export function analyzeFiles(files: readonly SourceFileInput[], options: Analyze
   };
 }
 
-export async function analyzeWorkspace(rootPath: string, options: AnalyzeWorkspaceOptions = {}): Promise<AnalysisResult> {
-  const root = await realpath(rootPath);
-  const workspaceId = options.workspaceId ?? analyzerStableId("workspace", root);
-  const maxFiles = options.maxFiles ?? 10_000;
-  const maxFileBytes = options.maxFileBytes ?? 2 * 1024 * 1024;
-  const exclusions = new Set([...DEFAULT_EXCLUDED_DIRECTORIES, ...(options.excludedDirectories ?? [])]);
-  const inputs: SourceFileInput[] = [];
-  const diagnostics: AnalyzerDiagnostic[] = [];
-
-  async function scan(directory: string): Promise<void> {
-    const handle = await opendir(directory);
-    const entries = [];
-    for await (const entry of handle) entries.push(entry);
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      if (inputs.length >= maxFiles) return;
-      if (entry.isSymbolicLink()) continue;
-      const absolutePath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!exclusions.has(entry.name)) await scan(absolutePath);
-        continue;
-      }
-      if (!entry.isFile() || !SUPPORTED_EXTENSIONS.has(path.extname(entry.name).toLocaleLowerCase())) continue;
-      const relativePath = normalizeRelativePath(path.relative(root, absolutePath));
-      try {
-        const fileStat = await stat(absolutePath);
-        if (fileStat.size > maxFileBytes) {
-          diagnostics.push({
-            code: "file_too_large",
-            severity: "warning",
-            message: `Skipped ${relativePath}: ${fileStat.size} bytes exceeds the configured limit`,
-            relativePath
-          });
-          continue;
-        }
-        inputs.push({ relativePath, source: await readFile(absolutePath, "utf8") });
-      } catch (error) {
-        diagnostics.push({
-          code: "read_error",
-          severity: "warning",
-          message: error instanceof Error ? error.message : `Could not read ${relativePath}`,
-          relativePath
-        });
-      }
-    }
-  }
-
-  await scan(root);
-  if (inputs.length >= maxFiles) {
-    diagnostics.push({
-      code: "file_limit",
-      severity: "warning",
-      message: `Analysis stopped at the configured limit of ${maxFiles} files`,
-      relativePath: ""
-    });
-  }
-  const result = analyzeFiles(inputs, {
-    workspaceId,
-    revision: options.revision ?? 1,
-    projectName: options.projectName ?? path.basename(root)
-  });
-  return { snapshot: result.snapshot, diagnostics: [...diagnostics, ...result.diagnostics] };
-}
-
 function grammarFor(language: Language): unknown {
   if (language === "typescript") return TypeScript.typescript;
   if (language === "tsx") return TypeScript.tsx;
@@ -454,7 +354,7 @@ function definitionFor(
   language: Language
 ): { name: string; kind: GraphNodeKind } | undefined {
   let kind: GraphNodeKind | undefined;
-  if (node.type === "class_declaration" || node.type === "abstract_class_declaration" || node.type === "class_definition") {
+  if (node.type === "class_declaration" || node.type === "abstract_class_declaration" || node.type === "class_definition" || (node.type === "class" && node.parent?.type === "export_statement")) {
     kind = "class";
   } else if (node.type === "interface_declaration") {
     kind = "interface";
@@ -462,15 +362,20 @@ function definitionFor(
     kind = "method";
   } else if (["function_declaration", "generator_function_declaration", "function_signature"].includes(node.type)) {
     kind = owner.kind === "class" || owner.kind === "interface" ? "method" : "function";
-  } else if (language === "python" && node.type === "function_definition") {
+  } else if (language === "python" && (node.type === "function_definition" || node.type === "async_function_definition")) {
     kind = owner.kind === "class" ? "method" : "function";
   } else if (node.type === "variable_declarator") {
     const value = node.childForFieldName("value");
     if (value !== null && ["arrow_function", "function_expression", "generator_function"].includes(value.type)) kind = "function";
+  } else if (node.parent?.type === "export_statement" && ["arrow_function", "function_expression", "generator_function"].includes(node.type)) {
+    kind = "function";
   }
   if (kind === undefined) return undefined;
   const nameNode = node.childForFieldName("name");
-  const name = nameNode?.text.trim();
+  let name = nameNode?.text.trim();
+  if (name === undefined && node.parent?.type === "export_statement" && node.parent.children.some(c => c.type === "default")) {
+    name = "default";
+  }
   if (name === undefined || name.length === 0 || !/^[#$A-Za-z_\p{L}][\w$#\p{L}\p{N}]*$/u.test(name)) return undefined;
   return { name, kind };
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { opendir, readFile, stat } from "node:fs/promises";
+import { opendir, stat } from "node:fs/promises";
 import { posix, relative, sep } from "node:path";
 import createIgnore, { type Ignore } from "ignore";
 import type { TypeScriptResolutionOptions } from "@constelix/analyzers";
@@ -11,6 +11,13 @@ import type {
   WorkspaceWarning,
 } from "@constelix/contracts";
 import {
+  FileChangedDuringReadError,
+  FileTooLargeError,
+  InvalidTextFileError,
+  decodeUtf8Text,
+  readBoundedWorkspaceFile,
+} from "./files.js";
+import {
   PathSecurityError,
   isSensitiveCredentialPath,
   resolveExistingWorkspacePath,
@@ -18,10 +25,13 @@ import {
 } from "./security.js";
 
 export const MAX_WORKSPACE_FILES = 10_000;
+export const MAX_WORKSPACE_ENTRIES = 100_000;
+export const MAX_DIRECTORY_ENTRIES = 25_000;
 export const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 export const MAX_WORKSPACE_SOURCE_BYTES = 2 * 1024 * 1024;
 export const MAX_CONFIGURABLE_WORKSPACE_SOURCE_BYTES = 256 * 1024 * 1024;
 const MAX_TYPESCRIPT_CONFIG_BYTES = 1024 * 1024;
+const MAX_IGNORE_FILE_BYTES = 1024 * 1024;
 const DEFAULT_PROGRESS_EVERY_FILES = 100;
 const MAX_REPORTED_OMITTED_FILES = 200;
 
@@ -78,6 +88,7 @@ export interface ScanProgress {
 
 export interface ScanWorkspaceOptions {
   maxFiles?: number;
+  maxEntries?: number;
   maxBytes?: number;
   maxTotalBytes?: number;
   progressEveryFiles?: number;
@@ -86,14 +97,31 @@ export interface ScanWorkspaceOptions {
 
 export async function buildIgnoreMatcher(
   workspace: WorkspaceReference,
+  onDiagnostic?: (diagnostic: {
+    relativePath: string;
+    message: string;
+  }) => void,
 ): Promise<Ignore> {
   const matcher = createIgnore();
   for (const name of [".gitignore", ".constelixignore"]) {
     try {
-      const path = await resolveExistingWorkspacePath(workspace, name);
-      matcher.add(await readFile(path, "utf8"));
+      const file = await readBoundedWorkspaceFile(
+        workspace,
+        name,
+        MAX_IGNORE_FILE_BYTES,
+      );
+      matcher.add(decodeUtf8Text(file.buffer));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      if (
+        error instanceof FileTooLargeError ||
+        error instanceof InvalidTextFileError ||
+        error instanceof FileChangedDuringReadError
+      ) {
+        onDiagnostic?.({ relativePath: name, message: error.message });
+        continue;
+      }
+      throw error;
     }
   }
   // System exclusions are appended last so repository negation rules cannot
@@ -107,10 +135,12 @@ export async function readTypeScriptResolutionOptions(
 ): Promise<TypeScriptResolutionOptions | undefined> {
   for (const configName of ["tsconfig.json", "jsconfig.json"]) {
     try {
-      const configPath = await resolveExistingWorkspacePath(workspace, configName);
-      const info = await stat(configPath);
-      if (!info.isFile() || info.size > MAX_TYPESCRIPT_CONFIG_BYTES) return undefined;
-      const source = await readFile(configPath, "utf8");
+      const file = await readBoundedWorkspaceFile(
+        workspace,
+        configName,
+        MAX_TYPESCRIPT_CONFIG_BYTES,
+      );
+      const source = decodeUtf8Text(file.buffer);
       const parsed = JSON.parse(stripTrailingCommas(stripJsonComments(source))) as unknown;
       if (!isRecord(parsed) || !isRecord(parsed.compilerOptions)) return undefined;
 
@@ -134,7 +164,14 @@ export async function readTypeScriptResolutionOptions(
       return { baseUrl, paths };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      if (error instanceof SyntaxError) return undefined;
+      if (
+        error instanceof SyntaxError ||
+        error instanceof FileTooLargeError ||
+        error instanceof InvalidTextFileError ||
+        error instanceof FileChangedDuringReadError
+      ) {
+        return undefined;
+      }
       throw error;
     }
   }
@@ -163,6 +200,10 @@ export async function scanWorkspace(
   options: ScanWorkspaceOptions = {},
 ): Promise<ScanResult> {
   const maxFiles = Math.min(Math.max(options.maxFiles ?? MAX_WORKSPACE_FILES, 1), MAX_WORKSPACE_FILES);
+  const maxEntries = Math.min(
+    Math.max(Math.trunc(options.maxEntries ?? MAX_WORKSPACE_ENTRIES), 1),
+    MAX_WORKSPACE_ENTRIES,
+  );
   const maxBytes = Math.min(Math.max(options.maxBytes ?? MAX_SOURCE_BYTES, 1), MAX_SOURCE_BYTES);
   const maxTotalBytes = Math.min(
     Math.max(options.maxTotalBytes ?? MAX_WORKSPACE_SOURCE_BYTES, 1),
@@ -172,12 +213,24 @@ export async function scanWorkspace(
     1,
     Math.trunc(options.progressEveryFiles ?? DEFAULT_PROGRESS_EVERY_FILES),
   );
-  const matcher = await buildIgnoreMatcher(workspace);
+  const ignoreDiagnostics: Array<{
+    relativePath?: string;
+    message: string;
+  }> = [];
+  const matcher = await buildIgnoreMatcher(workspace, (diagnostic) => {
+    ignoreDiagnostics.push(diagnostic);
+  });
   const summaryState = {
     estimatedFileCount: 0,
     languages: new Set<Language>(),
     projectTypes: await detectProjectTypes(workspace),
-    warnings: [] as WorkspaceWarning[],
+    warnings: ignoreDiagnostics.map((diagnostic) => ({
+      code: "IGNORE_FILE_OMITTED",
+      message: diagnostic.message,
+      ...(diagnostic.relativePath === undefined
+        ? {}
+        : { relativePath: diagnostic.relativePath }),
+    })) satisfies WorkspaceWarning[],
     omittedFiles: [] as WorkspaceOmittedFile[],
     omittedFileCount: 0,
   };
@@ -185,11 +238,13 @@ export async function scanWorkspace(
     files: [],
     skipped: 0,
     truncated: false,
-    diagnostics: [],
+    diagnostics: ignoreDiagnostics,
     summary: createWorkspaceSummary(summaryState, 0),
   };
   const visitedDirectories = new Set<string>();
   let sourceBytes = 0;
+  let entriesVisited = 0;
+  let entryLimitReached = false;
   let fileLimitReached = false;
   let sourceBudgetReached = false;
 
@@ -208,6 +263,7 @@ export async function scanWorkspace(
   }
 
   async function walk(relativeDirectory = ""): Promise<void> {
+    if (entryLimitReached) return;
     const canonicalDirectory = await resolveExistingWorkspacePath(
       workspace,
       relativeDirectory || ".",
@@ -217,7 +273,27 @@ export async function scanWorkspace(
 
     const directory = await opendir(canonicalDirectory);
     const entries: Dirent[] = [];
-    for await (const entry of directory) entries.push(entry);
+    for await (const entry of directory) {
+      if (
+        entriesVisited >= maxEntries ||
+        entries.length >= MAX_DIRECTORY_ENTRIES
+      ) {
+        entryLimitReached = true;
+        // Directory iteration order is filesystem-dependent. Discard the
+        // partial directory instead of indexing a nondeterministic subset.
+        entries.length = 0;
+        result.skipped += 1;
+        result.truncated = true;
+        addDiagnosticOnce(
+          "WORKSPACE_ENTRY_LIMIT",
+          relativeDirectory || ".",
+          `Workspace traversal is limited to ${maxEntries} filesystem entries and ${MAX_DIRECTORY_ENTRIES} entries per directory.`,
+        );
+        break;
+      }
+      entriesVisited += 1;
+      entries.push(entry);
+    }
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
@@ -285,55 +361,57 @@ export async function scanWorkspace(
       recordOmission(relativePath, "source_budget");
       return;
     }
-    const absolutePath = await resolveExistingWorkspacePath(
-      workspace,
-      relativePath,
-    );
-    const info = await stat(absolutePath);
-    if (info.size > maxBytes) {
-      result.skipped += 1;
-      recordOmission(relativePath, "too_large");
-      addDiagnostic(relativePath, `File exceeds the ${maxBytes} byte source limit.`);
-      return;
+    let file;
+    try {
+      file = await readBoundedWorkspaceFile(workspace, relativePath, maxBytes);
+    } catch (error) {
+      if (error instanceof FileTooLargeError) {
+        result.skipped += 1;
+        recordOmission(relativePath, "too_large");
+        addDiagnostic(
+          relativePath,
+          `File exceeds the ${maxBytes} byte source limit.`,
+        );
+        return;
+      }
+      if (error instanceof FileChangedDuringReadError) {
+        result.skipped += 1;
+        recordOmission(relativePath, "changed");
+        addDiagnostic(relativePath, error.message);
+        return;
+      }
+      if (error instanceof InvalidTextFileError) {
+        result.skipped += 1;
+        recordOmission(relativePath, "binary");
+        addDiagnostic(relativePath, error.message);
+        return;
+      }
+      throw error;
     }
-    if (sourceBytes + info.size > maxTotalBytes) {
+    if (sourceBytes + file.sizeBytes > maxTotalBytes) {
       truncateForSourceBudget(relativePath);
       return;
     }
-    const revalidatedPath = await resolveExistingWorkspacePath(
-      workspace,
-      relativePath,
-    );
-    if (revalidatedPath !== absolutePath) {
-      throw new Error("The source path changed while it was being scanned.");
-    }
-    const buffer = await readFile(revalidatedPath);
-    if (buffer.byteLength > maxBytes) {
-      result.skipped += 1;
-      recordOmission(relativePath, "too_large");
-      addDiagnostic(relativePath, `File exceeds the ${maxBytes} byte source limit.`);
-      return;
-    }
-    if (sourceBytes + buffer.byteLength > maxTotalBytes) {
-      truncateForSourceBudget(relativePath);
-      return;
-    }
-    if (buffer.includes(0)) {
+    let source: string;
+    try {
+      source = decodeUtf8Text(file.buffer);
+    } catch (error) {
+      if (!(error instanceof InvalidTextFileError)) throw error;
       result.skipped += 1;
       recordOmission(relativePath, "binary");
-      addDiagnostic(relativePath, "Binary file was skipped.");
+      addDiagnostic(relativePath, error.message);
       return;
     }
-    sourceBytes += buffer.byteLength;
+    sourceBytes += file.sizeBytes;
     result.files.push({
       workspaceId,
       relativePath,
-      absolutePath,
-      source: buffer.toString("utf8"),
+      absolutePath: file.absolutePath,
+      source,
       language,
-      sizeBytes: buffer.byteLength,
-      mtimeMs: info.mtimeMs,
-      contentHash: createHash("sha256").update(buffer).digest("hex"),
+      sizeBytes: file.sizeBytes,
+      mtimeMs: file.mtimeMs,
+      contentHash: createHash("sha256").update(file.buffer).digest("hex"),
     });
     if (
       result.files.length === 1 ||

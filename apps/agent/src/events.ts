@@ -22,11 +22,15 @@ interface SocketState {
 
 interface LocalWebSocket {
   readonly readyState: number;
+  readonly bufferedAmount?: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: "message", listener: (raw: { toString(): string }) => void): void;
   once(event: "close" | "error", listener: () => void): void;
 }
+
+export const MAX_EVENT_SOCKETS = 8;
+export const MAX_EVENT_SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;
 
 export class EventBus {
   readonly #emitter = new EventEmitter();
@@ -59,8 +63,21 @@ export class EventBus {
       return event;
     }
     const serialized = JSON.stringify(transportEvent.data);
+    const serializedBytes = Buffer.byteLength(serialized);
     for (const state of this.#sockets) {
       if (state.socket.readyState === 1) {
+        if (
+          (state.socket.bufferedAmount ?? 0) + serializedBytes >
+          MAX_EVENT_SOCKET_BUFFER_BYTES
+        ) {
+          this.#sockets.delete(state);
+          try {
+            state.socket.close(1013, "Event backpressure limit exceeded");
+          } catch {
+            // The overloaded socket is already detached.
+          }
+          continue;
+        }
         try {
           state.socket.send(serialized);
         } catch {
@@ -82,6 +99,14 @@ export class EventBus {
   }
 
   attachAuthenticated(socket: LocalWebSocket): void {
+    if (this.#sockets.size >= MAX_EVENT_SOCKETS) {
+      try {
+        socket.close(4429, "Too many event connections");
+      } catch {
+        // The rejected socket cannot receive a close frame.
+      }
+      return;
+    }
     const state: SocketState = { socket };
     this.#sockets.add(state);
 

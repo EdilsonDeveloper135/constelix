@@ -20,6 +20,9 @@
 - Bind only to `127.0.0.1`.
 - Require bearer authentication for REST. Validate the capability query token,
   exact `Origin`, and exact `Host` before completing a WebSocket upgrade.
+- Keep Fastify request logging disabled because WebSocket authentication places
+  the capability transiently in the upgrade URL. In development, accept only
+  exact loopback HTTP origins before constructing the browser launch fragment.
 - Classify API requests using both the decoded path and Fastify's resolved
   route template, so percent-encoded aliases cannot bypass authentication.
 - Scope browser work to the active workspace session. The dashboard sends
@@ -36,7 +39,11 @@
   old Ask, Codex, PTY, LSP, watcher, database, and lease resources.
 - Propagate that descriptor through scanner, indexer, Ask, PTY, and Codex, and
   revalidate it immediately before filesystem reads or process execution.
-- Reject traversal, NUL bytes, absolute request paths, and symlinks escaping the workspace.
+- Reject traversal, NUL bytes, absolute request paths, oversized request paths,
+  invalid write hashes, and symlinks escaping the workspace.
+- Open text files through bounded no-follow descriptors, require a regular
+  file, verify device/inode and metadata around the read, and reject binary or
+  malformed UTF-8. Never allocate more than the configured limit plus one byte.
 - Detect write permission and propagate an explicit `read` or `edit` mode through
   bootstrap, editor, terminal, and Act gates.
 - Use optimistic hashes and atomic renames for editor writes.
@@ -55,6 +62,9 @@
   agent-secret HMAC tied to the directory, filter, offset, and sorted listing
   hash. A changed listing invalidates continuation instead of silently skipping
   entries.
+- Stream directory iteration and enforce traversal, per-directory, and source
+  memory budgets. Limit authenticated event sockets and disconnect a client
+  before its pending outbound buffer can grow beyond 8 MiB.
 - Exclude environment files, credentials, keys, dependencies, binaries, and generated outputs from automatic AI context.
 - Treat `LLM_API_KEY`, `OPENAI_API_KEY`, and equivalent provider credentials as
   write-only at protocol boundaries. Never return or inject them through
@@ -64,6 +74,8 @@
   outside the repository and SQLite, with a private directory and `0600` file
   permissions. Bind the secret transactionally to its provider URL with a random
   identifier; fail closed after a partial update and delete it on provider change.
+- Require private settings, secret, lease, and guard files to remain bounded
+  regular files; open them without following symlinks and restore private modes.
 - Require HTTPS for remote LLM endpoints. Permit cleartext HTTP and a missing
   API key only for exact loopback hosts; reject embedded credentials, query
   strings, fragments, and non-HTTP schemes.
@@ -90,6 +102,9 @@
   Allow only one session per language-server family. Start language servers
   with an environment allowlist, never forward stderr, and terminate them on
   disconnect, hot swap, or shutdown.
+- Serve production assets without source maps and with CSP, anti-framing,
+  no-sniff, no-referrer, no-store/no-cache, same-origin opener/resource, and a
+  restrictive permissions policy.
 
 ## Accepted residual risk
 
@@ -131,7 +146,7 @@ compare-and-delete prevents ordinary stale UI actions from deleting a changed
 owner; operating-system account isolation remains the real boundary.
 
 Language servers run locally as the same user and are not placed in an OS
-sandbox in v0.0.5. URI mediation, environment filtering, and lifecycle
+sandbox in v0.0.6. URI mediation, environment filtering, and lifecycle
 supervision constrain Constelix's bridge, but they cannot make a vulnerable
 language server or malicious project configuration safe. Open only repositories
 you trust with installed language-server versions.

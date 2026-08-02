@@ -18,7 +18,7 @@ This document records the approved visual concept as implementation tokens.
 - Dock and float controls are explicit, keyboard reachable, and expose their
   action and destination through an accessible name.
 - Adding or removing a dock changes the remaining canvas viewport, not semantic
-  node coordinates. v0.0.5 uses fixed responsive dock dimensions. Docked Monaco
+  node coordinates. v0.0.6 uses fixed responsive dock dimensions. Docked Monaco
   and xterm instances remain mounted across zoom and dock-tab switches.
 - Right-clicking a semantic node opens a focusable `menu`; it never executes a
   command by itself. Inspecting/selecting the node, exploring its relations,

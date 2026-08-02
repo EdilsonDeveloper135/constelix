@@ -32,16 +32,20 @@ export async function run(argv = process.argv.slice(2)): Promise<void> {
   if (cli.dev) {
     loadEnvironment({ path: resolve(projectRoot, ".env.local"), quiet: true, override: false });
   }
+  const devOrigin = cli.dev
+    ? validateDevOrigin(
+        process.env.CONSTELIX_WEB_ORIGIN ?? "http://127.0.0.1:5173",
+      )
+    : undefined;
   const server = await startAgentServer({
     workspaceRoot: workspace.canonicalRoot,
     readOnly: workspace.readOnly,
     dev: cli.dev,
+    ...(devOrigin === undefined ? {} : { devOrigin }),
     ...(cli.port === undefined ? {} : { port: cli.port }),
   });
 
-  const browserOrigin = cli.dev
-    ? process.env.CONSTELIX_WEB_ORIGIN ?? "http://127.0.0.1:5173"
-    : server.origin;
+  const browserOrigin = devOrigin ?? server.origin;
   const launchUrl = `${browserOrigin}/#token=${encodeURIComponent(server.capabilityToken)}&agent=${encodeURIComponent(server.origin)}`;
   process.stdout.write(`${formatWorkspaceLaunchLine(
     workspace.canonicalRoot,
@@ -100,6 +104,30 @@ export function formatWorkspaceLaunchLine(
       ? summarizeWorkspacePath(canonicalRoot)
       : summarizeWorkspacePath(canonicalRoot, userHome);
   return `Constelix is running for ${summary} (${readOnly ? "Modo Lectura" : "Modo Edición"})`;
+}
+
+export function validateDevOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("CONSTELIX_WEB_ORIGIN must be a valid loopback HTTP origin.");
+  }
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  if (
+    url.protocol !== "http:" ||
+    !loopbackHosts.has(url.hostname.toLocaleLowerCase()) ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error(
+      "CONSTELIX_WEB_ORIGIN must be an exact loopback HTTP origin without credentials, path, query, or fragment.",
+    );
+  }
+  return url.origin;
 }
 
 function assertSupportedNode(): void {

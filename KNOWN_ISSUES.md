@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.5` el 2026-07-29.
+Actualizado para `v0.0.6` el 2026-08-01.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -17,12 +17,17 @@ Actualizado para `v0.0.5` el 2026-07-29.
 
 - Estado: abierto, rendimiento.
 - Impacto: Vite emite advertencias de tamaño por los workers y recursos de Monaco y ELK. No se observaron errores funcionales en E2E.
-- Mitigación: mantener carga diferida y evaluar separación adicional de idiomas/workers antes de una distribución pública.
+- Mitigación: Monaco, xterm y sus workers permanecen en chunks diferidos; la
+  integración usa los subpaths públicos de Monaco 0.56. Evaluar separación
+  adicional de idiomas antes de una distribución pública.
 
 ## KI-004 — Carrera TOCTOU residual entre procesos del mismo usuario
 
 - Estado: abierto, riesgo aceptado del modelo local.
-- Impacto: aunque Constelix vuelve a validar rutas inmediatamente antes de una escritura atómica, otro proceso hostil bajo la misma cuenta de macOS podría intentar cambiar enlaces o rutas en la ventana restante.
+- Impacto: aunque Constelix abre lecturas con `O_NOFOLLOW`, verifica
+  dispositivo/inodo y vuelve a validar rutas antes de una escritura atómica,
+  otro proceso hostil bajo la misma cuenta de macOS podría intentar cambiar
+  enlaces o rutas en la ventana restante.
 - Mitigación: usar Constelix únicamente en una máquina y repositorios
   confiables. El descriptor canónico se revalida antes de scanner, indexer, Ask,
   PTY, Codex y escrituras atómicas, además de un monitor periódico. El MVP no
@@ -31,7 +36,7 @@ Actualizado para `v0.0.5` el 2026-07-29.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.5 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.6 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -41,8 +46,10 @@ Actualizado para `v0.0.5` el 2026-07-29.
 
 - Estado: limitación técnica aceptada y visible.
 - Impacto: el índice semántico omite contenido después de 10.000 archivos
-  elegibles, 2 MiB por archivo o 2 MiB agregados; el proyecto sigue disponible
-  para navegación y terminal, pero el grafo puede ser parcial.
+  elegibles, 100.000 entradas recorridas, 25.000 entradas en un directorio,
+  2 MiB por archivo o 2 MiB agregados; el proyecto sigue disponible para
+  navegación y terminal, pero el grafo puede ser parcial. El selector rechaza
+  carpetas con más de 100.000 entradas para no agotar memoria.
 - Mitigación: onboarding, progreso y bootstrap enumeran omisiones y advierten
   el truncamiento. El benchmark interno usa un override explícito únicamente
   para validar el presupuesto de rendimiento de 10.000 archivos.
@@ -71,7 +78,7 @@ Actualizado para `v0.0.5` el 2026-07-29.
 ## KI-009 — Alcance y confianza de los servidores de lenguaje
 
 - Estado: limitación técnica y de seguridad aceptada.
-- Impacto: v0.0.5 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+- Impacto: v0.0.6 ofrece LSP únicamente para TypeScript, JavaScript y Python.
   `typescript-language-server` y Pyright se ejecutan como procesos del usuario
   local y analizan configuración y dependencias del workspace; no constituyen
   una frontera frente a un repositorio hostil.
@@ -92,27 +99,31 @@ Actualizado para `v0.0.5` el 2026-07-29.
 
 ## Estado de pruebas
 
-La verificación de `v0.0.5` se ejecutó con Node.js 24.18.0 y pnpm 11.7.0:
+La verificación de `v0.0.6` se ejecutó con Node.js 24.14.0 y pnpm 11.9.0:
 
-- instalación congelada, `git diff --check`, version check, typecheck, build,
-  smoke LSP y creación del tarball: correctos;
-- Vitest: 41 archivos y 296 pruebas correctas, incluidas las integraciones de
-  SQLite, locks, lifecycle A→B, aislamiento de sesión y transporte LSP;
+- instalación congelada, `git diff --check`, version check, typecheck, build y
+  ausencia de source maps de producción: correctos;
+- `pnpm audit --prod`: 0 vulnerabilidades críticas, altas, moderadas, bajas o
+  informativas entre 173 dependencias de producción/opcionales auditadas;
+- Vitest: 42 archivos y 309 pruebas correctas, incluidas las regresiones de
+  filesystem acotado, UTF-8, scanner, sockets, configuración privada, SQLite,
+  locks, lifecycle A→B, aislamiento de sesión y transporte LSP;
 - Playwright: 17 de 17 escenarios correctos en Chromium, incluidos hot-swap,
   recientes, paginación de carpetas, navegación, foco, borradores, locks,
-  Monaco y PTY;
+  Settings, Monaco, LSP y PTY. La carrera de hidratación de Settings pasó
+  además 10 repeticiones consecutivas;
 - benchmark de 10.000 archivos y 2.000.000 de líneas: indexación fría en
-  44.059 ms, actualización incremental p95 en 156 ms y PTY p95 en 0 ms, dentro
+  42.497 ms, actualización incremental p95 en 134 ms y PTY p95 en 0 ms, dentro
   de los presupuestos de 90 s, 1 s y 100 ms;
 - smoke LSP: diagnósticos y hover reales correctos con los servidores
   TypeScript y Pyright incluidos;
-- smoke del paquete: tarball `constelix-agent-0.0.5.tgz` instalado en un entorno
+- smoke del paquete: tarball `constelix-agent-0.0.6.tgz` instalado en un entorno
   temporal, ruta con espacios y dashboard servido correctamente;
-- QA renderizada: cambio A→B→A, selector, retorno de foco y LSP TypeScript/Python
-  verificados sin errores ni advertencias de consola.
+- el tarball no imprimió la capability y el build final conserva el aviso
+  explícito de chunks diferidos grandes de Monaco/TypeScript/ELK.
 
 Los smokes reales de proveedores LLM y Codex siguen siendo opt-in porque
 requieren servicios externos, credenciales o un turno con efectos. Sus
 protocolos, fallbacks, sandbox y redacción se validan con dobles automatizados.
 Este checkpoint conserva las limitaciones KI-001, KI-003 a KI-010 y no se
-declara libre de riesgos conocidos.
+declara libre de riesgos conocidos ni de dependencias externas futuras.

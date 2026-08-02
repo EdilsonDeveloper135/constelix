@@ -2,7 +2,7 @@ import { KeyRound, Server, Settings2, ShieldCheck, X } from "lucide-react";
 import type { LlmApiKeySource } from "@constelix/contracts";
 import {
   memo,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -62,14 +62,18 @@ export const SettingsModal = memo(function SettingsModal({
   const [clearApiKey, setClearApiKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
       wasOpenRef.current = false;
       return;
     }
     if (wasOpenRef.current) {
-      if (!baseUrlDirtyRef.current) setBaseUrl(initialBaseUrl);
-      if (!modelDirtyRef.current) setModel(initialModel);
+      setBaseUrl((current) =>
+        baseUrlDirtyRef.current ? current : initialBaseUrl
+      );
+      setModel((current) =>
+        modelDirtyRef.current ? current : initialModel
+      );
       return;
     }
     wasOpenRef.current = true;

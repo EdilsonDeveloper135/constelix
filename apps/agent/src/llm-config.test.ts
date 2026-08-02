@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -237,5 +244,16 @@ describe("LLM configuration", () => {
       apiKeySource: "none",
     });
     expect(recovered.apiKey).toBeUndefined();
+  });
+
+  it("rejects oversized private state without reading it into memory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-llm-oversized-"));
+    temporaryDirectories.push(parent);
+    const directory = join(parent, "state");
+    const store = new LlmConfigurationStore(directory, {});
+    await mkdir(directory, { mode: 0o700 });
+    await writeFile(store.settingsPath, Buffer.alloc(32 * 1024 + 1, 0x61));
+
+    await expect(store.load()).rejects.toBeInstanceOf(LlmConfigurationError);
   });
 });

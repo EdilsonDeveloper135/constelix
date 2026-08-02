@@ -4,11 +4,11 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Dirent } from "node:fs";
 import {
   access,
   lstat,
-  readdir,
+  opendir,
   realpath,
 } from "node:fs/promises";
 import {
@@ -21,6 +21,7 @@ import {
 
 export const MAX_WORKSPACE_BROWSE_ENTRIES = 200;
 export const DEFAULT_WORKSPACE_BROWSE_ENTRIES = 100;
+export const MAX_WORKSPACE_BROWSE_DIRECTORY_ENTRIES = 100_000;
 const MIN_WORKSPACE_BROWSE_INSPECTIONS = 400;
 
 export type WorkspaceBrowserErrorCode =
@@ -30,6 +31,7 @@ export type WorkspaceBrowserErrorCode =
   | "WORKSPACE_PATH_UNREADABLE"
   | "WORKSPACE_BROWSE_CURSOR_INVALID"
   | "WORKSPACE_BROWSE_LIMIT_INVALID"
+  | "WORKSPACE_BROWSE_TOO_LARGE"
   | "WORKSPACE_BROWSE_FAILED";
 
 export class WorkspaceBrowserError extends Error {
@@ -46,6 +48,7 @@ export class WorkspaceBrowserError extends Error {
 
 export interface WorkspaceBrowserOptions {
   cursorSecret?: string | Uint8Array;
+  maxDirectoryEntries?: number;
 }
 
 export interface WorkspaceBrowseInput {
@@ -81,6 +84,7 @@ interface CursorPayload {
 
 export class WorkspaceBrowser {
   private readonly cursorSecret: Buffer;
+  private readonly maxDirectoryEntries: number;
 
   constructor(options: WorkspaceBrowserOptions = {}) {
     this.cursorSecret = options.cursorSecret === undefined
@@ -88,6 +92,17 @@ export class WorkspaceBrowser {
       : Buffer.from(options.cursorSecret);
     if (this.cursorSecret.byteLength < 16) {
       throw new TypeError("cursorSecret must contain at least 16 bytes.");
+    }
+    this.maxDirectoryEntries = Math.trunc(
+      options.maxDirectoryEntries ?? MAX_WORKSPACE_BROWSE_DIRECTORY_ENTRIES,
+    );
+    if (
+      this.maxDirectoryEntries < 1 ||
+      this.maxDirectoryEntries > MAX_WORKSPACE_BROWSE_DIRECTORY_ENTRIES
+    ) {
+      throw new TypeError(
+        `maxDirectoryEntries must be between 1 and ${MAX_WORKSPACE_BROWSE_DIRECTORY_ENTRIES}.`,
+      );
     }
   }
 
@@ -100,20 +115,32 @@ export class WorkspaceBrowser {
     const canonicalPath = await resolveDirectory(requestedPath);
     const directoryHash = hashDirectory(canonicalPath);
 
-    let directoryEntries;
+    const candidates: Dirent[] = [];
     try {
       await access(canonicalPath, constants.R_OK | constants.X_OK);
-      directoryEntries = await readdir(canonicalPath, { withFileTypes: true });
+      const directory = await opendir(canonicalPath);
+      let entriesVisited = 0;
+      for await (const entry of directory) {
+        entriesVisited += 1;
+        if (entriesVisited > this.maxDirectoryEntries) {
+          throw new WorkspaceBrowserError(
+            "WORKSPACE_BROWSE_TOO_LARGE",
+            `La carpeta supera el límite seguro de ${this.maxDirectoryEntries} entradas.`,
+          );
+        }
+        if (
+          (showHidden || !entry.name.startsWith(".")) &&
+          (entry.isDirectory() || entry.isSymbolicLink())
+        ) {
+          candidates.push(entry);
+        }
+      }
     } catch (error) {
+      if (error instanceof WorkspaceBrowserError) throw error;
       throw mapFileSystemError(error, "WORKSPACE_BROWSE_FAILED");
     }
 
-    const candidates = directoryEntries
-      .filter((entry) =>
-        (showHidden || !entry.name.startsWith(".")) &&
-        (entry.isDirectory() || entry.isSymbolicLink())
-      )
-      .sort((left, right) => compareEntryNames(left.name, right.name));
+    candidates.sort((left, right) => compareEntryNames(left.name, right.name));
     const listingHash = hashDirectoryListing(candidates);
     const offset = input.cursor === undefined
       ? 0

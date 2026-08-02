@@ -147,7 +147,7 @@ export class WorkspaceRuntime {
         lockPath: resolve(storageDirectory, "agent.lock"),
         workspaceId,
         workspacePath: workspaceRoot,
-        agentVersion: options.agentVersion ?? "v0.0.5",
+        agentVersion: options.agentVersion ?? "v0.0.6",
         ...(options.lockForce ? { force: options.lockForce } : {}),
         onLost: (error) => runtime?.handleIsolationFailure(error),
       });

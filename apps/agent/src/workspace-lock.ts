@@ -816,7 +816,7 @@ async function observeLock(lockPath: string): Promise<ObservedLock | undefined> 
     if (!sameIdentity(identity, fileIdentity(openedStats))) {
       throw new Error("Workspace lock changed while it was being inspected.");
     }
-    const content = await handle.readFile({ encoding: "utf8" });
+    const content = await readHandleText(handle);
     const parsed = parseLockOwner(content, identity);
     return {
       stats: openedStats,
@@ -1003,10 +1003,12 @@ async function recoverStaleGuard(
   let pid: number | undefined;
   if (stats.isFile() && stats.size <= MAX_LOCK_BYTES) {
     try {
-      const handle = await open(guardPath, constants.O_RDONLY);
+      const noFollow =
+        typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+      const handle = await open(guardPath, constants.O_RDONLY | noFollow);
       try {
         const value = JSON.parse(
-          await handle.readFile({ encoding: "utf8" }),
+          await readHandleText(handle),
         ) as { pid?: unknown };
         if (validPid(value.pid)) pid = value.pid;
       } finally {
@@ -1053,10 +1055,12 @@ async function releaseGuard(
 
 async function readGuardId(path: string): Promise<string | undefined> {
   try {
-    const handle = await open(path, constants.O_RDONLY);
+    const noFollow =
+      typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    const handle = await open(path, constants.O_RDONLY | noFollow);
     try {
       const value = JSON.parse(
-        await handle.readFile({ encoding: "utf8" }),
+        await readHandleText(handle),
       ) as { guardId?: unknown };
       return typeof value.guardId === "string" ? value.guardId : undefined;
     } finally {
@@ -1065,6 +1069,29 @@ async function readGuardId(path: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+async function readHandleText(handle: FileHandle): Promise<string> {
+  const initial = await handle.stat();
+  if (!initial.isFile() || initial.size > MAX_LOCK_BYTES) {
+    throw new Error("Workspace lock metadata exceeds its safe size limit.");
+  }
+  const buffer = Buffer.allocUnsafe(MAX_LOCK_BYTES + 1);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      buffer.byteLength - offset,
+      null,
+    );
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset > MAX_LOCK_BYTES) {
+    throw new Error("Workspace lock metadata exceeds its safe size limit.");
+  }
+  return buffer.subarray(0, offset).toString("utf8");
 }
 
 async function removeObservedLock(

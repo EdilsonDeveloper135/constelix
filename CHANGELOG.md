@@ -1,5 +1,70 @@
 # Changelog
 
+## [v0.0.6] - 2026-08-01
+
+### Added
+
+- Auditoría técnica integral y trazable de arquitectura, seguridad, contratos,
+  persistencia, procesos, rendimiento, UX, dependencias e integración, con
+  hallazgos, decisiones y riesgos residuales en `docs/audit-v0.0.6.md`.
+- Límites explícitos para el recorrido del indexador, el explorador de
+  directorios, las conexiones y contrapresión WebSocket, los metadatos de lock
+  y los archivos privados de configuración LLM.
+- Métricas autenticadas de uptime, RSS y tamaño del grafo en health, además de
+  regresiones para entradas sobredimensionadas, UTF-8 inválido, cambios durante
+  lectura, sockets lentos, directorios masivos y orígenes de desarrollo.
+- Tooltips accesibles por hover y teclado en la barra lateral, con acciones aún
+  no implementadas deshabilitadas y anunciadas de forma explícita.
+
+### Fixed
+
+- El token de capacidad ya no puede enviarse a un origen de desarrollo remoto
+  ni persistirse mediante logging de URLs de upgrade; solo se aceptan orígenes
+  HTTP loopback exactos y el logging HTTP permanece deshabilitado.
+- Las lecturas de editor, scanner e indexer usan descriptores acotados,
+  `O_NOFOLLOW`, identidad de dispositivo/inodo, detección de mutaciones y
+  decodificación UTF-8 estricta; binarios y archivos excesivos fallan con
+  códigos recuperables estables.
+- Las escrituras dejan de cargar archivos existentes sin límite, rechazan NUL,
+  conservan únicamente bits de permiso ordinarios y mantienen escritura
+  atómica con control optimista SHA-256.
+- `.gitignore`, `.constelixignore`, `tsconfig` y `jsconfig` ya no pueden agotar
+  memoria ni abortar la indexación por tamaño, contenido binario o una carrera
+  de lectura; las omisiones quedan visibles en el resumen.
+- El explorador de carpetas y el scanner iteran directorios en streaming y
+  fallan o truncan de forma explícita al alcanzar presupuestos seguros, sin
+  acumular directorios arbitrariamente grandes.
+- Los secretos LLM y leases se abren sin seguir symlinks, con permisos privados
+  y lecturas máximas; los archivos especiales o mutados se rechazan.
+- El dashboard se sirve con CSP restrictiva y cabeceras anti-framing, MIME,
+  referrer, cache, opener, resource y permissions; los source maps de producción
+  del agente y la web quedan deshabilitados.
+- Settings ya no permite que una configuración del agente recibida tarde
+  sobrescriba Base URL o modelo después de que el usuario empezó a editarlos;
+  la hidratación revalida el estado prístino al aplicar cada actualización.
+- Se actualizaron Fastify, `@fastify/static`, Monaco y dependencias transitivas
+  vulnerables. `pnpm audit --prod` queda sin vulnerabilidades conocidas, y la
+  integración de workers usa los subpaths exportados por Monaco 0.56.
+- Los contratos limitan rutas y shell, prohíben NUL, exigen hashes SHA-256 y
+  rechazan capacidades Act duplicadas antes de alcanzar el runtime.
+- El analizador reconoce funciones Python asíncronas y exports default anónimos;
+  se eliminó su scanner de filesystem duplicado y obsoleto. El grafo invalida
+  correctamente su orden cacheado y evita aristas colgantes en páginas.
+
+### Known issues
+
+- Los servidores de lenguaje incluidos cubren únicamente TypeScript,
+  JavaScript y Python y se ejecutan como procesos locales del mismo usuario.
+- La generación depende de credenciales, cuota y red del proveedor remoto, o
+  de que el daemon y modelo local configurados estén disponibles.
+- Vite continúa advirtiendo sobre chunks diferidos grandes de Monaco, sus
+  workers y ELK; la carga diferida evita incluirlos todos en el arranque.
+- Permanece una carrera TOCTOU residual frente a otro proceso hostil ejecutado
+  con la misma cuenta de macOS; Node.js no ofrece un rename descriptor-relative
+  portátil que elimine por completo la última ventana de escritura.
+- Mover una herramienta entre dock y canvas recrea su vista, y el soporte sigue
+  limitado a macOS con presupuestos de indexación deliberadamente acotados.
+
 ## [v0.0.5] - 2026-07-29
 
 ### Added

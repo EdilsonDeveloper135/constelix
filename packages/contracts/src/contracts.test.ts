@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  ActTaskRequestSchema,
   ActTaskScopeSchema,
   AskStreamEventSchema,
   LocalAskResultSchema,
   ClientEventSchema,
   EvidencePathSchema,
+  FileReadRequestSchema,
+  FileWriteRequestSchema,
   GraphConfidenceSchema,
   GraphNodeSchema,
   GraphQuerySchema,
@@ -16,6 +19,7 @@ import {
   PROTOCOL_VERSION,
   RecentWorkspaceSchema,
   ServerEventSchema,
+  TerminalCreateRequestSchema,
   WorkspaceBrowseResponseSchema,
   WorkspaceIdSchema,
   WorkspaceListResponseSchema,
@@ -430,5 +434,35 @@ describe("protocol contracts", () => {
       outsideWorkspaceWrites: true,
       expiresAt: new Date().toISOString()
     })).toThrow();
+  });
+
+  it("bounds filesystem and terminal inputs at the protocol boundary", () => {
+    expect(() => FileReadRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      relativePath: `src/${"a".repeat(4_096)}`,
+    })).toThrow();
+    expect(() => FileReadRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      relativePath: "src/file\0.ts",
+    })).toThrow();
+    expect(() => FileWriteRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      relativePath: "src/file.ts",
+      content: "export {};",
+      expectedContentHash: "not-a-sha256",
+    })).toThrow();
+    expect(() => TerminalCreateRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: ".",
+      shell: "/bin/zsh\0--login",
+    })).toThrow();
+  });
+
+  it("rejects duplicate Act capabilities", () => {
+    expect(() => ActTaskRequestSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      objective: "Refactor the parser",
+      capabilities: ["read", "write", "command", "read"],
+    })).toThrow(/capabilit/i);
   });
 });

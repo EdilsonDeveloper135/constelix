@@ -44,8 +44,10 @@ import {
   type CodexManagerOptions,
 } from "./codex.js";
 import {
+  FileChangedDuringReadError,
   FileConflictError,
   FileTooLargeError,
+  InvalidTextFileError,
   readWorkspaceTextFile,
   writeWorkspaceTextFile,
 } from "./files.js";
@@ -139,10 +141,13 @@ export async function startAgentServer(
     ...(options.indexerScanOptions
       ? { indexerScanOptions: options.indexerScanOptions }
       : {}),
-    agentVersion: "v0.0.5",
+    agentVersion: "v0.0.6",
   });
   const events = manager.globalEvents;
   const app = Fastify({
+    // WebSocket authentication necessarily places the capability in the
+    // in-memory upgrade URL. Fastify request logging must remain disabled so
+    // that URL can never persist the credential.
     logger: false,
     bodyLimit: 2 * 1024 * 1024 + 64 * 1024,
   });
@@ -175,7 +180,6 @@ export async function startAgentServer(
     await app.register(fastifyWebsocket, {
       options: { maxPayload: 1024 * 1024, perMessageDeflate: false },
     });
-
     let boundOrigin: string | undefined;
     const allowedOrigins = new Set<string>();
     if (options.dev) {
@@ -262,8 +266,30 @@ export async function startAgentServer(
         isApiRequest(request) ? "no-store" : "no-cache",
       );
       reply.header("X-Content-Type-Options", "nosniff");
+      reply.header("X-Frame-Options", "DENY");
       reply.header("Referrer-Policy", "no-referrer");
       reply.header("Cross-Origin-Resource-Policy", "same-origin");
+      reply.header("Cross-Origin-Opener-Policy", "same-origin");
+      reply.header(
+        "Permissions-Policy",
+        "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+      );
+      reply.header(
+        "Content-Security-Policy",
+        [
+          "default-src 'self'",
+          "base-uri 'none'",
+          "object-src 'none'",
+          "frame-ancestors 'none'",
+          "form-action 'none'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
+          "worker-src 'self' blob:",
+        ].join("; "),
+      );
       return payload;
     });
 
@@ -307,12 +333,17 @@ export async function startAgentServer(
 
     app.get("/api/v1/health", async (request) => {
       const runtime = captureRequest(manager, request);
+      const mem = process.memoryUsage();
       return {
         protocolVersion: PROTOCOL_VERSION,
         status: "ok",
         workspaceId: runtime.workspaceId,
         session: runtime.session,
         index: runtime.indexer.status,
+        uptime: process.uptime(),
+        memoryUsage: mem.rss,
+        nodeCount: runtime.indexer.graph.nodeCount,
+        edgeCount: runtime.indexer.graph.edgeCount,
       };
     });
 
@@ -942,6 +973,22 @@ function mapError(error: Error): {
       recoverable: true,
     };
   }
+  if (error instanceof InvalidTextFileError) {
+    return {
+      status: 422,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
+  if (error instanceof FileChangedDuringReadError) {
+    return {
+      status: 409,
+      code: error.code,
+      message: error.message,
+      recoverable: true,
+    };
+  }
   if (error instanceof PathSecurityError) {
     return {
       status: 403,
@@ -1025,6 +1072,8 @@ function mapError(error: Error): {
         ? 404
         : error.code === "WORKSPACE_PATH_UNREADABLE"
           ? 403
+          : error.code === "WORKSPACE_BROWSE_TOO_LARGE"
+            ? 413
           : 400;
     return {
       status,

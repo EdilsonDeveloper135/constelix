@@ -1,12 +1,10 @@
 export {
   analyzeFiles,
   analyzeSource,
-  analyzeWorkspace,
   detectLanguage,
   type AnalysisResult,
   type AnalyzeFilesOptions,
   type AnalyzeSourceInput,
-  type AnalyzeWorkspaceOptions,
   type AnalyzerDiagnostic,
   type SourceFileInput,
   type TypeScriptResolutionOptions

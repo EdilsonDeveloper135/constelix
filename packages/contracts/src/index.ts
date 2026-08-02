@@ -40,6 +40,7 @@ export const WorkspaceOmittedFileSchema = z.object({
     "unsupported",
     "too_large",
     "binary",
+    "changed",
     "outside_workspace",
     "file_limit",
     "source_budget"
@@ -299,9 +300,20 @@ export const ProtocolOnlyRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema
 });
 
+const RelativeRequestPathSchema = z.string()
+  .min(1)
+  .max(4_096)
+  .refine((value) => !value.includes("\0"), {
+    message: "Relative paths cannot contain NUL bytes"
+  });
+
+const Sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/, {
+  message: "Expected a lowercase SHA-256 digest"
+});
+
 export const FileReadRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
-  relativePath: z.string().min(1)
+  relativePath: RelativeRequestPathSchema
 });
 
 export const FileReadResponseSchema = z.object({
@@ -316,9 +328,9 @@ export const FileReadResponseSchema = z.object({
 
 export const FileWriteRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
-  relativePath: z.string().min(1),
+  relativePath: RelativeRequestPathSchema,
   content: z.string(),
-  expectedContentHash: z.string().min(1)
+  expectedContentHash: Sha256HexSchema
 });
 
 export const FileWriteResponseSchema = z.object({
@@ -480,12 +492,19 @@ export const AskStreamEventSchema = z.discriminatedUnion("type", [
 
 export const ActCapabilitySchema = z.enum(["read", "write", "command"]);
 
+const ActCapabilitiesSchema = z.array(ActCapabilitySchema)
+  .min(1)
+  .max(3)
+  .refine((capabilities) => new Set(capabilities).size === capabilities.length, {
+    message: "Act capabilities cannot contain duplicates"
+  });
+
 export const ActTaskScopeSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
   workspaceId: z.string().min(1),
   rootPath: z.string().min(1),
   objective: z.string().trim().min(1).max(20_000),
-  capabilities: z.array(ActCapabilitySchema).min(1),
+  capabilities: ActCapabilitiesSchema,
   networkEnabled: z.boolean(),
   outsideWorkspaceWrites: z.literal(false),
   expiresAt: z.string().datetime()
@@ -515,7 +534,7 @@ export const ActTaskSchema = z.object({
 export const ActTaskRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
   objective: z.string().trim().min(1).max(20_000),
-  capabilities: z.array(ActCapabilitySchema).min(1).default(["read", "write", "command"])
+  capabilities: ActCapabilitiesSchema.default(["read", "write", "command"])
 });
 
 export const ActApproveRequestSchema = z.object({
@@ -526,10 +545,12 @@ export const ActApproveRequestSchema = z.object({
 
 export const TerminalCreateRequestSchema = z.object({
   protocolVersion: ProtocolVersionSchema,
-  cwd: z.string().default("."),
+  cwd: RelativeRequestPathSchema.default("."),
   columns: z.number().int().min(2).max(1_000).default(120),
   rows: z.number().int().min(1).max(500).default(32),
-  shell: z.string().optional(),
+  shell: z.string().min(1).max(4_096).refine((value) => !value.includes("\0"), {
+    message: "Shell paths cannot contain NUL bytes"
+  }).optional(),
   panelId: z.string().min(1).max(200).optional()
 });
 
@@ -624,7 +645,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
       taskId: z.string().min(1),
       event: z.string(),
       message: z.string().optional(),
-      status: z.enum(["draft", "awaitingApproval", "running", "completed", "cancelled", "failed"]).optional(),
+      status: ActTaskStatusSchema.optional(),
       data: z.unknown().optional()
     })
   }),
@@ -666,6 +687,7 @@ export const ClientEventSchema = z.discriminatedUnion("type", [
   }).strict()
 ]);
 
+export type ProtocolVersion = z.infer<typeof ProtocolVersionSchema>;
 export type SourcePosition = z.infer<typeof SourcePositionSchema>;
 export type SourceRange = z.infer<typeof SourceRangeSchema>;
 export type WorkspaceId = z.infer<typeof WorkspaceIdSchema>;

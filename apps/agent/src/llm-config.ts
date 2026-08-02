@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { lstat, chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  lstat,
+  chmod,
+  mkdir,
+  open,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   LlmPublicConfigurationSchema,
@@ -15,6 +23,7 @@ export const DEFAULT_LLM_MODEL = "gpt-4o";
 
 const MAX_BASE_URL_LENGTH = 2_048;
 const MAX_MODEL_LENGTH = 256;
+const MAX_PRIVATE_FILE_BYTES = 32 * 1024;
 
 const StoredLlmConfigurationSchema = z.object({
   version: z.literal(1),
@@ -345,16 +354,56 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
 }
 
 async function readPrivateFile(path: string): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
       throw new LlmConfigurationError(`${basename(path)} debe ser un archivo regular.`);
     }
+    if (metadata.size > MAX_PRIVATE_FILE_BYTES) {
+      throw new LlmConfigurationError(
+        `${basename(path)} supera el límite seguro de ${MAX_PRIVATE_FILE_BYTES} bytes.`,
+      );
+    }
     await chmod(path, 0o600);
-    return await readFile(path, "utf8");
+    const noFollow =
+      typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    handle = await open(path, constants.O_RDONLY | noFollow);
+    const openedMetadata = await handle.stat();
+    if (
+      !openedMetadata.isFile() ||
+      openedMetadata.dev !== metadata.dev ||
+      openedMetadata.ino !== metadata.ino ||
+      openedMetadata.size > MAX_PRIVATE_FILE_BYTES
+    ) {
+      throw new LlmConfigurationError(
+        `${basename(path)} cambió mientras se leía.`,
+      );
+    }
+    await handle.chmod(0o600);
+    const buffer = Buffer.allocUnsafe(MAX_PRIVATE_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        buffer.byteLength - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_PRIVATE_FILE_BYTES) {
+      throw new LlmConfigurationError(
+        `${basename(path)} supera el límite seguro de ${MAX_PRIVATE_FILE_BYTES} bytes.`,
+      );
+    }
+    return buffer.subarray(0, offset).toString("utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

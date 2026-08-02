@@ -356,6 +356,10 @@ describe("local agent HTTP boundary", () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-server-"));
     const stateRoot = await mkdtemp(join(tmpdir(), "constelix-server-state-"));
     await writeFile(join(root, "main.ts"), "export const answer = 42;\n");
+    await writeFile(
+      join(root, "malformed.ts"),
+      Buffer.from([0x65, 0x78, 0x70, 0x6f, 0x72, 0x74, 0xc3, 0x28]),
+    );
     const server = await startAgentServer({
       workspaceRoot: root,
       port: 0,
@@ -366,6 +370,9 @@ describe("local agent HTTP boundary", () => {
     });
     const host = new URL(server.origin).host;
     try {
+      // Fastify's disabled logger is the no-op implementation and exposes no
+      // level; enabling request logging would persist WebSocket token URLs.
+      expect(server.app.log.level).toBeUndefined();
       const invalidHost = await server.app.inject({
         method: "GET",
         url: "/api/v1/health",
@@ -425,6 +432,14 @@ describe("local agent HTTP boundary", () => {
       });
       expect(authorized.statusCode).toBe(200);
       expect(authorized.json()).toMatchObject({ protocolVersion: 1, status: "ok" });
+      expect(authorized.headers["content-security-policy"]).toContain(
+        "default-src 'self'",
+      );
+      expect(authorized.headers["content-security-policy"]).not.toContain(
+        "unsafe-eval",
+      );
+      expect(authorized.headers["permissions-policy"]).toContain("camera=()");
+      expect(authorized.headers["x-frame-options"]).toBe("DENY");
       const scopedHeaders = {
         host,
         authorization: "Bearer test-capability",
@@ -450,6 +465,17 @@ describe("local agent HTTP boundary", () => {
         language: "typescript",
       });
       const opened = read.json() as { contentHash: string };
+
+      const malformed = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/files/read",
+        headers: scopedHeaders,
+        payload: { protocolVersion: 1, relativePath: "malformed.ts" },
+      });
+      expect(malformed.statusCode).toBe(422);
+      expect(malformed.json()).toMatchObject({
+        error: { code: "INVALID_TEXT_FILE", recoverable: true },
+      });
 
       const write = await server.app.inject({
         method: "PUT",

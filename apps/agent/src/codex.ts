@@ -633,7 +633,7 @@ export class CodexManager {
 
       try {
         await this.request("initialize", {
-          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.5" },
+          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.6" },
         });
         this.notify("initialized");
       } catch (error) {
@@ -968,12 +968,7 @@ export class CodexManager {
       taskId: task.id,
       event,
       message,
-      status:
-        task.status === "pending_approval"
-          ? "awaitingApproval"
-          : task.status === "approved"
-            ? "running"
-            : task.status,
+      status: task.status,
       ...(data === undefined ? {} : { data }),
     });
   }

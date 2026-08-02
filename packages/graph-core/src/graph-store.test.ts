@@ -143,16 +143,14 @@ describe("InMemoryGraphStore", () => {
     expect(first.truncated).toBe(true);
     expect(second.nodes).toHaveLength(2);
     expect(new Set([...first.nodes, ...second.nodes].map((node) => node.id)).size).toBe(4);
-    expect(
-      second.edges.some((item) => {
-        const firstPageIds = new Set(first.nodes.map((node) => node.id));
-        const secondPageIds = new Set(second.nodes.map((node) => node.id));
-        return (
-          (firstPageIds.has(item.source) && secondPageIds.has(item.target)) ||
-          (firstPageIds.has(item.target) && secondPageIds.has(item.source))
-        );
-      }),
-    ).toBe(true);
+    const firstPageIds = new Set(first.nodes.map((node) => node.id));
+    for (const edge of first.edges) {
+      expect(firstPageIds.has(edge.source) && firstPageIds.has(edge.target)).toBe(true);
+    }
+    const secondPageIds = new Set(second.nodes.map((node) => node.id));
+    for (const edge of second.edges) {
+      expect(secondPageIds.has(edge.source) && secondPageIds.has(edge.target)).toBe(true);
+    }
   });
 
   it("preserves source truncation through snapshots, queries and deltas", () => {

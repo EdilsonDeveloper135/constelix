@@ -223,3 +223,37 @@ def helper():
     expect(serialized).toContain("[REDACTED]");
   });
 });
+
+describe("bug fixes", () => {
+  it("extracts Python async functions", () => {
+    const result = analyzeSource({
+      workspaceId: "fixture",
+      relativePath: "pkg/service.py",
+      source: `
+async def helper():
+    return 1
+
+class Service:
+    async def run(self):
+        pass
+      `
+    });
+
+    expect(result.snapshot.nodes.some((node) => node.kind === "function" && node.name === "helper")).toBe(true);
+    expect(result.snapshot.nodes.some((node) => node.kind === "method" && node.name === "run")).toBe(true);
+  });
+
+  it("extracts anonymous default exports as 'default'", () => {
+    const result = analyzeSource({
+      workspaceId: "fixture",
+      relativePath: "src/service.ts",
+      source: `
+export default function() {
+  return 1;
+}
+      `
+    });
+
+    expect(result.snapshot.nodes.some((node) => node.kind === "function" && node.name === "default")).toBe(true);
+  });
+});

@@ -176,6 +176,55 @@ describe("workspace scanner", () => {
     }
   });
 
+  it("skips malformed UTF-8 source and reports the omission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-scan-utf8-"));
+    try {
+      await writeFile(
+        join(root, "invalid.ts"),
+        Buffer.from([0x65, 0x78, 0x70, 0x6f, 0x72, 0x74, 0xc3, 0x28]),
+      );
+
+      const result = await scanWorkspace("workspace", root);
+
+      expect(result.files).toHaveLength(0);
+      expect(result.summary.omittedFiles).toContainEqual({
+        relativePath: "invalid.ts",
+        reason: "binary",
+      });
+      expect(result.diagnostics).toContainEqual({
+        relativePath: "invalid.ts",
+        message: "The text editor accepts only valid UTF-8 files.",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds traversal across unsupported filesystem entries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-scan-entries-"));
+    try {
+      await Promise.all([
+        writeFile(join(root, "a.ts"), "export const a = true;\n"),
+        writeFile(join(root, "b.ts"), "export const b = true;\n"),
+        writeFile(join(root, "c.ts"), "export const c = true;\n"),
+      ]);
+
+      const result = await scanWorkspace("workspace", root, {
+        maxEntries: 2,
+      });
+
+      expect(result.files).toHaveLength(0);
+      expect(result.truncated).toBe(true);
+      expect(result.diagnostics).toContainEqual({
+        relativePath: ".",
+        message:
+          "Workspace traversal is limited to 2 filesystem entries and 25000 entries per directory.",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("detects project markers and reports bounded omissions", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-scan-summary-"));
     try {

@@ -1,72 +1,115 @@
 # Constelix
 
-Constelix is a local-first visual software engineering workspace. It turns a JavaScript, TypeScript, or Python repository into a live semantic graph with code, terminals, project context, and AI in one persistent workspace.
+Constelix is a local-first visual software engineering workspace. It turns a
+JavaScript, TypeScript, or Python repository into a live semantic graph with
+code, terminals, project context, language intelligence, and AI in one
+persistent dashboard.
 
 ## Requirements
 
-- macOS
-- Node.js 24 LTS
-- pnpm 11
-- Codex CLI 0.144.5 for **Act** mode
-- Optional OpenAI-compatible LLM endpoint for generated answers. The default
-  remote endpoint requires a key; loopback endpoints such as Ollama do not.
+- macOS.
+- Node.js 24.
+- pnpm 11.
+- Codex CLI 0.144.5 for **Act** mode.
+- An optional OpenAI-compatible endpoint for generated **Ask** responses. The
+  default remote endpoint requires a key; loopback endpoints such as Ollama do
+  not.
 
-Without an available LLM, Constelix uses **Ask Local**, an offline structural
+Without an available provider, **Ask Local** performs an offline structural
 search over symbols, paths, signatures, snippets, and graph relations.
+
+## Architecture
+
+Constelix is a strict TypeScript and ESM pnpm monorepo:
+
+```mermaid
+flowchart LR
+  Browser["React dashboard\nReact Flow · Monaco · xterm.js"]
+  Agent["Loopback agent\nFastify · SQLite · PTY · LSP · Codex"]
+  Contracts["Shared Zod contracts"]
+  Analyzer["Tree-sitter analyzers\nJS · TS · Python"]
+  Graph["Graph core\nqueries · deltas · paths"]
+  Workspace["Selected workspace"]
+  State["Private application state"]
+  Provider["Optional LLM provider"]
+
+  Browser <-->|"Authenticated REST and WebSocket"| Agent
+  Browser --> Contracts
+  Agent --> Contracts
+  Agent --> Analyzer
+  Agent --> Graph
+  Analyzer --> Contracts
+  Graph --> Contracts
+  Agent <-->|"bounded local I/O"| Workspace
+  Agent <-->|"SQLite, settings, leases"| State
+  Agent -.->|"bounded evidence"| Provider
+```
+
+- `apps/web/` contains the dashboard, canvas, editor, terminal, workspace
+  selector, settings, and client-side state.
+- `apps/agent/` contains the CLI, local server, indexer, persistence, file and
+  path controls, PTY, Ask, Codex, LSP, workspace lifecycle, and browser API.
+- `packages/contracts/` is the protocol boundary shared by browser and agent.
+- `packages/analyzers/` extracts the semantic model with Tree-sitter.
+- `packages/graph-core/` owns graph integrity, pagination, queries, paths, and
+  revision deltas.
+- `tests/e2e/` exercises the connected product in Chromium; `scripts/` contains
+  packaging, version checks, smokes, and performance budgets.
 
 ## Development
 
 ```bash
-pnpm install
+git clone https://github.com/EdilsonDeveloper135/constelix.git
+cd constelix
+pnpm install --frozen-lockfile
 pnpm dev -- /absolute/path/to/a/project
 ```
 
-The web dashboard runs on `http://127.0.0.1:5173` and proxies its local protocol to the agent on `http://127.0.0.1:4321` during development.
+The development dashboard runs at `http://127.0.0.1:5173` and proxies the local
+protocol to the agent at `http://127.0.0.1:4321`. A custom
+`CONSTELIX_WEB_ORIGIN` must be an exact loopback HTTP origin; the CLI rejects
+credentials, paths, query strings, fragments, and non-loopback hosts before a
+capability can be launched.
 
-The CLI canonicalizes external folders, detects whether they are writable, and
-opens them in **Modo Edición** or **Modo Lectura**. Force the safer mode with:
+The CLI canonicalizes an external folder, detects whether it is writable, and
+opens it in **Modo Edición** or **Modo Lectura**. Force the safer mode with:
 
 ```bash
 constelix --read-only /absolute/path/to/a/project
 ```
 
-Editor and Assistant can dock on the right and Terminal can dock at the bottom,
-outside the transformable semantic canvas. Each panel can return to floating
-canvas mode, and the selected placement persists with the workspace layout.
-
 ## Workspaces and language intelligence
 
-Use the workspace identity in the Topbar to open a recent project, enter an
-absolute path, or browse local folders. Constelix activates the candidate
-workspace before closing the current one, so a failed switch leaves the
-existing graph and tools intact. Unsaved editor drafts require an explicit
-preserve or discard decision.
+Use the workspace identity in the top bar to open a recent project, enter an
+absolute path, or browse local folders. Candidate activation is transactional:
+a failed switch leaves the current graph and tools intact. Unsaved drafts
+require an explicit preserve or discard decision, and an active Act task blocks
+the switch.
 
-Monaco connects to language servers supervised by the local agent:
+Monaco connects to language servers supervised by the active local runtime:
 
 - `typescript-language-server` for TypeScript and JavaScript.
 - Pyright for Python.
 
 Diagnostics, hover, completion and autoimports, definition, references, and
-cross-file navigation remain local. The status bar reports when a server is
-connecting, ready, unavailable, or has fallen back to basic Monaco behavior.
+cross-file navigation remain local. Each workspace session isolates late REST,
+event, PTY, LSP, Ask, Codex, watcher, and SQLite traffic after a switch.
 
 ## LLM settings
 
-Open **Settings** in the dashboard to configure:
+Open **Settings** to configure:
 
 - `LLM_BASE_URL`: `https://api.openai.com/v1` by default.
 - `LLM_MODEL`: `gpt-4o` by default.
-- `LLM_API_KEY`: write-only and required for remote endpoints; optional only
-  for `localhost`, `127.0.0.1`, and `::1` endpoints.
+- `LLM_API_KEY`: write-only and required for remote endpoints; optional for
+  `localhost`, `127.0.0.1`, and `::1`.
 
-For Ollama, start the local daemon and use, for example,
-`http://localhost:11434/v1` with `qwen2.5-coder`. Constelix never returns a
-saved key to the browser. The agent stores a UI-provided key in a dedicated
-private file, outside the repository and SQLite, and excludes it from logs and
-child-process environments.
+For Ollama, start its local daemon and use an endpoint such as
+`http://localhost:11434/v1`. A key entered in the UI is stored outside the
+repository and SQLite in a bounded private file with mode `0600`; it is never
+returned to the browser or inherited by terminal, LSP, or Codex processes.
 
-Development can instead provide these values in an ignored `.env.local`:
+Development may instead use an ignored `.env.local`:
 
 ```dotenv
 LLM_BASE_URL=https://api.openai.com/v1
@@ -75,7 +118,9 @@ LLM_API_KEY=
 ```
 
 Legacy `OPENAI_API_KEY` and `CONSTELIX_OPENAI_MODEL` aliases remain supported
-when their preferred variables are unset.
+when the preferred variables are unset.
+
+## Quality gates
 
 ```bash
 pnpm typecheck
@@ -85,10 +130,14 @@ pnpm test:e2e
 pnpm benchmark
 pnpm smoke:lsp
 pnpm smoke:package
+pnpm audit --prod
 ```
 
-The real Codex sandbox smoke is opt-in because it starts an approved local
-agent turn:
+`pnpm check` combines version validation, type checking, Vitest, and the
+production build. The repository has no separate formatter or lint script;
+style consistency is checked with TypeScript and `git diff --check`.
+
+The real Codex smoke is opt-in because it starts an approved local agent turn:
 
 ```bash
 CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
@@ -99,37 +148,41 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.5.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.6.tgz
 constelix /absolute/path/to/a/project
 ```
 
-The package requires Node.js 24 on macOS. The production agent binds to a random loopback port, serves its bundled dashboard, and opens a capability URL whose token is removed from browser history immediately after bootstrap. The capability URL is never printed to stdout or logs.
+The production agent binds to a random loopback port, serves its bundled
+dashboard, and opens an ephemeral capability in the URL fragment. The browser
+removes that fragment immediately after bootstrap, and the token is never
+written to stdout, Fastify logs, or source maps.
 
-## Local-first boundaries
+## Local-first security boundaries
 
-- The repository and semantic index stay local. A remote LLM receives only the
-  bounded evidence and snippets selected by the agent for that turn; an Ollama
-  loopback endpoint keeps those requests on the machine.
-- Workspace data is stored under macOS Application Support, never inside the opened repository.
-- Recent workspaces are stored in a private global catalog; every activation
-  creates a new session that isolates late REST, event, PTY, and LSP traffic.
-- An entered LLM credential travels once to the loopback agent, is never
-  returned or persisted by the browser, and never enters SQLite, logs, the
-  terminal environment, or the Codex environment. The agent stores it outside
-  the repository in a private `0600` file bound to its provider URL; see the
-  threat model for the same-macOS-user residual risk.
-- Ask Local works offline and completes the same turn when a remote or local
-  LLM fails because of quota, credentials, rate limiting, or connectivity.
-- WebSocket connections authenticate their query token during the HTTP upgrade,
-  together with exact `Origin` and `Host` validation.
-- Act mode requires one explicit approval per turn and denies writes outside the opened workspace.
-- Read-only workspaces block editor writes and Act, and run terminals through a macOS filesystem-write sandbox.
-- Terminal and Codex child environments use an allowlist that excludes API keys, approval tokens, and credential variables.
-- The dashboard shows project detection, indexing limits, access mode, AI mode, Codex status, canvas filters, and recoverable errors.
-- Default indexing is bounded to 10,000 eligible files, 2 MiB per source file,
-  and 2 MiB of aggregate source content; omitted files and truncation warnings
-  remain visible in onboarding.
+- Every API operation requires the loopback capability; WebSocket upgrades also
+  require exact `Origin` and `Host` validation.
+- Workspace paths are canonicalized and contained. Reads use bounded
+  descriptor-based I/O with no-follow checks, UTF-8 validation, and identity
+  revalidation. Writes are atomic and use optimistic SHA-256 conflict checks.
+- Production responses set a restrictive content security policy, framing,
+  referrer, cache, MIME, opener, resource, and permissions controls.
+- Act requires one explicit approval per turn and rejects permission expansion
+  or writes outside the active workspace.
+- Read-only workspaces block editor writes and Act, and run PTYs through a
+  macOS filesystem-write-denying sandbox that fails closed when unavailable.
+- Child-process environments use an allowlist that excludes credentials and
+  approval tokens. SQL uses parameterized statements and private state lives
+  under macOS Application Support, never in the opened repository.
+- Indexing is bounded to 10,000 eligible files, 100,000 traversed entries,
+  25,000 entries per directory, 2 MiB per source, and 2 MiB aggregate source by
+  default. Omissions and truncation remain visible to the user.
+- Editor files are limited to 2 MiB, private LLM configuration files to 32 KiB,
+  and event transport applies connection and backpressure limits.
 
-See [the threat model](docs/threat-model.md) and [local protocol](docs/protocol.md) for implementation details.
+Constelix assumes a trusted local user, browser, repository, and OS account. It
+does not claim to isolate mutually hostile processes running under the same
+macOS user. See the [threat model](docs/threat-model.md),
+[protocol](docs/protocol.md), [v0.0.6 audit](docs/audit-v0.0.6.md), and
+[known limitations](KNOWN_ISSUES.md).
 
-Version checkpoints follow [VERSIONING.md](VERSIONING.md). Current limitations are tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+Version checkpoints follow [VERSIONING.md](VERSIONING.md).

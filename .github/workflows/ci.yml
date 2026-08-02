@@ -20,6 +20,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm smoke:lsp
       - run: pnpm smoke:package
       - run: pnpm benchmark
       - run: pnpm exec playwright install chromium

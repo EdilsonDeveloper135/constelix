@@ -51,6 +51,8 @@ carries the newly activated session.
 
 The directory browser defaults to the user's home directory, hides dot-prefixed
 entries, returns folders rather than files, and caps each page at 200 entries.
+It refuses a directory after 100,000 entries with
+`WORKSPACE_BROWSE_TOO_LARGE` rather than retaining an unbounded listing.
 Pagination cursors are signed and bound to the canonical directory and hidden
 file setting. They also include a signed hash of the sorted directory listing,
 so adding, removing, or renaming an entry invalidates the cursor instead of
@@ -110,9 +112,10 @@ its stale transport generation is rejected before hydration. A tab that missed
 the event learns the current public session from `WORKSPACE_SESSION_CHANGED`,
 enters quarantine, and retries bootstrap without the obsolete session header.
 
-The production scanner defaults to 10,000 eligible files, 2 MiB per file, and
-2 MiB of aggregate source content. Files beyond those bounds are omitted from
-the semantic index and reported through the summary instead of failing silently.
+The production scanner defaults to 10,000 eligible files, 100,000 traversed
+entries, 25,000 entries per directory, 2 MiB per file, and 2 MiB of aggregate
+source content. Files beyond those bounds are omitted from the semantic index
+and reported through the summary instead of failing silently.
 The reproducible 10,000-file performance benchmark uses an explicit internal
 aggregate-budget override; the CLI does not expose that override.
 
@@ -142,6 +145,15 @@ Every server event uses
 `{ protocolVersion, eventId, timestamp, sessionId?, workspaceId?, type, payload }`.
 REST bodies, WebSocket messages, and responses are validated at their boundary
 with shared Zod contracts.
+The event channel permits up to eight authenticated sockets. A socket whose
+pending output plus the next event would exceed 8 MiB is closed with code 1013
+so a stalled dashboard cannot create unbounded agent memory pressure.
+
+File read/write and terminal requests limit relative paths and shell strings to
+4,096 characters and reject NUL. Writes require an exact lowercase SHA-256
+digest for optimistic concurrency. Editor files are limited to 2 MiB and
+invalid UTF-8 is reported as `INVALID_TEXT_FILE`; a file mutated while read is
+reported as `FILE_CHANGED_DURING_READ`.
 
 ## Language Server Protocol
 
@@ -241,7 +253,7 @@ the agent wraps the shell in a filesystem-write-denying macOS sandbox; if that
 sandbox is unavailable, terminal creation fails with
 `READ_ONLY_TERMINAL_UNAVAILABLE`.
 
-## v0.0.5 limitations
+## v0.0.6 limitations
 
 - One agent process owns one active workspace. Switching is sequential rather
   than a simultaneous multi-repository view.
@@ -252,6 +264,6 @@ sandbox is unavailable, terminal creation fails with
 - The local folder browser is a Constelix dialog, not the native macOS picker.
   It lists directories only and intentionally returns absolute paths to the
   authenticated local dashboard.
-- LSP support is limited to JS/TS and Python. v0.0.5 does not expose rename,
+- LSP support is limited to JS/TS and Python. v0.0.6 does not expose rename,
   code actions, formatting, workspace symbols, semantic tokens, or other
   language servers.

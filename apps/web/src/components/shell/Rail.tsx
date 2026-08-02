@@ -45,7 +45,8 @@ export const Rail = memo(function Rail() {
           return (
             <button
               key={item.id}
-              className={`rail-item${selected ? " rail-item--active" : ""}`}
+              className={`rail-item with-tooltip${selected ? " rail-item--active" : ""}`}
+              data-tooltip={item.disabled ? `${item.label} (Próximamente)` : item.label}
               type="button"
               aria-current={selected ? "page" : undefined}
               aria-label={item.disabled ? `${item.label}, disponible próximamente` : item.label}
@@ -59,8 +60,24 @@ export const Rail = memo(function Rail() {
         })}
       </nav>
       <div className="rail-footer">
-        <button type="button" aria-label="Configuración" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" size={19} /></button>
-        <button type="button" aria-label="Ayuda"><CircleHelp aria-hidden="true" size={19} /></button>
+        <button
+          type="button"
+          className="with-tooltip"
+          data-tooltip="Configuración"
+          aria-label="Configuración"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings2 aria-hidden="true" size={19} />
+        </button>
+        <button
+          type="button"
+          className="with-tooltip"
+          data-tooltip="Ayuda (Próximamente)"
+          aria-label="Ayuda, disponible próximamente"
+          disabled
+        >
+          <CircleHelp aria-hidden="true" size={19} />
+        </button>
       </div>
     </aside>
   );
