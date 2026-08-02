@@ -1,40 +1,44 @@
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   Eye,
   FileCode2,
   FolderSearch2,
   Languages,
+  Network,
   Pencil,
 } from "lucide-react";
 import { memo } from "react";
 
 import { summarizeWorkspacePath } from "../../lib/workspacePresentation";
+import { useShellStore } from "../../store/useShellStore";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 
 export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const remoteHydrated = useWorkspaceStore((state) => state.remoteHydrated);
-  const onboardingOpen = useWorkspaceStore((state) => state.onboardingOpen);
+  const onboardingOpen = useShellStore((state) => state.onboardingOpen);
   const workspaceName = useWorkspaceStore((state) => state.workspaceName);
   const rootPath = useWorkspaceStore((state) => state.rootPath);
   const workspaceMode = useWorkspaceStore((state) => state.workspaceMode);
   const summary = useWorkspaceStore((state) => state.workspaceSummary);
   const index = useWorkspaceStore((state) => state.index);
-  const acknowledge = useWorkspaceStore(
-    (state) => state.acknowledgeOnboarding,
+  const setOnboardingOpen = useShellStore(
+    (state) => state.setOnboardingOpen,
   );
+  const setHelpOpen = useShellStore((state) => state.setHelpOpen);
 
   if (demoMode || !onboardingOpen) return null;
   const progress = Math.round(index.progress * 100);
   const ready = index.phase === "ready";
 
   return (
-    <div className="onboarding-overlay">
+    <div className={`onboarding-overlay${remoteHydrated ? " onboarding-overlay--ready" : ""}`}>
       <section
         className="workspace-onboarding"
         role="dialog"
-        aria-modal="true"
+        aria-modal={remoteHydrated ? undefined : "true"}
         aria-labelledby="workspace-onboarding-title"
         aria-describedby="workspace-onboarding-description"
       >
@@ -63,6 +67,17 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
               {workspaceMode === "read" ? "Modo Lectura" : "Modo Edición"}
             </span>
           ) : null}
+        </div>
+
+        <div className="onboarding-purpose">
+          <Network aria-hidden="true" size={21} />
+          <div>
+            <h2>Explora el código. Entiende relaciones. Actúa con contexto.</h2>
+            <p>
+              El mapa es tu punto de partida. Código, Terminal y Preguntar se
+              abren únicamente cuando los necesitas.
+            </p>
+          </div>
         </div>
 
         <div className="onboarding-summary">
@@ -116,7 +131,11 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
 
         <div className="onboarding-progress">
           <div>
-            <span>{index.message ?? "Preparando el índice local…"}</span>
+            <span>
+              {ready
+                ? "Índice local listo"
+                : index.message ?? "Preparando el índice local…"}
+            </span>
             <strong>{progress}%</strong>
           </div>
           <div
@@ -141,13 +160,26 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
               ? "Puedes explorar, consultar y usar terminales. La edición y Actuar permanecen bloqueados."
               : "El grafo seguirá actualizándose mientras trabajas."}
           </p>
-          <button
-            type="button"
-            disabled={!remoteHydrated}
-            onClick={acknowledge}
-          >
-            {ready ? "Abrir workspace" : "Entrar mientras indexa"}
-          </button>
+          <div>
+            <button
+              type="button"
+              className="onboarding-skip"
+              disabled={!remoteHydrated}
+              onClick={() => setOnboardingOpen(false)}
+            >
+              Omitir
+            </button>
+            <button
+              type="button"
+              disabled={!remoteHydrated}
+              onClick={() => {
+                setOnboardingOpen(false);
+                setHelpOpen(true);
+              }}
+            >
+              Iniciar recorrido <ArrowRight aria-hidden="true" size={15} />
+            </button>
+          </div>
         </div>
       </section>
     </div>

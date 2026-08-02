@@ -5,6 +5,12 @@ JavaScript, TypeScript, or Python repository into a live semantic graph with
 code, terminals, project context, language intelligence, and AI in one
 persistent dashboard.
 
+Its primary workflow is progressive and map-first: **Explore** relationships,
+open verified **Code**, **Ask** with local or generated evidence, and only then
+**Act** through an explicitly approved turn. Help, onboarding, capability
+status, and settings explain what is available before the user commits to an
+operation.
+
 ## Requirements
 
 - macOS.
@@ -65,6 +71,10 @@ pnpm install --frozen-lockfile
 pnpm dev -- /absolute/path/to/a/project
 ```
 
+The shorter `pnpm dev /absolute/path/to/a/project` form is also supported. The
+install and development entry points fail early with an actionable message when
+Node.js is older than 24, avoiding opaque native-module ABI errors later.
+
 The development dashboard runs at `http://127.0.0.1:5173` and proxies the local
 protocol to the agent at `http://127.0.0.1:4321`. A custom
 `CONSTELIX_WEB_ORIGIN` must be an exact loopback HTTP origin; the CLI rejects
@@ -81,10 +91,10 @@ constelix --read-only /absolute/path/to/a/project
 ## Workspaces and language intelligence
 
 Use the workspace identity in the top bar to open a recent project, enter an
-absolute path, or browse local folders. Candidate activation is transactional:
-a failed switch leaves the current graph and tools intact. Unsaved drafts
-require an explicit preserve or discard decision, and an active Act task blocks
-the switch.
+absolute path, browse local folders, or invoke the native macOS folder picker.
+Candidate activation is transactional: a failed switch leaves the current graph
+and tools intact. Unsaved drafts require an explicit preserve or discard
+decision, and an active Act task blocks the switch.
 
 Monaco connects to language servers supervised by the active local runtime:
 
@@ -97,7 +107,8 @@ event, PTY, LSP, Ask, Codex, watcher, and SQLite traffic after a switch.
 
 ## LLM settings
 
-Open **Settings** to configure:
+Open **Settings** to select an OpenAI, Ollama, or compatible preset, test the
+connection before saving, and configure:
 
 - `LLM_BASE_URL`: `https://api.openai.com/v1` by default.
 - `LLM_MODEL`: `gpt-4o` by default.
@@ -119,6 +130,10 @@ LLM_API_KEY=
 
 Legacy `OPENAI_API_KEY` and `CONSTELIX_OPENAI_MODEL` aliases remain supported
 when the preferred variables are unset.
+
+Settings also provides dark, light, and system themes plus a persistent text
+scale. The workspace switches one primary tool at a time and collapses into a
+bottom navigation on compact screens without horizontal page overflow.
 
 ## Quality gates
 
@@ -148,7 +163,7 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.6.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.8.tgz
 constelix /absolute/path/to/a/project
 ```
 
@@ -182,7 +197,9 @@ written to stdout, Fastify logs, or source maps.
 Constelix assumes a trusted local user, browser, repository, and OS account. It
 does not claim to isolate mutually hostile processes running under the same
 macOS user. See the [threat model](docs/threat-model.md),
-[protocol](docs/protocol.md), [v0.0.6 audit](docs/audit-v0.0.6.md), and
+[protocol](docs/protocol.md),
+[v0.0.8 product and experience audit](docs/audit-v0.0.8.md),
+[progressive shell ADR](docs/adr/0001-progressive-workspace-shell.md), and
 [known limitations](KNOWN_ISSUES.md).
 
 Version checkpoints follow [VERSIONING.md](VERSIONING.md).

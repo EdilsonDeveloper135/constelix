@@ -11,11 +11,15 @@ test("renders the complete visual workspace without runtime errors", async ({ pa
 
   await expect(page).toHaveTitle("Constelix");
   await expect(page.getByTestId("workspace-canvas")).toBeVisible();
+  await expect(page.getByTestId("editor-panel")).toHaveCount(0);
+  await expect(page.getByTestId("terminal-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "Código", exact: true }).click();
   await expect(page.getByTestId("editor-panel")).toBeVisible();
-  await expect(page.getByTestId("terminal-panel")).toBeVisible();
   await expect(page.locator(".monaco-editor")).toBeVisible();
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  await expect(page.getByTestId("terminal-panel")).toBeVisible();
   await expect(page.locator(".xterm")).toBeVisible();
-  await page.getByRole("tab", { name: "Asistente" }).click();
+  await page.getByRole("button", { name: "Preguntar", exact: true }).click();
   await expect(page.getByTestId("ask-panel")).toBeVisible();
   await expect(page.getByText("Modo demostración")).toBeVisible();
   expect(runtimeErrors).toEqual([]);
@@ -23,7 +27,7 @@ test("renders the complete visual workspace without runtime errors", async ({ pa
 
 test("asks with evidence and requires explicit approval before acting", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Asistente" }).click();
+  await page.getByRole("button", { name: "Preguntar", exact: true }).click();
 
   const evidenceAnimationLatency = page.evaluate(
     () =>
@@ -67,7 +71,7 @@ test("asks with evidence and requires explicit approval before acting", async ({
   await historicalEvidence.getByRole("button").first().click();
   await expect(page.locator(".editor-breadcrumbs")).toContainText("query.ts");
 
-  await page.getByRole("tab", { name: "Asistente" }).click();
+  await page.getByRole("button", { name: "Preguntar", exact: true }).click();
   await page.getByRole("tab", { name: "Actuar" }).click();
   await expect(page.getByTestId("act-panel")).toBeVisible();
   await page
@@ -86,10 +90,11 @@ test("asks with evidence and requires explicit approval before acting", async ({
 
 test("supports keyboard navigation and restores focus around modal UI", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Asistente" }).click();
+  await page.getByRole("button", { name: "Preguntar", exact: true }).click();
 
-  const askTab = page.getByRole("tab", { name: "Preguntar" });
-  const actTab = page.getByRole("tab", { name: "Actuar" });
+  const intelligenceTabs = page.getByLabel("Modo de inteligencia");
+  const askTab = intelligenceTabs.getByRole("tab", { name: "Preguntar" });
+  const actTab = intelligenceTabs.getByRole("tab", { name: "Actuar" });
   await askTab.focus();
   await askTab.press("ArrowRight");
   await expect(actTab).toBeFocused();
@@ -99,7 +104,7 @@ test("supports keyboard navigation and restores focus around modal UI", async ({
 
   await actTab.press("Home");
   await expect(askTab).toBeFocused();
-  await expect(page.getByRole("tabpanel", { name: "Preguntar" })).toBeVisible();
+  await expect(page.getByTestId("ask-panel")).toBeVisible();
 
   await page.getByRole("button", { name: "Encuadrar" }).click();
   const semanticNode = page.locator(
@@ -132,4 +137,65 @@ test("supports keyboard navigation and restores focus around modal UI", async ({
   await search.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(commandTrigger).toBeFocused();
+});
+
+test("keeps one usable tool surface on a compact viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const rail = page.getByRole("complementary", {
+    name: "Herramientas del workspace",
+  });
+  const railBox = await rail.boundingBox();
+  expect(railBox).not.toBeNull();
+  expect(railBox!.y + railBox!.height).toBeGreaterThan(800);
+  expect(railBox!.width).toBeLessThanOrEqual(390);
+
+  await page.getByRole("button", { name: "Código", exact: true }).click();
+  await expect(page.getByTestId("editor-panel")).toBeVisible();
+  await expect(page.getByTestId("terminal-panel")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Terminal", exact: true }).click();
+  await expect(page.getByTestId("terminal-panel")).toBeVisible();
+  await expect(page.getByTestId("editor-panel")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Preguntar", exact: true }).click();
+  await expect(page.getByTestId("ask-panel")).toBeVisible();
+  await expect(page.getByTestId("terminal-panel")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+});
+
+test("applies appearance preferences and keeps help keyboard-accessible", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("banner")
+    .getByRole("button", { name: "Configuración", exact: true })
+    .click();
+  const settings = page.getByRole("dialog", { name: "Configuración" });
+  await expect(settings).toBeVisible();
+  await settings.getByLabel("Tema").selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await settings.getByLabel("Escala de texto").selectOption("large");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-text-scale",
+    "large",
+  );
+  await settings.getByRole("button", { name: "Cerrar configuración" }).click();
+
+  const helpTrigger = page.getByRole("button", {
+    name: "Abrir ayuda y primeros pasos",
+  });
+  await helpTrigger.click();
+  const help = page.getByRole("dialog", {
+    name: "Entiende tu código con contexto",
+  });
+  await expect(help).toBeVisible();
+  await expect(help.getByRole("button", { name: "Cerrar ayuda" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(help).toHaveCount(0);
+  await expect(helpTrigger).toBeFocused();
 });

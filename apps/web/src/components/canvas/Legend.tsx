@@ -1,5 +1,5 @@
-import { Bot, Box, FileCode2, Folder, FunctionSquare, Package, Route } from "lucide-react";
-import { memo } from "react";
+import { Bot, Box, ChevronUp, FileCode2, Folder, FunctionSquare, Package, Route } from "lucide-react";
+import { memo, useState } from "react";
 
 const nodeItems = [
   { label: "Carpeta", icon: Folder, tone: "folder" },
@@ -20,9 +20,18 @@ const edgeItems = [
 ] as const;
 
 export const Legend = memo(function Legend() {
+  const [expanded, setExpanded] = useState(false);
   return (
-    <aside className="canvas-legend" aria-label="Leyenda del grafo">
-      <div className="legend-node-list">
+    <aside className={`canvas-legend${expanded ? " canvas-legend--expanded" : ""}`} aria-label="Leyenda del grafo">
+      <button
+        className="canvas-legend__toggle"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        Leyenda <ChevronUp aria-hidden="true" size={13} />
+      </button>
+      {expanded ? <div className="canvas-legend__content"><div className="legend-node-list">
         {nodeItems.map((item) => {
           const Icon = item.icon;
           return <span key={item.label} className={`legend-node legend-node--${item.tone}`}><Icon aria-hidden={true} size={14} />{item.label}</span>;
@@ -32,6 +41,7 @@ export const Legend = memo(function Legend() {
       <div className="legend-edge-list">
         {edgeItems.map((item) => <span key={item.label}><i className={`legend-line legend-line--${item.tone}`} />{item.label}</span>)}
       </div>
+      </div> : null}
     </aside>
   );
 });

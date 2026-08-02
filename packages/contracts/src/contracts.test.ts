@@ -14,6 +14,7 @@ import {
   LspAvailabilitySchema,
   LspLanguageSchema,
   LlmConfigurationUpdateSchema,
+  LlmConnectionTestResponseSchema,
   LlmPublicConfigurationSchema,
   PanelStateSchema,
   PROTOCOL_VERSION,
@@ -21,6 +22,7 @@ import {
   ServerEventSchema,
   TerminalCreateRequestSchema,
   WorkspaceBrowseResponseSchema,
+  WorkspaceFolderPickResponseSchema,
   WorkspaceIdSchema,
   WorkspaceListResponseSchema,
   WorkspaceLockConflictSchema,
@@ -92,6 +94,29 @@ describe("protocol contracts", () => {
       model: "gpt-4o",
       apiKey: { action: "replace", value: "write-only-key" },
     }).apiKey).toEqual({ action: "replace", value: "write-only-key" });
+  });
+
+  it("validates bounded LLM connection diagnostics", () => {
+    expect(LlmConnectionTestResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      ok: true,
+      providerKind: "ollama",
+      model: "qwen2.5-coder:7b",
+      latencyMs: 24,
+      message: "Conexión correcta.",
+    })).toMatchObject({ ok: true, latencyMs: 24 });
+  });
+
+  it("validates native folder picker outcomes", () => {
+    expect(WorkspaceFolderPickResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      status: "selected",
+      path: "/Users/developer/project",
+    }).status).toBe("selected");
+    expect(WorkspaceFolderPickResponseSchema.parse({
+      protocolVersion: PROTOCOL_VERSION,
+      status: "cancelled",
+    }).status).toBe("cancelled");
   });
 
   it("strictly validates post-handshake client WebSocket messages", () => {

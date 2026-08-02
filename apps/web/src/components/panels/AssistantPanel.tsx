@@ -1,9 +1,10 @@
-import { AlertTriangle, Bot, Check, Copy, Play, Send, ShieldCheck, Sparkles, Square, X } from "lucide-react";
+import { AlertTriangle, Bot, Check, Copy, Play, Send, Settings2, ShieldCheck, Sparkles, Square, X } from "lucide-react";
 import { memo, useMemo, useRef, type KeyboardEvent } from "react";
 import type { NodeProps } from "@xyflow/react";
 
 import { nextHorizontalTabIndex } from "../../lib/keyboardNavigation";
 import { canUseWorkspaceFeatures } from "../../lib/workspaceAccess";
+import { useShellStore } from "../../store/useShellStore";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import type { AssistantFlowNode, AssistantMode, SemanticFlowNode } from "../../types";
 import { PanelFrame } from "./PanelFrame";
@@ -51,6 +52,7 @@ export const AssistantPanel = memo(function AssistantPanel({
   const approveActTask = useWorkspaceStore((state) => state.approveActTask);
   const cancelActTask = useWorkspaceStore((state) => state.cancelActTask);
   const resetActTask = useWorkspaceStore((state) => state.resetActTask);
+  const setSettingsOpen = useShellStore((state) => state.setSettingsOpen);
   const askTabRef = useRef<HTMLButtonElement>(null);
   const actTabRef = useRef<HTMLButtonElement>(null);
 
@@ -178,20 +180,23 @@ export const AssistantPanel = memo(function AssistantPanel({
                   ? "Conectando con el agente local…"
                   : askAvailable
                     ? "Pregunta sobre el proyecto…"
-                    : "Ask LLM no está disponible para este workspace."
+                    : "Preguntar no está disponible para este workspace."
               }
             />
             {workspaceReady && askMode === "local" ? (
-              <p className="ask-mode-notice" role="status">
+              <div className="ask-mode-notice" role="status">
                 <AlertTriangle aria-hidden="true" size={12} />
                 <span>
-                  <strong>Ask Local no genera explicaciones.</strong>{" "}
-                  Busca archivos, símbolos, fragmentos y relaciones directamente
-                  en el índice local.
+                  <strong>Búsqueda local activa.</strong>{" "}
+                  Encuentra archivos, símbolos, fragmentos y relaciones; no
+                  genera explicaciones. {askNotice}
                 </span>
-              </p>
+                <button type="button" onClick={() => setSettingsOpen(true)}>
+                  <Settings2 aria-hidden="true" size={13} /> Configurar LLM
+                </button>
+              </div>
             ) : null}
-            {workspaceReady && askNotice ? (
+            {workspaceReady && askMode !== "local" && askNotice ? (
               <p className="ask-provider-notice" role="status">
                 {askNotice}
               </p>
@@ -235,7 +240,7 @@ export const AssistantPanel = memo(function AssistantPanel({
                       <span>
                         {message.role === "user" ? "Tú" : "Constelix"}
                         {message.role === "assistant" && message.mode
-                          ? ` · ${message.mode === "local" ? "Ask Local" : "Ask LLM"}`
+                          ? ` · ${message.mode === "local" ? "Búsqueda local" : "LLM"}`
                           : ""}
                       </span>
                       <p>{message.content}</p>
@@ -262,7 +267,7 @@ export const AssistantPanel = memo(function AssistantPanel({
                                   </span>
                                   <code>{hit.relativePath}</code>
                                 </button>
-                                {hit.signature ? <p>{hit.signature}</p> : null}
+                                {hit.signature && !hit.snippet ? <p>{hit.signature}</p> : null}
                                 {hit.snippet ? (
                                   <pre>
                                     <code>{hit.snippet.content}</code>
@@ -348,7 +353,7 @@ export const AssistantPanel = memo(function AssistantPanel({
           data-testid="act-panel"
         >
           {!actAvailable || workspaceMode === "read" ? (
-            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceMode === "read" ? "Actuar bloqueado en Modo Lectura" : workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{workspaceMode === "read" ? "Vuelve a abrir un workspace con permisos de escritura para delegar cambios a Codex." : codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p></div></div>
+            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceMode === "read" ? "Actuar bloqueado en Modo Lectura" : workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{workspaceMode === "read" ? "Vuelve a abrir un workspace con permisos de escritura para delegar cambios a Codex." : codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p>{workspaceReady && workspaceMode !== "read" ? <button type="button" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" size={13} /> Ver diagnóstico</button> : null}</div></div>
           ) : actTask === null ? (
             <>
               <div className="act-copy">

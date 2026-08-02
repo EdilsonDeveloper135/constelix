@@ -480,14 +480,14 @@ describe("ConstelixDatabase", () => {
     database.appendAiMessage("ws", "thread-local", {
       id: "local-answer",
       role: "assistant",
-      content: "Ask Local encontró 1 coincidencia estructural.",
+      content: "La búsqueda local encontró 1 coincidencia estructural.",
       mode: "local",
       localResult,
     });
 
     expect(database.loadAiMessages("thread-local")).toEqual([{
       role: "assistant",
-      content: "Ask Local encontró 1 coincidencia estructural.",
+      content: "La búsqueda local encontró 1 coincidencia estructural.",
       mode: "local",
       localResult,
     }]);

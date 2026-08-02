@@ -1,24 +1,55 @@
-import type { LlmPublicConfiguration } from "@constelix/contracts";
-import { memo, useEffect, useState } from "react";
+import type {
+  LlmConfigurationUpdate,
+  LlmPublicConfiguration,
+} from "@constelix/contracts";
+import { memo, useEffect, useRef, useState } from "react";
 
 import { WorkspaceCanvas } from "./components/canvas/WorkspaceCanvas";
 import { WorkspaceOnboarding } from "./components/onboarding/WorkspaceOnboarding";
 import { CommandPalette } from "./components/shell/CommandPalette";
 import { GlobalNotice } from "./components/shell/GlobalNotice";
+import { HelpCenter } from "./components/shell/HelpCenter";
 import { Rail } from "./components/shell/Rail";
-import { SettingsModal } from "./components/shell/SettingsModal";
+import {
+  SettingsModal,
+  type LlmSettingsDraft,
+} from "./components/shell/SettingsModal";
 import { Topbar } from "./components/shell/Topbar";
 import { WorkspaceSwitcherDialog } from "./components/shell/WorkspaceSwitcherDialog";
 import { useAgentBridge } from "./hooks/useAgentBridge";
+import { useAppearance } from "./hooks/useAppearance";
 import { apiClient } from "./lib/api";
 import { closeMonacoLspConnections } from "./lib/lsp";
+import { useShellStore } from "./store/useShellStore";
 import { useWorkspaceStore } from "./store/useWorkspaceStore";
+
+function toLlmConfigurationUpdate(
+  settings: LlmSettingsDraft,
+): LlmConfigurationUpdate {
+  return {
+    protocolVersion: 1,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey
+      ? { action: "replace", value: settings.apiKey }
+      : settings.clearApiKey
+        ? { action: "clear" }
+        : { action: "preserve" },
+  };
+}
 
 export const App = memo(function App() {
   useAgentBridge();
-  const settingsOpen = useWorkspaceStore((state) => state.settingsOpen);
-  const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
+  useAppearance();
+  const settingsOpen = useShellStore((state) => state.settingsOpen);
+  const setSettingsOpen = useShellStore((state) => state.setSettingsOpen);
+  const setOnboardingOpen = useShellStore(
+    (state) => state.setOnboardingOpen,
+  );
   const workspaceId = useWorkspaceStore((state) => state.workspaceId);
+  const demoMode = useWorkspaceStore((state) => state.demoMode);
+  const activeTool = useWorkspaceStore((state) => state.activeTool);
+  const previousWorkspaceIdRef = useRef(workspaceId);
   const [llmConfiguration, setLlmConfiguration] =
     useState<LlmPublicConfiguration | null>(null);
   const [llmConfigurationLoading, setLlmConfigurationLoading] = useState(
@@ -61,6 +92,16 @@ export const App = memo(function App() {
     [workspaceId],
   );
   useEffect(() => {
+    if (
+      workspaceId &&
+      workspaceId !== previousWorkspaceIdRef.current &&
+      !demoMode
+    ) {
+      setOnboardingOpen(true);
+    }
+    previousWorkspaceIdRef.current = workspaceId;
+  }, [demoMode, setOnboardingOpen, workspaceId]);
+  useEffect(() => {
     const flushLayout = () => useWorkspaceStore.getState().flushLayout();
     const flushWhenHidden = () => {
       if (document.visibilityState === "hidden") flushLayout();
@@ -73,14 +114,22 @@ export const App = memo(function App() {
     };
   }, []);
 
+  const persistLlmConfiguration = async (settings: LlmSettingsDraft) => {
+    const configuration = await apiClient.updateLlmConfiguration(
+      toLlmConfigurationUpdate(settings),
+    );
+    setLlmConfiguration(configuration);
+  };
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-active-tool={activeTool}>
       <Topbar />
       <Rail />
       <WorkspaceCanvas />
       <GlobalNotice />
       <WorkspaceOnboarding />
       <CommandPalette />
+      <HelpCenter />
       <WorkspaceSwitcherDialog />
       <SettingsModal
         open={settingsOpen}
@@ -98,19 +147,10 @@ export const App = memo(function App() {
         onRetryLoad={() => {
           setLlmConfigurationLoadAttempt((attempt) => attempt + 1);
         }}
-        onSave={async (settings) => {
-          const configuration = await apiClient.updateLlmConfiguration({
-            protocolVersion: 1,
-            baseUrl: settings.baseUrl,
-            model: settings.model,
-            apiKey: settings.apiKey
-              ? { action: "replace", value: settings.apiKey }
-              : settings.clearApiKey
-                ? { action: "clear" }
-                : { action: "preserve" },
-          });
-          setLlmConfiguration(configuration);
-        }}
+        onSave={persistLlmConfiguration}
+        onTest={(settings) =>
+          apiClient.testLlmConnection(toLlmConfigurationUpdate(settings))
+        }
       />
     </div>
   );

@@ -333,7 +333,7 @@ describe("CodexManager App Server protocol", () => {
       await expect(incompatible.availability()).resolves.toEqual({
         available: false,
         version: "0.1.0",
-        reason: `Constelix currently supports Codex CLI ${TESTED_CODEX_VERSION}.`,
+        reason: `Constelix admite actualmente Codex CLI ${TESTED_CODEX_VERSION}.`,
       });
     } finally {
       absent.close();

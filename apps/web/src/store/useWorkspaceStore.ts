@@ -3,7 +3,6 @@ import { create } from "zustand";
 import type {
   ActTask as ContractActTask,
   ActTaskStatus,
-  PanelState,
   WorkspaceSummary,
 } from "@constelix/contracts";
 
@@ -12,7 +11,6 @@ import {
   demoEvidencePath,
   demoIndexStatus,
   demoNodes,
-  demoToolPanels,
 } from "../data/demo";
 import { AgentRequestError, apiClient } from "../lib/api";
 import { closeMonacoLspConnections } from "../lib/lsp";
@@ -29,12 +27,7 @@ import {
 import { isFloatingCanvasNode } from "../lib/panelDock";
 import { markTerminalRuntimeExited } from "../lib/terminalRuntime";
 import { isAbortError, retryWithDelays } from "../lib/retry";
-import {
-  applySemanticViewState,
-  hasCapacityHiddenNodes,
-  mergeGraphSnapshotPage,
-  mergeRevisionedGraphDelta,
-} from "../lib/workspaceGraph";
+import { mergeGraphSnapshotPage, mergeRevisionedGraphDelta } from "../lib/workspaceGraph";
 import { canUseWorkspaceFeatures } from "../lib/workspaceAccess";
 import type {
   ActTask,
@@ -59,6 +52,16 @@ import type {
   WorkspaceNode,
   WorkspaceNotice,
 } from "../types";
+import {
+  createConnectedPanelNodes,
+  deriveCollapsedNodes,
+  EMPTY_WORKSPACE_SUMMARY,
+  nextToolPanelZIndex,
+  restoreAdditionalTerminals,
+  sameEvidencePath,
+  visibleGraphState,
+  withLayout,
+} from "./workspaceState";
 
 interface WorkspaceState {
   workspaceId: string;
@@ -68,13 +71,10 @@ interface WorkspaceState {
   branch: string;
   workspaceMode: WorkspaceMode;
   workspaceSummary: WorkspaceSummary;
-  onboardingOpen: boolean;
   notices: WorkspaceNotice[];
   connection: ConnectionState;
   demoMode: boolean;
   activeTool: RailTool;
-  commandPaletteOpen: boolean;
-  settingsOpen: boolean;
   nodes: WorkspaceNode[];
   edges: WorkspaceEdge[];
   graphRevision: number;
@@ -137,11 +137,8 @@ interface WorkspaceState {
   setNodeKindFilter: (kind: CanvasFilters["nodeKind"]) => void;
   setExtensionFilter: (extension: string) => void;
   resetCanvasFilters: () => void;
-  acknowledgeOnboarding: () => void;
   dismissNotice: (id: string) => void;
   setActiveTool: (tool: RailTool) => void;
-  setCommandPaletteOpen: (open: boolean) => void;
-  setSettingsOpen: (open: boolean) => void;
   togglePanel: (id: string, visible?: boolean) => void;
   setPanelDock: (id: string, dock: PanelDock) => void;
   closePanel: (id: string) => void;
@@ -190,192 +187,6 @@ let layoutRequestEpoch = 0;
 let reconcileAbortController: AbortController | null = null;
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 150, 600] as const;
 const startsInDemoMode = !apiClient.hasToken;
-const emptyWorkspaceSummary: WorkspaceSummary = {
-  projectTypes: [],
-  languages: [],
-  estimatedFileCount: 0,
-  indexedFileCount: 0,
-  warnings: [],
-  omittedFiles: [],
-  omittedFileCount: 0,
-  omittedFilesTruncated: false,
-};
-
-function createConnectedPanelNodes(): WorkspaceNode[] {
-  return demoToolPanels.map((node) => {
-    const cloned = {
-      ...node,
-      position: { ...node.position },
-      data: { ...node.data },
-      ...(node.style ? { style: { ...node.style } } : {}),
-    } as WorkspaceNode;
-    if (cloned.type === "editorPanel") {
-      const { contentHash: _contentHash, ...data } = cloned.data;
-      return {
-        ...cloned,
-        hidden: true,
-        data: {
-          ...data,
-          title: "Editor",
-          relativePath: "",
-          preview: "",
-        },
-      };
-    }
-    if (cloned.type === "terminalPanel") {
-      return {
-        ...cloned,
-        data: { ...cloned.data, title: "Terminal — workspace", cwd: "." },
-      };
-    }
-    return cloned;
-  });
-}
-
-function collapsedSet(collapsedNodeIds: Readonly<Record<string, boolean>>): Set<string> {
-  return new Set(
-    Object.entries(collapsedNodeIds)
-      .filter(([, collapsed]) => collapsed)
-      .map(([id]) => id),
-  );
-}
-
-function sameEvidencePath(
-  left: EvidencePath | null,
-  right: EvidencePath,
-): boolean {
-  return left !== null && JSON.stringify(left) === JSON.stringify(right);
-}
-
-function panelResource(saved: PanelState): Record<string, unknown> {
-  const { hidden: _hidden, ...resource } = saved.resource;
-  return resource;
-}
-
-function withLayout(nodes: WorkspaceNode[], layout: NonNullable<BootstrapPayload["layout"]>): WorkspaceNode[] {
-  const lookup = new Map(layout.map((item) => [item.id, item]));
-  const restored = nodes.map((node) => {
-    const saved = lookup.get(node.id);
-    if (!saved) return node;
-    const resource = panelResource(saved);
-    if (node.type === "semantic") {
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          ...(resource.collapsed === true ? { collapsed: true } : {}),
-        },
-        position: saved.pinned ? saved.position : node.position,
-      };
-    }
-    return {
-      ...node,
-      hidden: saved.resource.hidden === true,
-      data: {
-        ...node.data,
-        ...resource,
-        dock: persistedPanelDock(saved),
-        ...(saved.anchorNodeId ? { anchorNodeId: saved.anchorNodeId } : {}),
-      },
-      position: saved.position,
-      style: {
-        ...node.style,
-        width: saved.size.width,
-        height: saved.size.height,
-      },
-    } as WorkspaceNode;
-  });
-  const activeDockPanelIds = new Set(
-    layout.filter((panel) => panel.dockActive).map((panel) => panel.id),
-  );
-  let nextZIndex = nextToolPanelZIndex(restored);
-  return restored.map((node) =>
-    node.type !== "semantic" &&
-    !node.hidden &&
-    activeDockPanelIds.has(node.id)
-      ? { ...node, zIndex: nextZIndex++ }
-      : node,
-  ) as WorkspaceNode[];
-}
-
-function restoreAdditionalTerminals(
-  nodes: WorkspaceNode[],
-  layout: NonNullable<BootstrapPayload["layout"]>,
-): WorkspaceNode[] {
-  const existingIds = new Set(nodes.map((node) => node.id));
-  let nextZIndex = nextToolPanelZIndex(nodes);
-  const additional = layout.flatMap<TerminalFlowNode>((saved) => {
-    if (saved.kind !== "terminal" || existingIds.has(saved.id)) return [];
-    const title = typeof saved.resource.title === "string" ? saved.resource.title : "Terminal — .";
-    const cwd = typeof saved.resource.cwd === "string" ? saved.resource.cwd : ".";
-    const collapsed = saved.resource.collapsed === true;
-    const expandedHeight =
-      typeof saved.resource.expandedHeight === "number"
-        ? saved.resource.expandedHeight
-        : saved.size.height;
-    return [{
-      id: saved.id,
-      type: "terminalPanel",
-      position: saved.position,
-      style: { width: saved.size.width, height: saved.size.height },
-      dragHandle: ".panel-titlebar",
-      hidden: saved.resource.hidden === true,
-      data: {
-        panelType: "terminal",
-        dock: persistedPanelDock(saved),
-        title,
-        cwd,
-        collapsed,
-        expandedHeight,
-        ...(saved.anchorNodeId ? { anchorNodeId: saved.anchorNodeId } : {}),
-      },
-      zIndex: nextZIndex++,
-    }];
-  });
-  return [...nodes, ...additional];
-}
-
-function nextToolPanelZIndex(nodes: readonly WorkspaceNode[]): number {
-  return (
-    Math.max(
-      20,
-      ...nodes
-        .filter((node) => node.type !== "semantic")
-        .map((node) => node.zIndex ?? 0),
-    ) + 1
-  );
-}
-
-function deriveCollapsedNodes(
-  layout: BootstrapPayload["layout"],
-): Record<string, boolean> {
-  return Object.fromEntries(
-    (layout ?? [])
-      .filter((item) => item.kind === "index" && item.resource.collapsed === true)
-      .map((item) => [item.id, true]),
-  );
-}
-
-function visibleGraphState(
-  nodes: WorkspaceNode[],
-  edges: WorkspaceEdge[],
-  collapsedNodeIds: Readonly<Record<string, boolean>>,
-  expansionCursors: Readonly<Record<string, string | null>>,
-  sourceTruncated: boolean,
-  forcedVisibleNodeIds: Readonly<Record<string, boolean>> = {},
-): Pick<WorkspaceState, "nodes" | "graphTruncated"> {
-  const visibleNodes = applySemanticViewState(
-    nodes,
-    edges,
-    collapsedSet(collapsedNodeIds),
-    expansionCursors,
-    collapsedSet(forcedVisibleNodeIds),
-  );
-  return {
-    nodes: visibleNodes,
-    graphTruncated: sourceTruncated || hasCapacityHiddenNodes(visibleNodes),
-  };
-}
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceId: startsInDemoMode ? "demo" : "",
@@ -386,20 +197,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceMode: "edit",
   workspaceSummary: startsInDemoMode
     ? {
-        ...emptyWorkspaceSummary,
+        ...EMPTY_WORKSPACE_SUMMARY,
         projectTypes: ["Monorepo pnpm"],
         languages: ["typescript", "javascript"],
         estimatedFileCount: demoIndexStatus.filesIndexed,
         indexedFileCount: demoIndexStatus.filesIndexed,
       }
-    : emptyWorkspaceSummary,
-  onboardingOpen: true,
+    : EMPTY_WORKSPACE_SUMMARY,
   notices: [],
-  connection: "connecting",
+  connection: startsInDemoMode ? "connected" : "connecting",
   demoMode: startsInDemoMode,
   activeTool: "map",
-  commandPaletteOpen: false,
-  settingsOpen: false,
   nodes: startsInDemoMode ? demoNodes : createConnectedPanelNodes(),
   edges: startsInDemoMode ? demoEdges : [],
   graphRevision: 0,
@@ -408,7 +216,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   graphCursor: undefined,
   graphReconciling: false,
   remoteHydrated: false,
-  selectedNodeId: startsInDemoMode ? "fn-indexer" : null,
+  selectedNodeId: null,
   expansionCursors: {},
   collapsedNodeIds: {},
   pinnedSemanticNodeIds: {},
@@ -652,7 +460,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       branch: payload.workspace.branch ?? "—",
       workspaceMode: payload.workspace.mode,
       workspaceSummary: payload.summary,
-      onboardingOpen: sameWorkspace ? previous.onboardingOpen : true,
       notices: sameWorkspace ? previous.notices : [],
       nodes: visibleState.nodes,
       edges: graphEdges,
@@ -1167,7 +974,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (!panel) return state;
       const activeTool =
         panel.type === "editorPanel"
-          ? "editor"
+          ? "files"
           : panel.type === "terminalPanel"
             ? "terminal"
             : "ai";
@@ -1185,9 +992,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   openFile: (relativePath, anchorNodeId) => {
     set((state) => ({
-      activeTool: "editor",
+      activeTool: "files",
       nodes: state.nodes.map((node) => {
-        if (node.id !== "panel-editor" || node.type !== "editorPanel") return node;
+        if (node.id !== "panel-editor" || node.type !== "editorPanel") {
+          return node.type === "semantic" ? node : { ...node, hidden: true };
+        }
         const { anchorNodeId: _anchorNodeId, ...data } = node.data;
         return {
           ...node,
@@ -1218,7 +1027,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeTool: "terminal",
       nodes: state.nodes.map((node) => {
         if (node.id !== "panel-terminal" || node.type !== "terminalPanel") {
-          return node;
+          if (node.type === "semantic") return node;
+          return {
+            ...node,
+            hidden: node.type !== "terminalPanel",
+          } as WorkspaceNode;
         }
         const { anchorNodeId: _anchorNodeId, ...data } = node.data;
         return {
@@ -1261,7 +1074,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         },
         zIndex: nextToolPanelZIndex(state.nodes),
       };
-      return { activeTool: "terminal", nodes: [...state.nodes, terminal] };
+      return {
+        activeTool: "terminal",
+        nodes: [
+          ...state.nodes.map((node) =>
+            node.type === "semantic"
+              ? node
+              : ({
+                  ...node,
+                  hidden: node.type !== "terminalPanel",
+                } as WorkspaceNode),
+          ),
+          terminal,
+        ] as WorkspaceNode[],
+      };
     });
     get().saveLayout();
   },
@@ -1520,29 +1346,35 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   resetCanvasFilters: () =>
     set({ canvasFilters: { nodeKind: "all", extension: "all" } }),
 
-  acknowledgeOnboarding: () => set({ onboardingOpen: false }),
-
   dismissNotice: (id) =>
     set((state) => ({
       notices: state.notices.filter((notice) => notice.id !== id),
     })),
 
   setActiveTool: (tool) => {
-    set({ activeTool: tool });
+    set((state) => {
+      const zIndex = nextToolPanelZIndex(state.nodes);
+      return {
+        activeTool: tool,
+        nodes: state.nodes.map((node) => {
+          if (node.type === "semantic") return node;
+          const visible =
+            (tool === "files" && node.type === "editorPanel") ||
+            (tool === "terminal" && node.type === "terminalPanel") ||
+            (tool === "ai" && node.type === "assistantPanel");
+          return {
+            ...node,
+            hidden: !visible,
+            ...(visible ? { zIndex } : {}),
+          } as WorkspaceNode;
+        }),
+      };
+    });
     if (tool === "map") {
       window.dispatchEvent(new Event("constelix:fit-graph"));
     }
-    if (tool === "files" || tool === "editor") {
-      get().togglePanel("panel-editor", true);
-    }
-    if (tool === "terminal") get().togglePanel("panel-terminal", true);
-    if (tool === "ai") get().togglePanel("panel-assistant", true);
+    get().saveLayout();
   },
-
-  setCommandPaletteOpen: (commandPaletteOpen) =>
-    set({ commandPaletteOpen }),
-
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 
   togglePanel: (id, visible) => {
     set((state) => {
@@ -1571,7 +1403,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (!panel) return state;
       const activeTool =
         panel.type === "editorPanel"
-          ? "editor"
+          ? "files"
           : panel.type === "terminalPanel"
             ? "terminal"
             : "ai";

@@ -1,5 +1,5 @@
-import { Filter, RotateCcw } from "lucide-react";
-import { memo, useMemo } from "react";
+import { ChevronDown, Filter, RotateCcw } from "lucide-react";
+import { memo, useMemo, useState } from "react";
 
 import {
   availableExtensions,
@@ -29,6 +29,7 @@ interface CanvasFiltersProps {
 export const CanvasFilters = memo(function CanvasFilters({
   evidenceOverrides,
 }: CanvasFiltersProps) {
+  const [expanded, setExpanded] = useState(false);
   const filters = useWorkspaceStore((state) => state.canvasFilters);
   const semanticVersion = useWorkspaceStore((state) => state.semanticVersion);
   const setNodeKindFilter = useWorkspaceStore(
@@ -48,12 +49,18 @@ export const CanvasFilters = memo(function CanvasFilters({
     filters.nodeKind !== "all" || filters.extension !== "all";
 
   return (
-    <section className="canvas-filters" aria-label="Filtros del grafo">
-      <span className="canvas-filter-title">
+    <section className={`canvas-filters${expanded ? " canvas-filters--expanded" : ""}`} aria-label="Filtros del grafo">
+      <button
+        className="canvas-filter-title"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
         <Filter aria-hidden="true" size={12} />
-        Vista
-      </span>
-      <label>
+        Filtros {active ? <span aria-label="Filtros activos">•</span> : null}
+        <ChevronDown aria-hidden="true" size={12} />
+      </button>
+      {expanded ? <div className="canvas-filters__content"><label>
         Tipo
         <select
           aria-label="Filtrar por tipo de nodo"
@@ -101,6 +108,7 @@ export const CanvasFilters = memo(function CanvasFilters({
           {evidenceOverrides === 1 ? "" : "s"} fuera del filtro.
         </span>
       ) : null}
+      </div> : null}
     </section>
   );
 });

@@ -244,6 +244,34 @@ describe("workspace manager transitions", () => {
     });
   });
 
+  it("keeps a path typed while the initial directory browse is in flight", async () => {
+    const initialBrowse = deferred<typeof browseA>();
+    apiMock.browseDirectories.mockReturnValueOnce(initialBrowse.promise);
+    useWorkspaceManagerStore.setState({
+      browse: browseB,
+      pathDraft: browseB.path,
+    });
+
+    const browseRequest = useWorkspaceManagerStore
+      .getState()
+      .browsePath("");
+    await vi.waitFor(() => {
+      expect(apiMock.browseDirectories).toHaveBeenCalledOnce();
+    });
+
+    useWorkspaceManagerStore
+      .getState()
+      .setPathDraft("/tmp/many-folders");
+    initialBrowse.resolve(browseA);
+    await browseRequest;
+
+    expect(useWorkspaceManagerStore.getState()).toMatchObject({
+      browse: browseB,
+      pathDraft: "/tmp/many-folders",
+      browseLoading: false,
+    });
+  });
+
   it("appends directory pages with the same signed cursor context", async () => {
     apiMock.browseDirectories
       .mockResolvedValueOnce(browseFirstPage)
@@ -336,6 +364,41 @@ describe("workspace manager transitions", () => {
     pendingOpen.resolve(openResponse(SESSION_B_ID, WORKSPACE_B_ID));
     await switchRequest;
     expect(useWorkspaceManagerStore.getState().phase).toBe("idle");
+  });
+
+  it("does not overwrite a path typed while the selector is loading", async () => {
+    const pendingWorkspaces = deferred<{
+      protocolVersion: 1;
+      activeSession: ReturnType<typeof session>;
+      recents: never[];
+    }>();
+    const pendingBrowse = deferred<typeof browseA>();
+    apiMock.listWorkspaces.mockReturnValueOnce(pendingWorkspaces.promise);
+    apiMock.browseDirectories.mockReturnValueOnce(pendingBrowse.promise);
+
+    const selectorRequest = useWorkspaceManagerStore
+      .getState()
+      .openSelector();
+    await vi.waitFor(() => {
+      expect(apiMock.browseDirectories).toHaveBeenCalledOnce();
+    });
+    useWorkspaceManagerStore
+      .getState()
+      .setPathDraft("/tmp/many-folders");
+
+    pendingWorkspaces.resolve({
+      protocolVersion: 1,
+      activeSession: session(SESSION_A_ID, WORKSPACE_A_ID),
+      recents: [],
+    });
+    pendingBrowse.resolve(browseA);
+    await selectorRequest;
+
+    expect(useWorkspaceManagerStore.getState()).toMatchObject({
+      phase: "idle",
+      browse: browseA,
+      pathDraft: "/tmp/many-folders",
+    });
   });
 
   it("ignores an obsolete browse error after a newer request succeeds", async () => {

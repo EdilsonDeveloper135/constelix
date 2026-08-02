@@ -1,6 +1,6 @@
 # Workspace lifecycle and leases
 
-v0.0.6 treats a workspace as an isolated runtime owned by
+v0.0.8 treats a workspace as an isolated runtime owned by
 `WorkspaceRuntimeManager`. The global event bus, recent-workspace catalog, and
 folder browser outlive a switch. Each workspace runtime owns its descriptor,
 SQLite database, indexer/watcher, PTYs, Ask service, Codex process, LSP manager,

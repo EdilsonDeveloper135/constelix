@@ -214,6 +214,58 @@ describe("LLM configuration", () => {
     });
   });
 
+  it("previews connection settings without persisting the draft", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "constelix-llm-preview-"));
+    temporaryDirectories.push(parent);
+    const store = new LlmConfigurationStore(join(parent, "state"), {});
+    await store.update({
+      protocolVersion: 1,
+      baseUrl: "https://saved.example/v1",
+      model: "saved-model",
+      apiKey: { action: "replace", value: "saved-key" },
+    });
+    const settingsBefore = await readFile(store.settingsPath, "utf8");
+    const secretBefore = await readFile(store.secretPath, "utf8");
+
+    const preview = await store.preview({
+      protocolVersion: 1,
+      baseUrl: "https://preview.example/v1",
+      model: "preview-model",
+      apiKey: { action: "replace", value: "preview-key" },
+    });
+    expect(preview).toMatchObject({
+      baseUrl: "https://preview.example/v1",
+      model: "preview-model",
+      apiKey: "preview-key",
+    });
+    expect(await readFile(store.settingsPath, "utf8")).toBe(settingsBefore);
+    expect(await readFile(store.secretPath, "utf8")).toBe(secretBefore);
+    expect(await store.load()).toMatchObject({
+      baseUrl: "https://saved.example/v1",
+      model: "saved-model",
+      apiKey: "saved-key",
+    });
+
+    expect(
+      await store.preview({
+        protocolVersion: 1,
+        baseUrl: "https://saved.example/v1",
+        model: "same-provider-model",
+        apiKey: { action: "preserve" },
+      }),
+    ).toMatchObject({ apiKey: "saved-key" });
+    expect(
+      (
+        await store.preview({
+          protocolVersion: 1,
+          baseUrl: "https://other.example/v1",
+          model: "other-model",
+          apiKey: { action: "preserve" },
+        })
+      ).apiKey,
+    ).toBeUndefined();
+  });
+
   it("fails closed when a crash leaves a new secret with old settings", async () => {
     const parent = await mkdtemp(join(tmpdir(), "constelix-llm-transaction-"));
     temporaryDirectories.push(parent);

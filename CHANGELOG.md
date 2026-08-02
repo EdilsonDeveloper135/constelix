@@ -1,5 +1,65 @@
 # Changelog
 
+## [v0.0.8] - 2026-08-02
+
+### Added
+
+- Flujo de producto explícito y progresivo —Mapa, Código, Preguntar y Actuar—
+  con onboarding orientado a resultados, centro de ayuda contextual e inspector
+  semántico de relaciones y acciones.
+- Paleta de comandos con navegación por teclado y búsqueda real de archivos y
+  símbolos, además de acceso directo a herramientas, preferencias y ayuda.
+- Presets OpenAI, Ollama y compatible, prueba autenticada de conexión LLM antes
+  de guardar, diagnósticos Codex y configuración persistente de tema y escala de
+  texto.
+- Selector nativo de carpetas en macOS con fallback al explorador local seguro,
+  favicon propio y contratos Zod para las nuevas fronteras HTTP.
+- Cobertura automatizada de navegación progresiva, viewport compacto, temas,
+  ayuda, múltiples terminales, ciclo de vida de Monaco/xterm y flujos conectados.
+
+### Changed
+
+- El dashboard adopta una jerarquía map-first con una sola herramienta primaria
+  a la vez, barra inferior en pantallas compactas y superficies responsive sin
+  overflow horizontal.
+- El estado transitorio del shell se separa del estado persistente del
+  workspace; la creación de nodos/paneles y sus reglas de visibilidad viven en
+  un módulo dedicado.
+- Los estilos de producto y responsive se separan del legado, y el mapeo de
+  errores HTTP, la prueba de proveedores y el selector nativo dejan de inflar el
+  servidor principal.
+- La Topbar resume de forma accionable conexión, modo del workspace y capacidad
+  de inteligencia; la navegación elimina controles duplicados o no disponibles.
+
+### Fixed
+
+- `pnpm dev` acepta de forma equivalente una ruta directa o precedida por `--`,
+  rechaza argumentos ambiguos y detecta Node.js anterior a 24 antes de llegar a
+  errores opacos de ABI nativa.
+- Abrir o crear una terminal conserva visibles todas las terminales activas sin
+  reactivar paneles ajenos; cambiar entre Mapa, Código, Terminal y Preguntar no
+  pierde PTY, borradores ni conflictos pendientes.
+- El modo demo ya no simula degradación por ausencia de clave y diferencia con
+  precisión búsqueda local, LLM conectado, modo lectura y capacidad Act.
+- El foco de evidencia histórica deja de alterar el encuadre inicial del grafo;
+  el zoom compacto, minimapa, filtros y controles mantienen el proyecto
+  navegable en escritorio y móvil.
+- Modales, pestañas, menús contextuales y ayuda atrapan/restauran foco, exponen
+  nombres accesibles inequívocos y admiten Escape, Tab, Home, End y flechas.
+- La selección de proveedor valida clave, endpoint y modelo, permite comprobar
+  conectividad sin guardar el borrador ni exponer secretos, y presenta estados
+  de error recuperables.
+- La carga inicial y la paginación del selector de carpetas ya no pueden
+  reemplazar una ruta escrita por la persona usuaria cuando una respuesta
+  anterior llega tarde.
+
+### Known issues
+
+- Se conservan las limitaciones externas y de plataforma descritas en
+  `KNOWN_ISSUES.md`: disponibilidad del proveedor, macOS, presupuestos de
+  indexación, soporte LSP acotado y riesgos aceptados entre procesos del mismo
+  usuario.
+
 ## [v0.0.6] - 2026-08-01
 
 ### Added

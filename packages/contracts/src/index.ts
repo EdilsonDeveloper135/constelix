@@ -164,6 +164,23 @@ export const WorkspaceBrowseResponseSchema = z.object({
   }
 });
 
+export const WorkspaceFolderPickResponseSchema = z.discriminatedUnion("status", [
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    status: z.literal("selected"),
+    path: AbsoluteWorkspacePathSchema,
+  }).strict(),
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    status: z.literal("cancelled"),
+  }).strict(),
+  z.object({
+    protocolVersion: ProtocolVersionSchema,
+    status: z.literal("unavailable"),
+    message: z.string().min(1).max(500),
+  }).strict(),
+]);
+
 export const LspLanguageSchema = z.enum([
   "javascript",
   "typescript",
@@ -403,6 +420,15 @@ export const LlmConfigurationUpdateSchema = z.object({
   baseUrl: z.string().trim().min(1).max(2_048),
   model: z.string().trim().min(1).max(256),
   apiKey: LlmApiKeyUpdateSchema
+}).strict();
+
+export const LlmConnectionTestResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  ok: z.boolean(),
+  providerKind: LlmProviderKindSchema,
+  model: z.string().min(1).max(256),
+  latencyMs: z.number().int().nonnegative(),
+  message: z.string().min(1).max(500),
 }).strict();
 
 export const LocalAskRelationSchema = z.object({
@@ -706,6 +732,7 @@ export type WorkspaceOpenResponse = z.infer<typeof WorkspaceOpenResponseSchema>;
 export type WorkspaceLockConflict = z.infer<typeof WorkspaceLockConflictSchema>;
 export type WorkspaceBrowseEntry = z.infer<typeof WorkspaceBrowseEntrySchema>;
 export type WorkspaceBrowseResponse = z.infer<typeof WorkspaceBrowseResponseSchema>;
+export type WorkspaceFolderPickResponse = z.infer<typeof WorkspaceFolderPickResponseSchema>;
 export type LspLanguage = z.infer<typeof LspLanguageSchema>;
 export type LspServerStatus = z.infer<typeof LspServerStatusSchema>;
 export type LspAvailability = z.infer<typeof LspAvailabilitySchema>;
@@ -738,6 +765,7 @@ export type LlmApiKeySource = z.infer<typeof LlmApiKeySourceSchema>;
 export type LlmPublicConfiguration = z.infer<typeof LlmPublicConfigurationSchema>;
 export type LlmApiKeyUpdate = z.infer<typeof LlmApiKeyUpdateSchema>;
 export type LlmConfigurationUpdate = z.infer<typeof LlmConfigurationUpdateSchema>;
+export type LlmConnectionTestResponse = z.infer<typeof LlmConnectionTestResponseSchema>;
 export type LocalAskRelation = z.infer<typeof LocalAskRelationSchema>;
 export type LocalAskSnippet = z.infer<typeof LocalAskSnippetSchema>;
 export type LocalAskHit = z.infer<typeof LocalAskHitSchema>;

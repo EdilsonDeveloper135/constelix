@@ -18,8 +18,8 @@ describe("workspace presentation", () => {
     expect(connectionLabel("connected", true)).toBe("Modo demostración");
     expect(workspaceModeLabel("read")).toBe("Lectura");
     expect(workspaceModeLabel("edit")).toBe("Edición");
-    expect(askModeLabel("local")).toBe("Ask Local");
-    expect(askModeLabel("openai")).toBe("Ask LLM");
+    expect(askModeLabel("local")).toBe("Búsqueda local");
+    expect(askModeLabel("openai")).toBe("LLM conectado");
   });
 
   it("keeps only a short non-sensitive path suffix", () => {

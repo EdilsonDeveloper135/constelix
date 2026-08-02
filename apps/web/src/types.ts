@@ -209,6 +209,6 @@ export interface ActTask {
 }
 
 export type ConnectionState = "connecting" | "connected" | "degraded";
-export type RailTool = "map" | "files" | "diagrams" | "editor" | "terminal" | "preview" | "ai";
+export type RailTool = "map" | "files" | "terminal" | "ai";
 
 export type AgentEvent = ServerEvent;

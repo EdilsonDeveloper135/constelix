@@ -7,6 +7,19 @@ export interface DevCommand {
   args: string[];
 }
 
+export function parseDevWorkspacePath(
+  argv = process.argv.slice(2),
+): string | undefined {
+  const normalized = argv[0] === "--" ? argv.slice(1) : argv;
+  if (normalized.length > 1) {
+    throw new Error(
+      "Expected at most one workspace path. Use: pnpm dev -- /absolute/project/path",
+    );
+  }
+  const workspacePath = normalized[0]?.trim();
+  return workspacePath ? workspacePath : undefined;
+}
+
 export function buildDevCommands(workspacePath?: string): DevCommand[] {
   return [
     {
@@ -97,7 +110,7 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  void runDev(process.argv[2]).catch((error: unknown) => {
+  void runDev(parseDevWorkspacePath()).catch((error: unknown) => {
     process.stderr.write(
       `Constelix development startup failed: ${
         error instanceof Error ? error.message : "Unknown error"

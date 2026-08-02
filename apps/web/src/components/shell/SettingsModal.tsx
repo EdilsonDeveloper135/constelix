@@ -1,5 +1,19 @@
-import { KeyRound, Server, Settings2, ShieldCheck, X } from "lucide-react";
-import type { LlmApiKeySource } from "@constelix/contracts";
+import {
+  CheckCircle2,
+  KeyRound,
+  Monitor,
+  Palette,
+  PlugZap,
+  Server,
+  Settings2,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import type {
+  LlmApiKeySource,
+  LlmConnectionTestResponse,
+} from "@constelix/contracts";
 import {
   memo,
   useLayoutEffect,
@@ -15,6 +29,8 @@ import {
   isLoopbackLlmBaseUrl,
   validateLlmBaseUrl,
 } from "../../lib/llmSettings";
+import { useShellStore } from "../../store/useShellStore";
+import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 
 export interface LlmSettingsDraft {
   baseUrl: string;
@@ -35,6 +51,9 @@ export interface SettingsModalProps {
   onClose: () => void;
   onRetryLoad?: () => void;
   onSave?: (settings: LlmSettingsDraft) => Promise<void>;
+  onTest?: (
+    settings: LlmSettingsDraft,
+  ) => Promise<LlmConnectionTestResponse>;
 }
 
 export const SettingsModal = memo(function SettingsModal({
@@ -48,6 +67,7 @@ export const SettingsModal = memo(function SettingsModal({
   onClose,
   onRetryLoad,
   onSave,
+  onTest,
 }: SettingsModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const baseUrlRef = useRef<HTMLInputElement>(null);
@@ -61,6 +81,17 @@ export const SettingsModal = memo(function SettingsModal({
   const [busy, setBusy] = useState(false);
   const [clearApiKey, setClearApiKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] =
+    useState<LlmConnectionTestResponse | null>(null);
+  const themeMode = useShellStore((state) => state.themeMode);
+  const setThemeMode = useShellStore((state) => state.setThemeMode);
+  const textScale = useShellStore((state) => state.textScale);
+  const setTextScale = useShellStore((state) => state.setTextScale);
+  const actAvailable = useWorkspaceStore((state) => state.actAvailable);
+  const codexChecking = useWorkspaceStore((state) => state.codexChecking);
+  const codexReason = useWorkspaceStore((state) => state.codexReason);
+  const codexVersion = useWorkspaceStore((state) => state.codexVersion);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -88,42 +119,50 @@ export const SettingsModal = memo(function SettingsModal({
     setBusy(false);
     setClearApiKey(false);
     setError(null);
+    setTestBusy(false);
+    setTestResult(null);
     window.requestAnimationFrame(() => baseUrlRef.current?.focus());
   }, [initialBaseUrl, initialModel, open]);
 
   if (!open) return null;
 
   const close = () => {
-    if (busy) return;
+    if (busy || testBusy) return;
     if (apiKeyRef.current) apiKeyRef.current.value = "";
     onClose();
     window.requestAnimationFrame(() => returnFocusRef.current?.focus());
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (loading || loadError) return;
+  const validatedDraft = (): LlmSettingsDraft | null => {
+    if (loading || loadError) return null;
     const normalizedBaseUrl = baseUrl.trim().replace(/\/$/, "");
     const baseUrlError = validateLlmBaseUrl(normalizedBaseUrl);
     if (baseUrlError) {
       setError(baseUrlError);
       baseUrlRef.current?.focus();
-      return;
+      return null;
     }
     if (!model.trim()) {
       setError("Introduce el identificador del modelo.");
-      return;
+      return null;
     }
+    const apiKey = apiKeyRef.current?.value.trim();
+    return {
+      baseUrl: normalizedBaseUrl,
+      model: model.trim(),
+      ...(apiKey ? { apiKey } : {}),
+      ...(!apiKey && clearApiKey ? { clearApiKey: true } : {}),
+    };
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const draft = validatedDraft();
+    if (!draft) return;
     setBusy(true);
     setError(null);
-    const apiKey = apiKeyRef.current?.value.trim();
     try {
-      await onSave?.({
-        baseUrl: normalizedBaseUrl,
-        model: model.trim(),
-        ...(apiKey ? { apiKey } : {}),
-        ...(!apiKey && clearApiKey ? { clearApiKey: true } : {}),
-      });
+      await onSave?.(draft);
       if (apiKeyRef.current) apiKeyRef.current.value = "";
       onClose();
       window.requestAnimationFrame(() => returnFocusRef.current?.focus());
@@ -138,6 +177,25 @@ export const SettingsModal = memo(function SettingsModal({
     }
   };
 
+  const handleTest = async () => {
+    const draft = validatedDraft();
+    if (!draft || !onTest) return;
+    setTestBusy(true);
+    setError(null);
+    setTestResult(null);
+    try {
+      setTestResult(await onTest(draft));
+    } catch (testError) {
+      setError(
+        testError instanceof Error
+          ? testError.message
+          : "No se pudo comprobar el proveedor.",
+      );
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
   const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -147,7 +205,7 @@ export const SettingsModal = memo(function SettingsModal({
     if (event.key !== "Tab") return;
     const focusable = Array.from(
       dialogRef.current?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled)",
+        "button:not(:disabled), input:not(:disabled), select:not(:disabled)",
       ) ?? [],
     );
     if (focusable.length === 0) return;
@@ -163,6 +221,25 @@ export const SettingsModal = memo(function SettingsModal({
   };
 
   const localEndpoint = isLoopbackLlmBaseUrl(baseUrl);
+  const providerPreset = localEndpoint
+    ? "ollama"
+    : baseUrl.includes("api.openai.com")
+      ? "openai"
+      : "compatible";
+  const applyProviderPreset = (provider: "openai" | "ollama" | "compatible") => {
+    baseUrlDirtyRef.current = true;
+    modelDirtyRef.current = true;
+    setTestResult(null);
+    if (provider === "openai") {
+      setBaseUrl(DEFAULT_LLM_BASE_URL);
+      setModel(DEFAULT_LLM_MODEL);
+    } else if (provider === "ollama") {
+      setBaseUrl("http://127.0.0.1:11434/v1");
+      setModel("qwen2.5-coder:7b");
+    } else {
+      window.requestAnimationFrame(() => baseUrlRef.current?.focus());
+    }
+  };
   const providerChanged =
     baseUrl.trim().replace(/\/$/u, "") !==
     initialBaseUrl.trim().replace(/\/$/u, "");
@@ -180,7 +257,7 @@ export const SettingsModal = memo(function SettingsModal({
         className="settings-modal"
         role="dialog"
         aria-modal="true"
-        aria-label="Configuración de LLM"
+        aria-label="Configuración de Constelix"
         onKeyDown={handleDialogKeyDown}
       >
         <header className="settings-modal__header">
@@ -188,16 +265,33 @@ export const SettingsModal = memo(function SettingsModal({
             <Settings2 aria-hidden="true" size={17} />
           </span>
           <div>
-            <strong>Configuración de LLM</strong>
-            <span>Conecta un proveedor local o compatible con OpenAI.</span>
+            <strong>Configuración</strong>
+            <span>Proveedor, apariencia y capacidades locales.</span>
           </div>
           <button type="button" aria-label="Cerrar configuración" onClick={close}>
             <X aria-hidden="true" size={16} />
           </button>
         </header>
         <form className="settings-modal__form" onSubmit={(event) => void handleSubmit(event)}>
+          <section className="settings-modal__section" aria-labelledby="provider-settings-title">
+            <div className="settings-modal__section-heading">
+              <Server aria-hidden="true" size={15} />
+              <div><strong id="provider-settings-title">Proveedor de IA</strong><span>La búsqueda local funciona aunque no conectes un LLM.</span></div>
+            </div>
+            <div className="provider-presets" aria-label="Proveedores preconfigurados">
+              {(["openai", "ollama", "compatible"] as const).map((provider) => (
+                <button
+                  key={provider}
+                  type="button"
+                  aria-pressed={providerPreset === provider}
+                  onClick={() => applyProviderPreset(provider)}
+                >
+                  {provider === "openai" ? "OpenAI" : provider === "ollama" ? "Ollama local" : "Compatible"}
+                </button>
+              ))}
+            </div>
           <label>
-            <span><Server aria-hidden="true" size={13} /> URL base del LLM</span>
+            <span>URL base del LLM</span>
             <input
               ref={baseUrlRef}
               name="llmBaseUrl"
@@ -209,6 +303,7 @@ export const SettingsModal = memo(function SettingsModal({
               onChange={(event) => {
                 baseUrlDirtyRef.current = true;
                 setBaseUrl(event.target.value);
+                setTestResult(null);
               }}
             />
           </label>
@@ -223,19 +318,29 @@ export const SettingsModal = memo(function SettingsModal({
               onChange={(event) => {
                 modelDirtyRef.current = true;
                 setModel(event.target.value);
+                setTestResult(null);
               }}
             />
           </label>
           <label>
-            <span><KeyRound aria-hidden="true" size={13} /> Clave de API (opcional)</span>
+            <span><KeyRound aria-hidden="true" size={13} /> {localEndpoint ? "Clave API (no requerida en local)" : "Clave API (requerida para proveedor remoto)"}</span>
             <input
               ref={apiKeyRef}
               name="llmApiKey"
               type="password"
               autoComplete="new-password"
               disabled={clearApiKey}
-              placeholder={apiKeyConfigured ? "Clave configurada para este endpoint" : "No requerida por Ollama local"}
-              onChange={() => setClearApiKey(false)}
+              placeholder={
+                apiKeyConfigured
+                  ? "Clave configurada para este endpoint"
+                  : localEndpoint
+                    ? "No requerida por Ollama local"
+                    : "Introduce la clave del proveedor"
+              }
+              onChange={() => {
+                setClearApiKey(false);
+                setTestResult(null);
+              }}
             />
           </label>
           {apiKeyConfigured && apiKeySource === "stored" ? (
@@ -271,6 +376,56 @@ export const SettingsModal = memo(function SettingsModal({
               : "La URL apunta a un proveedor externo; revisa qué código compartes."}
             {" "}La clave es de solo escritura y nunca se persiste en el navegador.
           </p>
+          {testResult ? (
+            <p
+              className={`settings-modal__test-result settings-modal__test-result--${testResult.ok ? "success" : "failure"}`}
+              role="status"
+            >
+              {testResult.ok ? <CheckCircle2 aria-hidden="true" size={15} /> : <TriangleAlert aria-hidden="true" size={15} />}
+              <span>{testResult.message} <small>{testResult.latencyMs} ms</small></span>
+            </p>
+          ) : null}
+          </section>
+
+          <section className="settings-modal__section" aria-labelledby="appearance-settings-title">
+            <div className="settings-modal__section-heading">
+              <Palette aria-hidden="true" size={15} />
+              <div><strong id="appearance-settings-title">Apariencia</strong><span>Ajusta contraste y escala sin perder espacio de trabajo.</span></div>
+            </div>
+            <div className="settings-modal__appearance-grid">
+              <label>
+                <span><Monitor aria-hidden="true" size={13} /> Tema</span>
+                <select value={themeMode} onChange={(event) => setThemeMode(event.target.value as "dark" | "light" | "system")}>
+                  <option value="dark">Oscuro</option>
+                  <option value="light">Claro</option>
+                  <option value="system">Usar sistema</option>
+                </select>
+              </label>
+              <label>
+                <span>Escala de texto</span>
+                <select value={textScale} onChange={(event) => setTextScale(event.target.value as "default" | "large")}>
+                  <option value="default">Cómoda</option>
+                  <option value="large">Grande</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section className="settings-modal__section settings-modal__codex" aria-labelledby="codex-settings-title">
+            <div className="settings-modal__section-heading">
+              <PlugZap aria-hidden="true" size={15} />
+              <div>
+                <strong id="codex-settings-title">Codex local</strong>
+                <span>
+                  {codexChecking
+                    ? "Comprobando la instalación…"
+                    : actAvailable
+                      ? `Listo${codexVersion ? ` · versión ${codexVersion}` : ""}`
+                      : codexReason ?? "Instala la versión compatible de Codex CLI para habilitar Actuar."}
+                </span>
+              </div>
+            </div>
+          </section>
           {error ? <p className="settings-modal__error" role="alert">{error}</p> : null}
           {loading ? (
             <p className="settings-modal__key-source" role="status">
@@ -286,8 +441,17 @@ export const SettingsModal = memo(function SettingsModal({
             </div>
           ) : null}
           <footer className="settings-modal__actions">
-            <button type="button" onClick={close} disabled={busy}>Cancelar</button>
-            <button type="submit" disabled={busy || loading || Boolean(loadError)}>
+            <button
+              type="button"
+              className="settings-modal__test"
+              disabled={busy || testBusy || loading || Boolean(loadError) || !onTest}
+              onClick={() => void handleTest()}
+            >
+              <PlugZap aria-hidden="true" size={14} /> {testBusy ? "Comprobando…" : "Probar sin guardar"}
+            </button>
+            <span className="settings-modal__action-spacer" />
+            <button type="button" onClick={close} disabled={busy || testBusy}>Cancelar</button>
+            <button type="submit" disabled={busy || testBusy || loading || Boolean(loadError)}>
               {busy ? "Guardando…" : loading ? "Cargando…" : "Guardar configuración"}
             </button>
           </footer>

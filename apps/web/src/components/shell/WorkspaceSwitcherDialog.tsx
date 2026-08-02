@@ -29,6 +29,9 @@ export const WorkspaceSwitcherDialog = memo(
     const browseLoading = useWorkspaceManagerStore(
       (state) => state.browseLoading,
     );
+    const nativePickerBusy = useWorkspaceManagerStore(
+      (state) => state.nativePickerBusy,
+    );
     const errorMessage = useWorkspaceManagerStore(
       (state) => state.errorMessage,
     );
@@ -40,6 +43,9 @@ export const WorkspaceSwitcherDialog = memo(
       (state) => state.setPathDraft,
     );
     const browsePath = useWorkspaceManagerStore((state) => state.browsePath);
+    const pickNativeFolder = useWorkspaceManagerStore(
+      (state) => state.pickNativeFolder,
+    );
     const loadMoreBrowse = useWorkspaceManagerStore(
       (state) => state.loadMoreBrowse,
     );
@@ -59,7 +65,7 @@ export const WorkspaceSwitcherDialog = memo(
     const titleId = useId();
     const descriptionId = useId();
     const switching = phase === "validating" || phase === "activating";
-    const selectionBusy = switching || phase === "loading";
+    const selectionBusy = switching || phase === "loading" || nativePickerBusy;
 
     const visibleRecents = useMemo(() => {
       const normalized = filter.trim().toLocaleLowerCase();
@@ -251,7 +257,17 @@ export const WorkspaceSwitcherDialog = memo(
           ) : (
             <>
               <div className="workspace-switcher__path">
-                <label htmlFor="workspace-path">Ruta absoluta</label>
+                <div className="workspace-switcher__path-heading">
+                  <label htmlFor="workspace-path">Carpeta del workspace</label>
+                  <button
+                    type="button"
+                    disabled={selectionBusy}
+                    onClick={() => void pickNativeFolder()}
+                  >
+                    {nativePickerBusy ? <LoaderCircle className="spin" aria-hidden="true" size={14} /> : <FolderOpen aria-hidden="true" size={14} />}
+                    Elegir carpeta…
+                  </button>
+                </div>
                 <div>
                   <input
                     id="workspace-path"

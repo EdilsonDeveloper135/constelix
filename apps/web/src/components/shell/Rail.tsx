@@ -2,15 +2,13 @@ import {
   Bot,
   CircleHelp,
   Code2,
-  Eye,
-  FileCode2,
-  Folder,
   Network,
   Settings2,
   SquareTerminal
 } from "lucide-react";
 import { memo, type ComponentType } from "react";
 
+import { useShellStore } from "../../store/useShellStore";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 import type { RailTool } from "../../types";
 
@@ -23,18 +21,16 @@ interface RailItem {
 
 const tools: RailItem[] = [
   { id: "map", label: "Mapa", icon: Network },
-  { id: "files", label: "Archivos", icon: Folder },
-  { id: "diagrams", label: "Diagramas", icon: FileCode2, disabled: true },
-  { id: "editor", label: "Editor", icon: Code2 },
+  { id: "files", label: "Código", icon: Code2 },
   { id: "terminal", label: "Terminal", icon: SquareTerminal },
-  { id: "preview", label: "Vista previa", icon: Eye, disabled: true },
-  { id: "ai", label: "IA", icon: Bot }
+  { id: "ai", label: "Preguntar", icon: Bot }
 ];
 
 export const Rail = memo(function Rail() {
   const activeTool = useWorkspaceStore((state) => state.activeTool);
   const setActiveTool = useWorkspaceStore((state) => state.setActiveTool);
-  const setSettingsOpen = useWorkspaceStore((state) => state.setSettingsOpen);
+  const setSettingsOpen = useShellStore((state) => state.setSettingsOpen);
+  const setHelpOpen = useShellStore((state) => state.setHelpOpen);
 
   return (
     <aside className="rail" aria-label="Herramientas del workspace">
@@ -58,6 +54,16 @@ export const Rail = memo(function Rail() {
             </button>
           );
         })}
+        <button
+          className="rail-item with-tooltip"
+          data-tooltip="Ayuda"
+          type="button"
+          aria-label="Abrir ayuda y primeros pasos"
+          onClick={() => setHelpOpen(true)}
+        >
+          <CircleHelp aria-hidden={true} size={20} />
+          <span>Ayuda</span>
+        </button>
       </nav>
       <div className="rail-footer">
         <button
@@ -68,15 +74,6 @@ export const Rail = memo(function Rail() {
           onClick={() => setSettingsOpen(true)}
         >
           <Settings2 aria-hidden="true" size={19} />
-        </button>
-        <button
-          type="button"
-          className="with-tooltip"
-          data-tooltip="Ayuda (Próximamente)"
-          aria-label="Ayuda, disponible próximamente"
-          disabled
-        >
-          <CircleHelp aria-hidden="true" size={19} />
         </button>
       </div>
     </aside>

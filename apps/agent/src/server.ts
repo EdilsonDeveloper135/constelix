@@ -1,6 +1,5 @@
 import {
   randomBytes,
-  randomUUID,
   timingSafeEqual,
 } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
@@ -26,70 +25,46 @@ import {
   WorkspaceOpenRequestSchema,
   WorkspaceSessionSchema,
   type ActTask,
-  type WorkspaceLockConflict,
 } from "@constelix/contracts";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
 } from "fastify";
-import { ZodError } from "zod";
-
-import {
-  OpenAIUnavailableError,
-  type AskServiceOptions,
-} from "./ask.js";
+import { type AskServiceOptions } from "./ask.js";
 import {
   CodexUnavailableError,
   type CodexManagerOptions,
 } from "./codex.js";
 import {
-  FileChangedDuringReadError,
-  FileConflictError,
-  FileTooLargeError,
-  InvalidTextFileError,
   readWorkspaceTextFile,
   writeWorkspaceTextFile,
 } from "./files.js";
-import { LlmConfigurationError } from "./llm-config.js";
+import { testLlmConnection } from "./llm-connection.js";
+import { chooseNativeWorkspaceFolder } from "./native-folder-picker.js";
 import {
-  LspProtocolError,
   LspSessionLimitError,
-  LspUnavailableError,
 } from "./lsp.js";
 import {
   detectSupportedLanguage,
   type ScanWorkspaceOptions,
 } from "./scanner.js";
 import {
-  PathSecurityError,
-  WorkspaceIdentityError,
   WorkspaceReadOnlyError,
-  WorkspaceValidationError,
   createWorkspaceId as createCanonicalWorkspaceId,
   redactLocalPaths,
   redactSecrets,
   summarizeWorkspacePath,
 } from "./security.js";
 import {
-  ReadOnlyTerminalUnavailableError,
-} from "./terminals.js";
-import {
   WorkspaceBrowserError,
 } from "./workspace-browser.js";
 import {
-  RecentWorkspaceNotFoundError,
-  WorkspaceOpenLockConflictError,
   WorkspaceRuntimeManager,
   WorkspaceSessionChangedError,
-  WorkspaceSwitchInProgressError,
 } from "./workspace-manager.js";
 import type { WorkspaceRuntime } from "./workspace-runtime.js";
-import {
-  WorkspaceLeaseLostError,
-  WorkspaceLockExpectedOwnerError,
-  WorkspaceLockGuardTimeoutError,
-} from "./workspace-lock.js";
+import { mapAgentError } from "./server-errors.js";
 
 export interface AgentServerOptions {
   workspaceRoot: string;
@@ -141,7 +116,7 @@ export async function startAgentServer(
     ...(options.indexerScanOptions
       ? { indexerScanOptions: options.indexerScanOptions }
       : {}),
-    agentVersion: "v0.0.6",
+    agentVersion: "v0.0.8",
   });
   const events = manager.globalEvents;
   const app = Fastify({
@@ -419,6 +394,11 @@ export async function startAgentServer(
       };
     });
 
+    app.post("/api/v1/fs/pick-folder", async (request) => {
+      captureRequest(manager, request);
+      return chooseNativeWorkspaceFolder();
+    });
+
     app.get("/api/v1/settings/llm", async (request) =>
       captureRequest(manager, request).ask.llmConfiguration
     );
@@ -443,6 +423,25 @@ export async function startAgentServer(
         },
       );
       return publicConfiguration;
+    });
+
+    app.post("/api/v1/settings/llm/test", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = LlmConfigurationUpdateSchema.parse(request.body);
+      const configuration = await runtime.llmConfigurationStore.preview(input);
+      const result = await testLlmConnection(configuration);
+      runtime.database.audit(
+        runtime.workspaceId,
+        "settings",
+        "llm.test",
+        result.ok ? "success" : "failure",
+        {
+          providerKind: result.providerKind,
+          model: result.model,
+          latencyMs: result.latencyMs,
+        },
+      );
+      return result;
     });
 
     app.post("/api/v1/graph/query", async (request) => {
@@ -666,7 +665,7 @@ export async function startAgentServer(
       const normalized =
         error instanceof Error ? error : new Error("Unknown agent error.");
       const runtime = manager.current;
-      const mapped = mapError(normalized);
+      const mapped = mapAgentError(normalized);
       try {
         runtime.database.audit(
           runtime.workspaceId,
@@ -940,238 +939,6 @@ function isSupportedActScope(capabilities: readonly string[]): boolean {
     unique.has("write") &&
     unique.has("command")
   );
-}
-
-function mapError(error: Error): {
-  status: number;
-  code: string;
-  message: string;
-  recoverable: boolean;
-  details?: unknown;
-} {
-  if (error instanceof ZodError) {
-    return {
-      status: 400,
-      code: "INVALID_REQUEST",
-      message: "Request validation failed.",
-      recoverable: true,
-    };
-  }
-  if (error instanceof FileConflictError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof FileTooLargeError) {
-    return {
-      status: 413,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof InvalidTextFileError) {
-    return {
-      status: 422,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof FileChangedDuringReadError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof PathSecurityError) {
-    return {
-      status: 403,
-      code: error.code,
-      message: error.message,
-      recoverable: false,
-    };
-  }
-  if (error instanceof WorkspaceReadOnlyError) {
-    return {
-      status: 403,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof WorkspaceIdentityError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: false,
-    };
-  }
-  if (error instanceof WorkspaceOpenLockConflictError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-      details: toPublicLockConflict(error),
-    };
-  }
-  if (error instanceof WorkspaceSessionChangedError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-      details: { activeSession: error.activeSession },
-    };
-  }
-  if (error instanceof WorkspaceSwitchInProgressError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof WorkspaceLockExpectedOwnerError) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (
-    error instanceof WorkspaceLockGuardTimeoutError ||
-    error instanceof WorkspaceLeaseLostError
-  ) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: false,
-    };
-  }
-  if (error instanceof RecentWorkspaceNotFoundError) {
-    return {
-      status: 404,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof WorkspaceBrowserError) {
-    const status =
-      error.code === "WORKSPACE_PATH_NOT_FOUND"
-        ? 404
-        : error.code === "WORKSPACE_PATH_UNREADABLE"
-          ? 403
-          : error.code === "WORKSPACE_BROWSE_TOO_LARGE"
-            ? 413
-          : 400;
-    return {
-      status,
-      code: error.code,
-      message: error.message,
-      recoverable: error.recoverable,
-    };
-  }
-  if (error instanceof WorkspaceValidationError) {
-    const status = error.code === "WORKSPACE_NOT_FOUND" ? 404 : 403;
-    return {
-      status,
-      code: error.code,
-      message: error.message,
-      recoverable: false,
-    };
-  }
-  if (error instanceof LlmConfigurationError) {
-    return {
-      status: 400,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (
-    error instanceof OpenAIUnavailableError ||
-    error instanceof CodexUnavailableError ||
-    error instanceof LspUnavailableError
-  ) {
-    return {
-      status: 503,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (
-    error instanceof LspSessionLimitError ||
-    error instanceof LspProtocolError
-  ) {
-    return {
-      status: 409,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  if (error instanceof ReadOnlyTerminalUnavailableError) {
-    return {
-      status: 503,
-      code: error.code,
-      message: error.message,
-      recoverable: true,
-    };
-  }
-  const nodeError = error as NodeJS.ErrnoException;
-  if (nodeError.code === "ENOENT") {
-    return {
-      status: 404,
-      code: "NOT_FOUND",
-      message: "Resource not found.",
-      recoverable: true,
-    };
-  }
-  return {
-    status: 500,
-    code: "INTERNAL_ERROR",
-    message: redactSecrets(error.message || "Internal agent error."),
-    recoverable: true,
-  };
-}
-
-function toPublicLockConflict(
-  error: WorkspaceOpenLockConflictError,
-): WorkspaceLockConflict {
-  const { inspection } = error;
-  const metadata = inspection.metadata;
-  const isVersionOne = metadata?.version === 1;
-  const forceAllowed =
-    inspection.classification === "ambiguous" &&
-    inspection.lockId !== undefined;
-  return {
-    conflictId: randomUUID(),
-    lockId: inspection.lockId ?? randomUUID(),
-    workspaceId: error.workspaceId,
-    displayPath: summarizeWorkspacePath(error.workspacePath),
-    status:
-      inspection.classification === "active" ? "active" : "ambiguous",
-    forceAllowed,
-    ...(metadata && metadata.pid > 0 ? { pid: metadata.pid } : {}),
-    ...(isVersionOne
-      ? { agentVersion: metadata.agentVersion }
-      : {}),
-    ...(inspection.heartbeatAt
-      ? { heartbeatAt: inspection.heartbeatAt }
-      : {}),
-  };
 }
 
 function parseBooleanQuery(

@@ -4,6 +4,7 @@ import {
   FileReadResponseSchema,
   FileWriteResponseSchema,
   GraphSnapshotSchema,
+  LlmConnectionTestResponseSchema,
   LlmPublicConfigurationSchema,
   LocalAskResultSchema,
   LspAvailabilitySchema,
@@ -12,6 +13,7 @@ import {
   TerminalSessionSchema,
   TerminalOutputSnapshotSchema,
   WorkspaceBrowseResponseSchema,
+  WorkspaceFolderPickResponseSchema,
   WorkspaceListResponseSchema,
   WorkspaceOpenResponseSchema,
   WorkspaceSessionSchema,
@@ -24,10 +26,12 @@ import {
   type FileWriteRequest,
   type GraphSnapshot,
   type LlmConfigurationUpdate,
+  type LlmConnectionTestResponse,
   type LlmPublicConfiguration,
   type PanelState,
   type TerminalCreateRequest,
   type WorkspaceBrowseResponse,
+  type WorkspaceFolderPickResponse,
   type WorkspaceListResponse,
   type WorkspaceOpenRequest,
   type WorkspaceOpenResponse,
@@ -207,6 +211,14 @@ export class ConstelixApiClient {
     return WorkspaceBrowseResponseSchema.parse(response);
   }
 
+  async pickWorkspaceFolder(): Promise<WorkspaceFolderPickResponse> {
+    const response = await this.request<unknown>("/fs/pick-folder", {
+      method: "POST",
+      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }),
+    });
+    return WorkspaceFolderPickResponseSchema.parse(response);
+  }
+
   async openWorkspace(
     input: WorkspaceOpenRequest,
   ): Promise<HydratedWorkspaceOpenResponse> {
@@ -305,6 +317,16 @@ export class ConstelixApiClient {
       body: JSON.stringify(configuration),
     });
     return LlmPublicConfigurationSchema.parse(response);
+  }
+
+  async testLlmConnection(
+    configuration: LlmConfigurationUpdate,
+  ): Promise<LlmConnectionTestResponse> {
+    const response = await this.request<unknown>("/settings/llm/test", {
+      method: "POST",
+      body: JSON.stringify(configuration),
+    });
+    return LlmConnectionTestResponseSchema.parse(response);
   }
 
   async writeFile(relativePath: string, content: string, expectedContentHash?: string) {

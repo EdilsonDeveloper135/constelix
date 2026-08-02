@@ -30,6 +30,7 @@ interface WorkspaceManagerState {
   pathDraft: string;
   browse: WorkspaceBrowseResponse | null;
   browseLoading: boolean;
+  nativePickerBusy: boolean;
   browseShowHidden: boolean;
   errorCode: string | undefined;
   errorMessage: string | undefined;
@@ -41,6 +42,7 @@ interface WorkspaceManagerState {
   closeSelector(): void;
   setPathDraft(path: string): void;
   browsePath(path: string, showHidden?: boolean): Promise<void>;
+  pickNativeFolder(): Promise<void>;
   loadMoreBrowse(): Promise<void>;
   requestSwitch(target: WorkspaceTarget): Promise<void>;
   confirmDirtyDrafts(action: "preserve" | "discard" | "cancel"): Promise<void>;
@@ -59,6 +61,7 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
     pathDraft: "",
     browse: null,
     browseLoading: false,
+    nativePickerBusy: false,
     browseShowHidden: false,
     errorCode: undefined,
     errorMessage: undefined,
@@ -69,6 +72,7 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
 
     openSelector: async () => {
       const requestEpoch = ++selectorEpoch;
+      const initialPathDraft = get().pathDraft;
       set({
         selectorOpen: true,
         phase: "loading",
@@ -80,7 +84,10 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
         lockConflict: undefined,
       });
       try {
-        const workspaces = await apiClient.listWorkspaces();
+        const [workspaces, browse] = await Promise.all([
+          apiClient.listWorkspaces(),
+          apiClient.browseDirectories(""),
+        ]);
         if (
           requestEpoch !== selectorEpoch ||
           !get().selectorOpen ||
@@ -88,10 +95,16 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
         ) {
           return;
         }
-        set({
+        set((state) => ({
           recents: workspaces.recents,
+          browse,
+          pathDraft:
+            state.pathDraft === initialPathDraft
+              ? browse.path
+              : state.pathDraft,
+          browseShowHidden: false,
           phase: "idle",
-        });
+        }));
       } catch (error) {
         if (
           requestEpoch !== selectorEpoch ||
@@ -121,6 +134,7 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
         selectorOpen: false,
         phase: "idle",
         browseLoading: false,
+        nativePickerBusy: false,
         pendingTarget: undefined,
         guardSourceWorkspaceId: undefined,
         guardSourceSessionId: undefined,
@@ -130,7 +144,10 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
       });
     },
 
-    setPathDraft: (pathDraft) => set({ pathDraft }),
+    setPathDraft: (pathDraft) => {
+      browseEpoch += 1;
+      set({ pathDraft, browseLoading: false });
+    },
 
     browsePath: async (path, showHidden = false) => {
       const requestEpoch = ++browseEpoch;
@@ -158,6 +175,42 @@ export const useWorkspaceManagerStore = create<WorkspaceManagerState>(
             error instanceof AgentRequestError ? error.code : undefined,
           errorMessage: messageOf(error, "No se pudo explorar esa carpeta."),
         });
+      }
+    },
+
+    pickNativeFolder: async () => {
+      if (get().nativePickerBusy || isSwitching(get().phase)) return;
+      set({
+        nativePickerBusy: true,
+        errorCode: undefined,
+        errorMessage: undefined,
+      });
+      try {
+        const selection = await apiClient.pickWorkspaceFolder();
+        if (selection.status === "selected") {
+          set({ pathDraft: selection.path, nativePickerBusy: false });
+          await get().browsePath(selection.path);
+          return;
+        }
+        if (selection.status === "unavailable") {
+          set({
+            phase: "error",
+            errorCode: "NATIVE_FOLDER_PICKER_UNAVAILABLE",
+            errorMessage: selection.message,
+          });
+        }
+      } catch (error) {
+        set({
+          phase: "error",
+          errorCode:
+            error instanceof AgentRequestError ? error.code : undefined,
+          errorMessage: messageOf(
+            error,
+            "No se pudo abrir el selector de carpetas.",
+          ),
+        });
+      } finally {
+        set({ nativePickerBusy: false });
       }
     },
 

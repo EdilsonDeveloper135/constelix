@@ -253,7 +253,7 @@ the agent wraps the shell in a filesystem-write-denying macOS sandbox; if that
 sandbox is unavailable, terminal creation fails with
 `READ_ONLY_TERMINAL_UNAVAILABLE`.
 
-## v0.0.6 limitations
+## v0.0.8 limitations
 
 - One agent process owns one active workspace. Switching is sequential rather
   than a simultaneous multi-repository view.
@@ -264,6 +264,6 @@ sandbox is unavailable, terminal creation fails with
 - The local folder browser is a Constelix dialog, not the native macOS picker.
   It lists directories only and intentionally returns absolute paths to the
   authenticated local dashboard.
-- LSP support is limited to JS/TS and Python. v0.0.6 does not expose rename,
+- LSP support is limited to JS/TS and Python. v0.0.8 does not expose rename,
   code actions, formatting, workspace symbols, semantic tokens, or other
   language servers.

@@ -396,7 +396,7 @@ export class LocalAskEngine {
     }
 
     const limitations = [
-      "Ask Local realiza una búsqueda estructural por nombres, rutas, firmas y relaciones; no genera una respuesta en lenguaje natural.",
+      "La búsqueda local consulta nombres, rutas, firmas y relaciones verificables; no genera una explicación en lenguaje natural.",
     ];
     if (ftsFailed) {
       limitations.push(
@@ -893,8 +893,8 @@ export class AskService {
     throwIfAborted(signal);
     const answer =
       localResult.hits.length === 0
-        ? "Ask Local no encontró coincidencias estructurales verificables."
-        : `Ask Local encontró ${localResult.hits.length} coincidencia${localResult.hits.length === 1 ? "" : "s"} estructural${localResult.hits.length === 1 ? "" : "es"}.`;
+        ? "La búsqueda local no encontró coincidencias estructurales verificables."
+        : `La búsqueda local encontró ${localResult.hits.length} coincidencia${localResult.hits.length === 1 ? "" : "s"} estructural${localResult.hits.length === 1 ? "" : "es"}.`;
     const assistantMessageId = randomUUID();
     this.database.appendAiMessage(this.workspaceId, threadId, {
       id: assistantMessageId,

@@ -472,21 +472,21 @@ export class CodexManager {
       if (!version) {
         return {
           available: false,
-          reason: "Unable to determine Codex CLI version.",
+          reason: "No se pudo determinar la versión instalada de Codex CLI.",
         };
       }
       if (version !== TESTED_CODEX_VERSION) {
         return {
           available: false,
           version,
-          reason: `Constelix currently supports Codex CLI ${TESTED_CODEX_VERSION}.`,
+          reason: `Constelix admite actualmente Codex CLI ${TESTED_CODEX_VERSION}.`,
         };
       }
       return { available: true, version };
     } catch {
       return {
         available: false,
-        reason: `Codex CLI ${TESTED_CODEX_VERSION} was not found on PATH.`,
+        reason: `No se encontró Codex CLI ${TESTED_CODEX_VERSION} en PATH.`,
       };
     }
   }
@@ -633,7 +633,7 @@ export class CodexManager {
 
       try {
         await this.request("initialize", {
-          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.6" },
+          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.8" },
         });
         this.notify("initialized");
       } catch (error) {

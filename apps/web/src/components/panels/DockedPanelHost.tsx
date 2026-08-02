@@ -166,11 +166,11 @@ function panelHeight(panel: DockedPanel): number {
 }
 
 function panelLabel(panel: DockedPanel): string {
-  if (panel.type === "editorPanel") return "Editor";
+  if (panel.type === "editorPanel") return "Código";
   if (panel.type === "terminalPanel") {
     return panel.id === "panel-terminal" ? "Terminal" : panel.data.title;
   }
-  return "Asistente";
+  return "Preguntar";
 }
 
 function dockTabId(id: string): string {

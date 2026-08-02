@@ -19,7 +19,7 @@ export function workspaceModeLabel(mode: WorkspaceMode): string {
 }
 
 export function askModeLabel(mode: WorkspaceAskMode): string {
-  return mode === "local" ? "Ask Local" : "Ask LLM";
+  return mode === "local" ? "Búsqueda local" : "LLM conectado";
 }
 
 export function summarizeWorkspacePath(path: string): string {

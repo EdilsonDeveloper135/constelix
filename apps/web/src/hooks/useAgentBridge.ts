@@ -8,6 +8,12 @@ export function useAgentBridge(): void {
   const setConnection = useWorkspaceStore((state) => state.setConnection);
 
   useEffect(() => {
+    if (!apiClient.hasToken) {
+      setConnection(
+        useWorkspaceStore.getState().demoMode ? "connected" : "degraded",
+      );
+      return;
+    }
     const unsubscribe = apiClient.subscribe(handleAgentEvent);
     const unsubscribeConnection = apiClient.subscribeConnection((state) => {
       if (state === "connected") {
@@ -27,10 +33,6 @@ export function useAgentBridge(): void {
         void useWorkspaceStore.getState().reconcileGraph();
       });
     const disconnect = apiClient.connect();
-
-    if (!apiClient.hasToken) {
-      setConnection("degraded");
-    }
 
     return () => {
       unsubscribe();

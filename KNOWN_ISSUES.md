@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.6` el 2026-08-01.
+Actualizado para `v0.0.8` el 2026-08-02.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -36,7 +36,7 @@ Actualizado para `v0.0.6` el 2026-08-01.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.6 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.8 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -78,7 +78,7 @@ Actualizado para `v0.0.6` el 2026-08-01.
 ## KI-009 — Alcance y confianza de los servidores de lenguaje
 
 - Estado: limitación técnica y de seguridad aceptada.
-- Impacto: v0.0.6 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+- Impacto: v0.0.8 ofrece LSP únicamente para TypeScript, JavaScript y Python.
   `typescript-language-server` y Pyright se ejecutan como procesos del usuario
   local y analizan configuración y dependencias del workspace; no constituyen
   una frontera frente a un repositorio hostil.
@@ -99,25 +99,25 @@ Actualizado para `v0.0.6` el 2026-08-01.
 
 ## Estado de pruebas
 
-La verificación de `v0.0.6` se ejecutó con Node.js 24.14.0 y pnpm 11.9.0:
+La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
 
 - instalación congelada, `git diff --check`, version check, typecheck, build y
   ausencia de source maps de producción: correctos;
-- `pnpm audit --prod`: 0 vulnerabilidades críticas, altas, moderadas, bajas o
-  informativas entre 173 dependencias de producción/opcionales auditadas;
-- Vitest: 42 archivos y 309 pruebas correctas, incluidas las regresiones de
+- `pnpm audit --prod`: sin vulnerabilidades conocidas en las dependencias de
+  producción;
+- Vitest: 45 archivos y 325 pruebas correctas, incluidas las regresiones de
   filesystem acotado, UTF-8, scanner, sockets, configuración privada, SQLite,
-  locks, lifecycle A→B, aislamiento de sesión y transporte LSP;
-- Playwright: 17 de 17 escenarios correctos en Chromium, incluidos hot-swap,
+  locks, lifecycle A→B, aislamiento de sesión, navegación de carpetas y
+  transporte LSP;
+- Playwright: 19 de 19 escenarios correctos en Chromium, incluidos hot-swap,
   recientes, paginación de carpetas, navegación, foco, borradores, locks,
-  Settings, Monaco, LSP y PTY. La carrera de hidratación de Settings pasó
-  además 10 repeticiones consecutivas;
+  Settings, viewport compacto, apariencia, Monaco, LSP y PTY;
 - benchmark de 10.000 archivos y 2.000.000 de líneas: indexación fría en
-  42.497 ms, actualización incremental p95 en 134 ms y PTY p95 en 0 ms, dentro
+  45.358 ms, actualización incremental p95 en 144 ms y PTY p95 en 0 ms, dentro
   de los presupuestos de 90 s, 1 s y 100 ms;
 - smoke LSP: diagnósticos y hover reales correctos con los servidores
   TypeScript y Pyright incluidos;
-- smoke del paquete: tarball `constelix-agent-0.0.6.tgz` instalado en un entorno
+- smoke del paquete: tarball `constelix-agent-0.0.8.tgz` instalado en un entorno
   temporal, ruta con espacios y dashboard servido correctamente;
 - el tarball no imprimió la capability y el build final conserva el aviso
   explícito de chunks diferidos grandes de Monaco/TypeScript/ELK.

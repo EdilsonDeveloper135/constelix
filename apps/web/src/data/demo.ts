@@ -75,6 +75,7 @@ const editorPanel: EditorFlowNode = {
   position: { x: 900, y: 30 },
   style: { width: 560, height: 620 },
   dragHandle: ".panel-titlebar",
+  hidden: true,
   data: {
     panelType: "editor",
     dock: "right",
@@ -93,6 +94,7 @@ const terminalPanel: TerminalFlowNode = {
   position: { x: 0, y: 570 },
   style: { width: 410, height: 310 },
   dragHandle: ".panel-titlebar",
+  hidden: true,
   data: {
     panelType: "terminal",
     dock: "bottom",
@@ -108,6 +110,7 @@ const assistantPanel: AssistantFlowNode = {
   position: { x: 455, y: 675 },
   style: { width: 625, height: 210 },
   dragHandle: ".panel-titlebar",
+  hidden: true,
   data: {
     panelType: "assistant",
     dock: "right",

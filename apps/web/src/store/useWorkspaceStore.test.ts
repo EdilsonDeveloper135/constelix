@@ -380,7 +380,7 @@ describe("workspace bootstrap reconciliation", () => {
       payload: {
         askMode: "local",
         askProviderStatus: "insufficient_quota",
-        askNotice: "OpenAI no tiene cuota; Ask Local permanece disponible.",
+        askNotice: "OpenAI no tiene cuota; la búsqueda local permanece disponible.",
       },
     });
     expect(useWorkspaceStore.getState()).toMatchObject({
@@ -393,7 +393,7 @@ describe("workspace bootstrap reconciliation", () => {
     expect(useWorkspaceStore.getState()).toMatchObject({
       askMode: "local",
       askProviderStatus: "insufficient_quota",
-      askNotice: "OpenAI no tiene cuota; Ask Local permanece disponible.",
+      askNotice: "OpenAI no tiene cuota; la búsqueda local permanece disponible.",
       actAvailable: true,
     });
 
@@ -442,7 +442,7 @@ describe("workspace bootstrap reconciliation", () => {
         from: "openai",
         to: "local",
         code,
-        message: "Ask Local continuará la consulta.",
+        message: "La búsqueda local continuará la consulta.",
         discardPartial: true,
       },
     });
@@ -450,7 +450,7 @@ describe("workspace bootstrap reconciliation", () => {
     expect(useWorkspaceStore.getState()).toMatchObject({
       askMode: "local",
       askProviderStatus: expectedStatus,
-      askNotice: "Ask Local continuará la consulta.",
+      askNotice: "La búsqueda local continuará la consulta.",
       answer: "",
       assistantThinking: true,
     });
@@ -809,12 +809,6 @@ describe("workspace bootstrap reconciliation", () => {
     );
   });
 
-  it("opens and closes the settings surface explicitly", () => {
-    useWorkspaceStore.getState().setSettingsOpen(true);
-    expect(useWorkspaceStore.getState().settingsOpen).toBe(true);
-    useWorkspaceStore.getState().setSettingsOpen(false);
-    expect(useWorkspaceStore.getState().settingsOpen).toBe(false);
-  });
 });
 
 function bootstrapPayload(options: {

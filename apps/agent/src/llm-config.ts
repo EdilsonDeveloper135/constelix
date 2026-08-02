@@ -48,7 +48,7 @@ interface StoredLlmConfiguration {
 export interface LlmConfigurationOverrides {
   baseUrl?: string;
   model?: string;
-  apiKey?: string;
+  apiKey?: string | undefined;
 }
 
 export interface ResolvedLlmConfiguration {
@@ -102,6 +102,34 @@ export class LlmConfigurationStore {
                 : { apiKey: storedSecret.apiKey }),
             },
           }),
+    });
+  }
+
+  async preview(
+    input: LlmConfigurationUpdate,
+  ): Promise<ResolvedLlmConfiguration> {
+    const current = await this.load();
+    const baseUrl = normalizeLlmBaseUrl(input.baseUrl);
+    const model = normalizeLlmModel(input.model);
+    let apiKey: string | undefined;
+
+    if (input.apiKey.action === "replace") {
+      apiKey = normalizeApiKey(input.apiKey.value);
+      if (apiKey === undefined) {
+        throw new LlmConfigurationError(
+          "LLM_API_KEY no puede estar vacía al probarla.",
+        );
+      }
+    } else if (
+      input.apiKey.action === "preserve" &&
+      current.baseUrl === baseUrl
+    ) {
+      apiKey = current.apiKey;
+    }
+
+    return resolveLlmConfiguration({
+      environment: {},
+      overrides: { baseUrl, model, apiKey },
     });
   }
 

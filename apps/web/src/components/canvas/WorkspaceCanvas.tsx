@@ -1,5 +1,5 @@
 import { LocateFixed, LockKeyhole, Maximize, Minus, Plus } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -15,6 +15,7 @@ import {
 } from "@xyflow/react";
 
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
+import { useResolvedTheme } from "../../hooks/useAppearance";
 import { MAX_VISIBLE_SEMANTIC_NODES } from "../../lib/workspaceGraph";
 import { applyCanvasFilters } from "../../lib/canvasFilters";
 import { isFloatingCanvasNode } from "../../lib/panelDock";
@@ -29,6 +30,7 @@ import { CanvasFilters } from "./CanvasFilters";
 import { Legend } from "./Legend";
 import { SemanticNode } from "./SemanticNode";
 import { SemanticNodeContextMenu } from "./SemanticNodeContextMenu";
+import { SemanticInspector } from "./SemanticInspector";
 
 const nodeTypes = {
   semantic: SemanticNode,
@@ -39,9 +41,16 @@ const nodeTypes = {
 
 const edgeTypes = { graphEdge: GraphEdge } satisfies EdgeTypes;
 
+const compactViewport = window.innerWidth <= 760;
 const initialZoom = Math.min(
   1,
-  Math.max(0.58, Math.min((window.innerWidth - 96) / 1460, (window.innerHeight - 72) / 900))
+  Math.max(
+    compactViewport ? 0.22 : 0.48,
+    Math.min(
+      (window.innerWidth - (compactViewport ? 12 : 96)) / 1460,
+      (window.innerHeight - 72) / 900,
+    ),
+  ),
 );
 
 const initialViewport = { x: initialZoom === 1 ? 21 : 12, y: 0, zoom: initialZoom };
@@ -64,7 +73,9 @@ interface ContextMenuState {
 }
 
 function CanvasInner() {
+  const resolvedTheme = useResolvedTheme();
   const nodes = useWorkspaceStore((state) => state.nodes);
+  const workspaceId = useWorkspaceStore((state) => state.workspaceId);
   const edges = useWorkspaceStore((state) => state.edges);
   const onNodesChange = useWorkspaceStore((state) => state.onNodesChange);
   const onEdgesChange = useWorkspaceStore((state) => state.onEdgesChange);
@@ -88,6 +99,7 @@ function CanvasInner() {
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [locked, setLocked] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const compactFittedWorkspaceRef = useRef<string | null>(null);
   const canvasNodes = useMemo(
     () => nodes.filter(isFloatingCanvasNode),
     [nodes],
@@ -160,6 +172,26 @@ function CanvasInner() {
   }, [setCanvasZoom]);
 
   useEffect(() => {
+    if (!compactViewport || compactFittedWorkspaceRef.current === workspaceId) {
+      return;
+    }
+    const semanticNodes = decoratedNodes
+      .filter((node) => node.type === "semantic" && !node.hidden)
+      .map(({ id }) => ({ id }));
+    if (!workspaceId || semanticNodes.length === 0) return;
+    compactFittedWorkspaceRef.current = workspaceId;
+    const frame = window.requestAnimationFrame(() => {
+      void fitView({
+        nodes: semanticNodes,
+        padding: 0.12,
+        duration: 0,
+        maxZoom: 0.45,
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [decoratedNodes, fitView, workspaceId]);
+
+  useEffect(() => {
     const focusGraph = () => {
       const semanticNodes = decoratedNodes
         .filter((node) => node.type === "semantic" && !node.hidden)
@@ -190,6 +222,13 @@ function CanvasInner() {
   }, [decoratedNodes, fitView]);
 
   useEffect(() => {
+    if (
+      !evidencePath ||
+      evidenceCursor <= 0 ||
+      evidenceCursor >= evidencePath.nodeIds.length
+    ) {
+      return;
+    }
     const activeId = evidencePath?.nodeIds[evidenceCursor - 1];
     if (!activeId) return;
     const activeNode = decoratedNodes.find(
@@ -272,7 +311,7 @@ function CanvasInner() {
         onNodeDragStop={saveLayout}
         onMove={(_, viewport) => setCanvasZoom(viewport.zoom)}
         defaultViewport={initialViewport}
-        minZoom={0.35}
+        minZoom={0.18}
         maxZoom={1.7}
         panOnScroll
         zoomOnScroll
@@ -281,18 +320,23 @@ function CanvasInner() {
         nodesDraggable={!locked}
         elevateNodesOnSelect={false}
         onlyRenderVisibleElements
-        colorMode="dark"
-        proOptions={{ hideAttribution: false }}
+        colorMode={resolvedTheme}
+        proOptions={{ hideAttribution: true }}
         fitViewOptions={{ padding: 0.12 }}
       >
-        <Background variant={BackgroundVariant.Dots} color="#2a3538" gap={18} size={0.85} />
+        <Background
+          variant={BackgroundVariant.Dots}
+          color={resolvedTheme === "light" ? "#a9bbc0" : "#2a3538"}
+          gap={18}
+          size={0.85}
+        />
         <MiniMap
           ariaLabel="Minimapa del proyecto"
           className="constelix-minimap"
           position="bottom-right"
           nodeColor={miniMapColor}
           nodeStrokeWidth={1.5}
-          maskColor="rgba(8, 13, 14, 0.72)"
+          maskColor={resolvedTheme === "light" ? "rgba(230, 238, 240, 0.7)" : "rgba(8, 13, 14, 0.72)"}
           pannable
           zoomable
         />
@@ -365,6 +409,7 @@ export const WorkspaceCanvas = memo(function WorkspaceCanvas() {
     <ReactFlowProvider>
       <div className="workspace-stage">
         <CanvasInner />
+        <SemanticInspector />
         <DockedPanelHost />
       </div>
     </ReactFlowProvider>

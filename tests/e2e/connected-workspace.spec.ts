@@ -98,9 +98,6 @@ test.describe("workspace connected to the local agent", () => {
       if (message.type() === "error") runtimeErrors.push(message.text());
     });
 
-    const realPtyCreated = page.waitForResponse(
-      (response) => response.url().endsWith("/api/v1/terminals") && response.status() === 201,
-    );
     await openConnectedWorkspace(page, {
       expectedName: "sample-workspace",
       expectedMode: "Edición",
@@ -108,10 +105,10 @@ test.describe("workspace connected to the local agent", () => {
 
     await expect(page).toHaveTitle("Constelix");
     await expect(page).toHaveURL(`${webOrigin}/`);
-    await expect(page.getByRole("status").filter({ hasText: "Agente local conectado" })).toBeVisible();
+    await expect(page.getByTestId("capability-summary").getByText("Agente local conectado", { exact: true })).toBeVisible();
     await expect(page.locator(".workspace-identity strong")).toHaveText("sample-workspace");
     await expect(page.getByTestId("workspace-canvas")).toBeVisible();
-    await realPtyCreated;
+    await page.getByRole("button", { name: "Preguntar", exact: true }).click();
     await expect(page.getByLabel("Historial de conversación")).toContainText(
       "¿Qué conecta el servicio de consultas?",
     );
@@ -123,9 +120,11 @@ test.describe("workspace connected to the local agent", () => {
     // real resources are available, only errors from the connected flow are relevant here.
     runtimeErrors.length = 0;
 
+    await page.getByRole("button", { name: "Mapa", exact: true }).click();
     await page.getByRole("button", { name: "Encuadrar" }).click();
     const semanticNodes = page.locator(".semantic-node");
     await expect.poll(() => semanticNodes.count()).toBeGreaterThan(5);
+    await openCanvasFilters(page);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("file");
     await page.getByLabel("Filtrar por extensión").selectOption(".ts");
     await page.getByRole("button", { name: "Encuadrar" }).click();
@@ -148,6 +147,11 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("export");
     await page.getByRole("button", { name: "Restablecer filtros" }).click();
 
+    const realPtyCreated = page.waitForResponse(
+      (response) => response.url().endsWith("/api/v1/terminals") && response.status() === 201,
+    );
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
+    await realPtyCreated;
     const terminalPanels = page.getByTestId("terminal-panel");
     await expect(terminalPanels).toHaveCount(1);
     const bottomDockTabs = page
@@ -195,12 +199,13 @@ test.describe("workspace connected to the local agent", () => {
     await page.context().setOffline(true);
     await page.waitForTimeout(1_250);
     await page.context().setOffline(false);
-    await expect(page.getByRole("status").filter({ hasText: "Agente local conectado" })).toBeVisible({ timeout: 8_000 });
+    await expect(page.getByTestId("capability-summary").getByText("Agente local conectado", { exact: true })).toBeVisible({ timeout: 8_000 });
     await expect(terminal.locator(".xterm-rows")).toContainText("RECOVERED_CHUNK", { timeout: 8_000 });
 
     const anchoredPtyCreated = page.waitForResponse(
       (response) => response.url().endsWith("/api/v1/terminals") && response.status() === 201,
     );
+    await openCanvasFilters(page);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("directory");
     await page.getByRole("button", { name: "Encuadrar" }).click();
     await page
@@ -211,7 +216,7 @@ test.describe("workspace connected to the local agent", () => {
     expect(anchoredPty.cwd).toBe("src");
     await expect(terminal.locator(".xterm-rows")).toContainText("src");
 
-    await page.getByRole("tab", { name: "Asistente" }).click();
+    await page.getByRole("button", { name: "Preguntar", exact: true }).click();
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(page.getByRole("tab", { name: "Actuar" })).toHaveAttribute("aria-selected", "true");
     await page.waitForTimeout(650);
@@ -225,6 +230,7 @@ test.describe("workspace connected to the local agent", () => {
       expectedMode: "Edición",
     });
 
+    await openCanvasFilters(page);
     const typeFilter = page.getByLabel("Filtrar por tipo de nodo");
     const extensionFilter = page.getByLabel("Filtrar por extensión");
     await expect(typeFilter).toBeVisible();
@@ -256,7 +262,7 @@ test.describe("workspace connected to the local agent", () => {
     ).toBeVisible();
   });
 
-  test("opens an accessible context menu before creating a terminal", async ({ page }) => {
+  test("opens an accessible context menu before opening a terminal", async ({ page }) => {
     let terminalCreates = 0;
     page.on("request", (request) => {
       const url = new URL(request.url());
@@ -268,15 +274,13 @@ test.describe("workspace connected to the local agent", () => {
       expectedName: "sample-workspace",
       expectedMode: "Edición",
     });
-    await expect(
-      page.locator('[data-testid="terminal-panel"]:visible').first(),
-    ).toBeVisible();
     terminalCreates = 0;
 
+    await openCanvasFilters(page);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("directory");
     await page.getByRole("button", { name: "Encuadrar" }).click();
     const node = page.locator(
-      '.react-flow__node[aria-label="directory: python"]',
+      '.react-flow__node[aria-label="directory: src"]',
     );
     await node.click({ button: "right" });
 
@@ -296,21 +300,18 @@ test.describe("workspace connected to the local agent", () => {
     await page.waitForTimeout(150);
     expect(terminalCreates).toBe(0);
 
-    const terminalCreated = page.waitForResponse(
-      (response) =>
-        response.url().endsWith("/api/v1/terminals") &&
-        response.status() === 201,
-    );
     await page.keyboard.press("End");
-    await expect(
-      menu.getByRole("menuitem", { name: "Abrir terminal aquí" }),
-    ).toBeFocused();
-    await page.keyboard.press("Enter");
-    const terminal = (await (await terminalCreated).json()) as { cwd: string };
-    expect(terminal.cwd).toBe("python");
-    expect(terminalCreates).toBe(1);
+    const openTerminalItem = menu.getByRole("menuitem", {
+      name: "Abrir terminal aquí",
+    });
+    await expect(openTerminalItem).toBeFocused();
+    await openTerminalItem.click();
     await expect(menu).toHaveCount(0);
+    await expect(page.locator('.app-shell[data-active-tool="terminal"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Terminal — src" })).toBeVisible();
+    expect(terminalCreates).toBeLessThanOrEqual(1);
 
+    await page.getByRole("button", { name: "Mapa", exact: true }).click();
     await node.click({ button: "right" });
     await expect(menu).toBeVisible();
     await page.keyboard.press("Escape");
@@ -330,19 +331,22 @@ test.describe("workspace connected to the local agent", () => {
     await expect(nodeWrapper).toHaveClass(/selected/);
   });
 
-  test("uses Ask Local without an API key and opens a verified result", async ({ page }) => {
+  test("uses local search without an API key and opens a verified result", async ({ page }) => {
     await openConnectedWorkspace(page, {
       expectedName: "sample-workspace",
       expectedMode: "Edición",
     });
 
     await expect(
-      page.getByLabel("Modos del workspace").getByText("Ask Local", {
+      page.getByTestId("capability-summary").getByText("Búsqueda local", {
         exact: true,
       }),
     ).toBeVisible();
-    await page.getByRole("tab", { name: "Asistente" }).click();
-    await page.getByRole("tab", { name: "Preguntar" }).click();
+    await page.getByRole("button", { name: "Preguntar", exact: true }).click();
+    await page
+      .getByLabel("Modo de inteligencia")
+      .getByRole("tab", { name: "Preguntar" })
+      .click();
     const question = page.getByRole("textbox", { name: "Pregunta" });
     await question.fill("answerProjectQuestion");
     await page.getByRole("button", { name: "Consultar" }).click();
@@ -380,13 +384,13 @@ test.describe("workspace connected to the local agent", () => {
       expectedName: "sample-workspace",
       expectedMode: "Edición",
     });
-    await expect(page.getByRole("status").filter({ hasText: "Agente local conectado" })).toBeVisible();
-    await page.getByRole("tab", { name: "Asistente" }).click();
-    await page.getByRole("tab", { name: "Actuar" }).click();
-    await expect(page.getByRole("tab", { name: "Actuar" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("capability-summary").getByText("Agente local conectado", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
+    await expect(page.locator('.app-shell[data-active-tool="terminal"]')).toBeVisible();
     const terminalPanels = page.getByTestId("terminal-panel");
     const bottomDock = page.getByTestId("workspace-dock-bottom");
     const bottomDockTabs = bottomDock.getByRole("tab");
+    await expect.poll(() => terminalPanels.count()).toBeGreaterThanOrEqual(1);
     if ((await bottomDockTabs.count()) < 2) {
       const terminalCreated = page.waitForResponse(
         (response) =>
@@ -398,6 +402,24 @@ test.describe("workspace connected to the local agent", () => {
     }
     await expect.poll(() => bottomDockTabs.count()).toBeGreaterThanOrEqual(2);
     await expect.poll(() => terminalPanels.count()).toBeGreaterThanOrEqual(2);
+    terminalCreates = 0;
+    terminalDeletes = 0;
+
+    const activeBottomPanel = bottomDock.locator(
+      ".dock-panel:not(.dock-panel--inactive)",
+    );
+    await activeBottomPanel
+      .getByRole("button", { name: "Desanclar panel al canvas" })
+      .click();
+    const dockTerminalBottom = page.getByRole("button", {
+      name: "Anclar panel abajo",
+    });
+    await expect(dockTerminalBottom).toBeVisible();
+    await dockTerminalBottom.focus();
+    await dockTerminalBottom.press("Enter");
+
+    await page.getByRole("button", { name: "Mapa", exact: true }).click();
+    await openCanvasFilters(page);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("file");
     await page.getByLabel("Filtrar por extensión").selectOption(".ts");
     await page.getByRole("button", { name: "Encuadrar" }).click();
@@ -408,9 +430,6 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".editor-breadcrumbs")).toContainText("index.ts");
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("export");
     await expect(page.locator(".editor-save-status")).not.toHaveText("Cargando");
-    await expect(page.locator(".xterm:visible").first()).toBeVisible();
-    terminalCreates = 0;
-    terminalDeletes = 0;
 
     const editor = page.locator(".monaco-editor").first();
     await editor.click();
@@ -424,18 +443,13 @@ test.describe("workspace connected to the local agent", () => {
     }
     await expect(page.getByText("Contenido suspendido a este nivel de zoom")).toHaveCount(0);
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("borrador local Constelix");
+
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
     await expect(page.locator(".xterm:visible").first()).toBeVisible();
-
-    await bottomDock
-      .getByRole("button", { name: "Desanclar panel al canvas" })
-      .click();
-    const dockTerminalBottom = page.getByRole("button", {
-      name: "Anclar panel abajo",
-    });
-    await expect(dockTerminalBottom).toBeVisible();
-    await dockTerminalBottom.focus();
-    await dockTerminalBottom.press("Enter");
-
+    await page.getByRole("button", { name: "Código", exact: true }).click();
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+      "borrador local Constelix",
+    );
     const rightDock = page.getByTestId("workspace-dock-right");
     await rightDock
       .getByRole("button", { name: "Desanclar panel al canvas" })
@@ -455,7 +469,12 @@ test.describe("workspace connected to the local agent", () => {
       await page.waitForTimeout(180);
     }
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("borrador local Constelix");
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
     await expect(page.locator(".xterm:visible").first()).toBeVisible();
+    await page.getByRole("button", { name: "Código", exact: true }).click();
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+      "borrador local Constelix",
+    );
     expect(terminalCreates).toBe(0);
     expect(terminalDeletes).toBe(0);
 
@@ -481,6 +500,8 @@ test.describe("workspace connected to the local agent", () => {
     await expect(page.locator(".editor-conflict")).toHaveCount(0);
     await expect.poll(async () => readFile(indexPath, "utf8")).toContain("versión local definitiva");
     await expect.poll(async () => readFile(indexPath, "utf8")).not.toContain("cambio externo dos");
+    await page.getByRole("button", { name: "Mapa", exact: true }).click();
+    await openCanvasFilters(page);
     await page.getByLabel("Filtrar por tipo de nodo").selectOption("function");
     await page.getByLabel("Filtrar por extensión").selectOption(".ts");
     await page.getByRole("button", { name: "Encuadrar" }).click();
@@ -488,6 +509,7 @@ test.describe("workspace connected to the local agent", () => {
       page.locator('.semantic-node[aria-label="function: e2eGraphSignal"]'),
     ).toBeVisible({ timeout: 3_000 });
 
+    await page.getByRole("button", { name: "Código", exact: true }).click();
     const floatingLayoutSaved = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/v1/layout") &&
@@ -509,7 +531,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(
       page
         .getByTestId("workspace-dock-right")
-        .getByRole("tab", { name: "Editor" }),
+        .getByRole("tab", { name: "Código" }),
     ).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Anclar panel a la derecha" }),
@@ -637,6 +659,16 @@ test.describe("workspace connected to the local agent", () => {
 
   test("configures a write-only local LLM credential and can clear it", async ({ page }) => {
     const secret = "constelix-e2e-write-only-credential";
+    let settingsUpdates = 0;
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        url.pathname === "/api/v1/settings/llm" &&
+        request.method() === "PUT"
+      ) {
+        settingsUpdates += 1;
+      }
+    });
     let releaseSettingsLoad: (() => void) | undefined;
     let markSettingsRequestStarted: (() => void) | undefined;
     const settingsLoadGate = new Promise<void>((resolveGate) => {
@@ -693,6 +725,23 @@ test.describe("workspace connected to the local agent", () => {
       "qwen2.5-coder:7b",
     );
 
+    const testedResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/llm/test") &&
+        response.request().method() === "POST" &&
+        response.status() === 200,
+    );
+    await settings.getByRole("button", { name: "Probar sin guardar" }).click();
+    const tested = await testedResponse;
+    expect(tested.request().postDataJSON()).toMatchObject({
+      protocolVersion: 1,
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen2.5-coder:7b",
+      apiKey: { action: "replace", value: secret },
+    });
+    expect(settingsUpdates).toBe(0);
+    await expect(apiKeyInput).toHaveValue(secret);
+
     const savedResponse = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/v1/settings/llm") &&
@@ -712,6 +761,7 @@ test.describe("workspace connected to the local agent", () => {
       baseUrl: "http://127.0.0.1:11434/v1",
       model: "qwen2.5-coder:7b",
     });
+    expect(settingsUpdates).toBe(1);
     expect(JSON.stringify(saved)).not.toContain(secret);
     await expect(settings).toHaveCount(0);
     await expect(settingsButton).toBeFocused();
@@ -787,19 +837,25 @@ test.describe("workspace connected to the local agent", () => {
     await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await expect(
-      page.getByRole("status").filter({ hasText: "Agente local conectado" }),
+      page.getByTestId("capability-summary").getByText("Agente local conectado", { exact: true }),
     ).toBeVisible();
-    const workspaceModes = page.getByLabel("Modos del workspace");
+    const workspaceModes = page.getByTestId("capability-summary");
     await expect(
       workspaceModes.getByText("Edición", { exact: true }),
     ).toBeVisible();
     await expect(
-      workspaceModes.getByText("Ask Local", { exact: true }),
+      workspaceModes.getByText("Búsqueda local", { exact: true }),
     ).toBeVisible();
 
+    const initialBrowseResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/fs/browse" &&
+        response.status() === 200,
+    );
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
     await expect(dialog).toBeVisible();
+    await initialBrowseResponse;
     await expect(dialog).toHaveAttribute("aria-modal", "true");
     await expect(dialog).toHaveAttribute("aria-busy", "false");
     await expect(dialog).toHaveAccessibleDescription(
@@ -824,15 +880,6 @@ test.describe("workspace connected to the local agent", () => {
     await recentFilter.fill("");
     await expect(recentWorkspace).toBeVisible();
 
-    const browseResponse = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/api/v1/fs/browse" &&
-        response.status() === 200,
-    );
-    await dialog
-      .getByRole("button", { name: "Explorar carpeta personal" })
-      .click();
-    await browseResponse;
     const openCurrent = dialog.getByRole("button", {
       name: "Abrir esta carpeta",
     });
@@ -883,7 +930,7 @@ test.describe("workspace connected to the local agent", () => {
       expectedName: "sample-workspace",
       expectedMode: "Edición",
     });
-    await page.getByRole("button", { name: "Archivos", exact: true }).click();
+    await page.getByRole("button", { name: "Código", exact: true }).click();
     await page
       .getByRole("button", { name: "index.ts", exact: true })
       .click();
@@ -958,7 +1005,7 @@ test.describe("workspace connected to the local agent", () => {
       name: "Cambiar workspace. Actual: sample-workspace",
     }).click();
     const dialog = page.getByRole("dialog", { name: "Cambiar workspace" });
-    await dialog.getByLabel("Ruta absoluta").fill(paginationRoot);
+    await dialog.getByLabel("Carpeta del workspace").fill(paginationRoot);
     const firstPage = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return (
@@ -967,9 +1014,7 @@ test.describe("workspace connected to the local agent", () => {
         response.status() === 200
       );
     });
-    await dialog
-      .getByRole("button", { name: "Explorar carpeta personal" })
-      .click();
+    await dialog.locator(".workspace-switcher__browse-current").click();
     await firstPage;
 
     await expect(
@@ -1035,7 +1080,7 @@ test.describe("workspace connected to the local agent", () => {
       status: "ambiguous",
       forceAllowed: true,
       pid: 4812,
-      agentVersion: "v0.0.6",
+      agentVersion: "v0.0.8",
       heartbeatAt: "2026-07-25T20:31:30.000Z",
     };
     await page.route("**/api/v1/workspaces", async (route) => {
@@ -1098,7 +1143,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(lockAlert).toBeFocused();
     await expect(lockAlert).toContainText("PID");
     await expect(lockAlert).toContainText("4812");
-    await expect(lockAlert).toContainText("v0.0.6");
+    await expect(lockAlert).toContainText("v0.0.8");
     const forceButton = lockAlert.getByRole("button", {
       name: "Forzar liberación",
     });
@@ -1141,29 +1186,29 @@ test.describe("workspace connected to the local agent", () => {
     });
     await waitForIndex(server);
 
+    await openConnectedWorkspace(page, {
+      expectedName: "v003-typescript-read-only",
+      expectedMode: "Lectura",
+    });
     const terminalCreated = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/v1/terminals") &&
         response.status() === 201,
     );
-    await openConnectedWorkspace(page, {
-      expectedName: "v003-typescript-read-only",
-      expectedMode: "Lectura",
-    });
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
     const terminal = (await (await terminalCreated).json()) as { id: string };
 
     await expect(
-      page.getByLabel("Modos del workspace").getByText("Act bloqueado", {
+      page.getByTestId("capability-summary").getByText("Actuar bloqueado", {
         exact: true,
       }),
     ).toBeVisible();
-    await page
-      .getByRole("button", { name: "Abrir index.ts en editor" })
-      .click();
+    await page.getByRole("button", { name: "Código", exact: true }).click();
+    await page.getByRole("button", { name: "index.ts", exact: true }).click();
     await expect(page.getByRole("button", { name: "Guardar archivo" })).toBeDisabled();
     await expect(page.locator(".monaco-editor textarea").first()).not.toBeEditable();
 
-    await page.getByRole("tab", { name: "Asistente" }).click();
+    await page.getByRole("button", { name: "Preguntar", exact: true }).click();
     await page.getByRole("tab", { name: "Actuar" }).click();
     await expect(
       page.getByText("Actuar bloqueado en Modo Lectura"),
@@ -1250,9 +1295,9 @@ test.describe("workspace connected to the local agent", () => {
     await openConnectedWorkspace(page, {
       expectedName: "v003-redacted-errors",
       expectedMode: "Edición",
-      expectedAskMode: "Ask LLM",
+      expectedAskMode: "LLM conectado",
     });
-    await page.getByRole("tab", { name: "Asistente" }).click();
+    await page.getByRole("button", { name: "Preguntar", exact: true }).click();
     await page.getByRole("textbox", { name: "Pregunta" }).fill("index.ts");
     await page.getByRole("button", { name: "Consultar" }).click();
 
@@ -1381,7 +1426,7 @@ async function openConnectedWorkspace(
   options: {
     expectedName: string;
     expectedMode: "Lectura" | "Edición";
-    expectedAskMode?: "Ask Local" | "Ask LLM";
+    expectedAskMode?: "Búsqueda local" | "LLM conectado";
   },
 ): Promise<void> {
   await page.goto("about:blank");
@@ -1400,12 +1445,12 @@ async function openConnectedWorkspace(
   ).toBeVisible();
   await expect(
     page
-      .getByLabel("Modos del workspace")
+      .getByTestId("capability-summary")
       .getByText(options.expectedMode, { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByLabel("Modos del workspace").getByText(
-      options.expectedAskMode ?? "Ask Local",
+    page.getByTestId("capability-summary").getByText(
+      options.expectedAskMode ?? "Búsqueda local",
       {
       exact: true,
       },
@@ -1415,12 +1460,16 @@ async function openConnectedWorkspace(
     .locator(".workspace-identity span")
     .textContent();
   expect(displayedPath).not.toContain("/private/");
-  await onboarding
-    .getByRole("button", {
-      name: /Abrir workspace|Entrar mientras indexa/,
-    })
-    .click();
+  await onboarding.getByRole("button", { name: "Omitir" }).click();
   await expect(onboarding).toHaveCount(0);
+}
+
+async function openCanvasFilters(page: Page): Promise<void> {
+  const typeFilter = page.getByLabel("Filtrar por tipo de nodo");
+  if ((await typeFilter.count()) === 0) {
+    await page.locator(".canvas-filter-title").click();
+  }
+  await expect(typeFilter).toBeVisible();
 }
 
 function parsePort(value: string | undefined, fallback: number): number {

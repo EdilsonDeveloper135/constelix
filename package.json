@@ -1,6 +1,6 @@
 {
   "name": "constelix",
-  "version": "0.0.6",
+  "version": "0.0.8",
   "private": true,
   "description": "A local-first visual software engineering workspace.",
   "type": "module",
@@ -9,6 +9,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "preinstall": "node scripts/check-runtime.mjs",
     "dev": "node --import tsx scripts/run-dev.ts",
     "dev:agent": "pnpm --filter @constelix/agent dev",
     "dev:web": "pnpm --filter @constelix/web dev",
