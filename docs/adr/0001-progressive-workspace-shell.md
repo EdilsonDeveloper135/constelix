@@ -2,7 +2,7 @@
 
 - Estado: aceptado
 - Fecha: 2026-08-02
-- Versión: v0.0.8
+- Versión: v0.0.7
 
 ## Contexto
 

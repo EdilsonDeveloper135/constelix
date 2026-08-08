@@ -1,4 +1,4 @@
-# Auditoría integral de producto, arquitectura, UX y UI — v0.0.8
+# Auditoría integral de producto, arquitectura, UX y UI — v0.0.7
 
 Fecha: 2026-08-02
 Alcance: dashboard web, agente local, contratos compartidos, arranque de

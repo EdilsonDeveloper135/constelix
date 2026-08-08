@@ -1,6 +1,6 @@
 {
   "name": "@constelix/contracts",
-  "version": "0.0.8",
+  "version": "0.0.7",
   "private": true,
   "type": "module",
   "types": "./src/index.ts",

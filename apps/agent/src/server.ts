@@ -116,7 +116,7 @@ export async function startAgentServer(
     ...(options.indexerScanOptions
       ? { indexerScanOptions: options.indexerScanOptions }
       : {}),
-    agentVersion: "v0.0.8",
+    agentVersion: "v0.0.7",
   });
   const events = manager.globalEvents;
   const app = Fastify({

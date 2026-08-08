@@ -1080,7 +1080,7 @@ test.describe("workspace connected to the local agent", () => {
       status: "ambiguous",
       forceAllowed: true,
       pid: 4812,
-      agentVersion: "v0.0.8",
+      agentVersion: "v0.0.7",
       heartbeatAt: "2026-07-25T20:31:30.000Z",
     };
     await page.route("**/api/v1/workspaces", async (route) => {
@@ -1143,7 +1143,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(lockAlert).toBeFocused();
     await expect(lockAlert).toContainText("PID");
     await expect(lockAlert).toContainText("4812");
-    await expect(lockAlert).toContainText("v0.0.8");
+    await expect(lockAlert).toContainText("v0.0.7");
     const forceButton = lockAlert.getByRole("button", {
       name: "Forzar liberación",
     });

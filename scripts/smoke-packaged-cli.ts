@@ -51,6 +51,19 @@ try {
   if (!archiveName) throw new Error("pnpm pack did not produce a tarball.");
   const archivePath = join(packageDirectory, archiveName);
 
+  await mkdir(installRoot, { recursive: true });
+  await writeFile(
+    join(installRoot, "package.json"),
+    `${JSON.stringify(
+      {
+        private: true,
+        allowScripts: { "better-sqlite3": true },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
   await execFileAsync(
     "npm",
     [

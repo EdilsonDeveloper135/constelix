@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.0.8] - 2026-08-02
+## [v0.0.7] - 2026-08-02
 
 ### Added
 
@@ -52,6 +52,9 @@
 - La carga inicial y la paginación del selector de carpetas ya no pueden
   reemplazar una ruta escrita por la persona usuaria cuando una respuesta
   anterior llega tarde.
+- Las dependencias transitivas `fast-uri` y `dompurify` quedan fijadas en sus
+  versiones corregidas, y el smoke del CLI empaquetado autoriza únicamente el
+  script nativo necesario de `better-sqlite3`.
 
 ### Known issues
 

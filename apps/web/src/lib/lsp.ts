@@ -254,7 +254,7 @@ export class JsonRpcLspConnection {
       socket.addEventListener("open", () => {
         void this.request("initialize", {
           processId: null,
-          clientInfo: { name: "Constelix", version: "0.0.8" },
+          clientInfo: { name: "Constelix", version: "0.0.7" },
           locale: navigator.language,
           rootUri: "constelix://workspace/",
           workspaceFolders: [

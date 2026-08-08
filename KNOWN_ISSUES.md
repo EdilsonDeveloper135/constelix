@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.8` el 2026-08-02.
+Actualizado para `v0.0.7` el 2026-08-02.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -36,7 +36,7 @@ Actualizado para `v0.0.8` el 2026-08-02.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.8 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.7 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -78,7 +78,7 @@ Actualizado para `v0.0.8` el 2026-08-02.
 ## KI-009 — Alcance y confianza de los servidores de lenguaje
 
 - Estado: limitación técnica y de seguridad aceptada.
-- Impacto: v0.0.8 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+- Impacto: v0.0.7 ofrece LSP únicamente para TypeScript, JavaScript y Python.
   `typescript-language-server` y Pyright se ejecutan como procesos del usuario
   local y analizan configuración y dependencias del workspace; no constituyen
   una frontera frente a un repositorio hostil.
@@ -99,7 +99,7 @@ Actualizado para `v0.0.8` el 2026-08-02.
 
 ## Estado de pruebas
 
-La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
+La verificación de `v0.0.7` se ejecutó con Node.js 24 y pnpm 11:
 
 - instalación congelada, `git diff --check`, version check, typecheck, build y
   ausencia de source maps de producción: correctos;
@@ -117,7 +117,7 @@ La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
   de los presupuestos de 90 s, 1 s y 100 ms;
 - smoke LSP: diagnósticos y hover reales correctos con los servidores
   TypeScript y Pyright incluidos;
-- smoke del paquete: tarball `constelix-agent-0.0.8.tgz` instalado en un entorno
+- smoke del paquete: tarball `constelix-agent-0.0.7.tgz` instalado en un entorno
   temporal, ruta con espacios y dashboard servido correctamente;
 - el tarball no imprimió la capability y el build final conserva el aviso
   explícito de chunks diferidos grandes de Monaco/TypeScript/ELK.

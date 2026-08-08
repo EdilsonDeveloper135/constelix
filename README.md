@@ -163,7 +163,7 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.8.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.7.tgz
 constelix /absolute/path/to/a/project
 ```
 
@@ -198,7 +198,7 @@ Constelix assumes a trusted local user, browser, repository, and OS account. It
 does not claim to isolate mutually hostile processes running under the same
 macOS user. See the [threat model](docs/threat-model.md),
 [protocol](docs/protocol.md),
-[v0.0.8 product and experience audit](docs/audit-v0.0.8.md),
+[v0.0.7 product and experience audit](docs/audit-v0.0.7.md),
 [progressive shell ADR](docs/adr/0001-progressive-workspace-shell.md), and
 [known limitations](KNOWN_ISSUES.md).
 
