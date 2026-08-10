@@ -2,6 +2,7 @@ import { spawn, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { CONSTELIX_VERSION } from "@constelix/contracts";
 import type { ConstelixDatabase } from "./database.js";
 import type { EventBus } from "./events.js";
 import {
@@ -13,7 +14,11 @@ import {
 } from "./security.js";
 
 const execFileAsync = promisify(execFile);
-export const TESTED_CODEX_VERSION = "0.144.5";
+export const MIN_SUPPORTED_CODEX_VERSION = "0.144.5";
+export const TESTED_CODEX_VERSION = "0.147.0";
+export const SUPPORTED_CODEX_VERSION_RANGE =
+  `>=${MIN_SUPPORTED_CODEX_VERSION} <0.148.0`;
+const MAX_EXCLUSIVE_CODEX_VERSION = "0.148.0";
 const APPROVAL_TTL_MS = 15 * 60 * 1_000;
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -475,18 +480,18 @@ export class CodexManager {
           reason: "No se pudo determinar la versión instalada de Codex CLI.",
         };
       }
-      if (version !== TESTED_CODEX_VERSION) {
+      if (!isSupportedCodexVersion(version)) {
         return {
           available: false,
           version,
-          reason: `Constelix admite actualmente Codex CLI ${TESTED_CODEX_VERSION}.`,
+          reason: `Constelix admite Codex CLI ${SUPPORTED_CODEX_VERSION_RANGE}.`,
         };
       }
       return { available: true, version };
     } catch {
       return {
         available: false,
-        reason: `No se encontró Codex CLI ${TESTED_CODEX_VERSION} en PATH.`,
+        reason: `No se encontró Codex CLI compatible (${SUPPORTED_CODEX_VERSION_RANGE}) en PATH.`,
       };
     }
   }
@@ -633,7 +638,11 @@ export class CodexManager {
 
       try {
         await this.request("initialize", {
-          clientInfo: { name: "constelix", title: "Constelix", version: "0.0.7" },
+          clientInfo: {
+            name: "constelix",
+            title: "Constelix",
+            version: CONSTELIX_VERSION,
+          },
         });
         this.notify("initialized");
       } catch (error) {
@@ -995,6 +1004,34 @@ async function resolveInstalledCodexVersion(): Promise<string | undefined> {
     timeout: 5_000,
   });
   return /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1];
+}
+
+export function isSupportedCodexVersion(version: string): boolean {
+  const candidate = parseVersion(version);
+  const minimum = parseVersion(MIN_SUPPORTED_CODEX_VERSION)!;
+  const maximum = parseVersion(MAX_EXCLUSIVE_CODEX_VERSION)!;
+  return (
+    candidate !== undefined &&
+    compareVersions(candidate, minimum) >= 0 &&
+    compareVersions(candidate, maximum) < 0
+  );
+}
+
+function parseVersion(version: string): readonly [number, number, number] | undefined {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(
+  left: readonly [number, number, number],
+  right: readonly [number, number, number],
+): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index]! - right[index]!;
+    if (difference !== 0) return Math.sign(difference);
+  }
+  return 0;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

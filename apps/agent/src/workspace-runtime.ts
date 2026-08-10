@@ -10,7 +10,11 @@ import {
   resolve,
   sep,
 } from "node:path";
-import type { LspAvailability, WorkspaceSession } from "@constelix/contracts";
+import {
+  CONSTELIX_RELEASE,
+  type LspAvailability,
+  type WorkspaceSession,
+} from "@constelix/contracts";
 
 import { AskService, type AskServiceOptions } from "./ask.js";
 import { CodexManager, type CodexManagerOptions } from "./codex.js";
@@ -147,7 +151,7 @@ export class WorkspaceRuntime {
         lockPath: resolve(storageDirectory, "agent.lock"),
         workspaceId,
         workspacePath: workspaceRoot,
-        agentVersion: options.agentVersion ?? "v0.0.7",
+        agentVersion: options.agentVersion ?? CONSTELIX_RELEASE,
         ...(options.lockForce ? { force: options.lockForce } : {}),
         onLost: (error) => runtime?.handleIsolationFailure(error),
       });

@@ -191,7 +191,13 @@ export const AssistantPanel = memo(function AssistantPanel({
                   Encuentra archivos, símbolos, fragmentos y relaciones; no
                   genera explicaciones. {askNotice}
                 </span>
-                <button type="button" onClick={() => setSettingsOpen(true)}>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.currentTarget.focus();
+                    setSettingsOpen(true);
+                  }}
+                >
                   <Settings2 aria-hidden="true" size={13} /> Configurar LLM
                 </button>
               </div>
@@ -353,7 +359,7 @@ export const AssistantPanel = memo(function AssistantPanel({
           data-testid="act-panel"
         >
           {!actAvailable || workspaceMode === "read" ? (
-            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceMode === "read" ? "Actuar bloqueado en Modo Lectura" : workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{workspaceMode === "read" ? "Vuelve a abrir un workspace con permisos de escritura para delegar cambios a Codex." : codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p>{workspaceReady && workspaceMode !== "read" ? <button type="button" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" size={13} /> Ver diagnóstico</button> : null}</div></div>
+            <div className="act-unavailable"><AlertTriangle aria-hidden="true" size={18} /><div><strong>{workspaceMode === "read" ? "Actuar bloqueado en Modo Lectura" : workspaceReady ? "Codex local no disponible" : "Conectando con el agente local"}</strong><p>{workspaceMode === "read" ? "Vuelve a abrir un workspace con permisos de escritura para delegar cambios a Codex." : codexReason ?? (workspaceReady ? "Instala o actualiza Codex CLI para habilitar este modo." : "Las tareas se habilitarán después de validar el workspace y sus capacidades.")}</p>{workspaceReady && workspaceMode !== "read" ? <button type="button" onClick={(event) => { event.currentTarget.focus(); setSettingsOpen(true); }}><Settings2 aria-hidden="true" size={13} /> Ver diagnóstico</button> : null}</div></div>
           ) : actTask === null ? (
             <>
               <div className="act-copy">

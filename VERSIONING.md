@@ -55,12 +55,13 @@ git tag -a vMAJOR.MINOR.PATCH -m "Constelix vMAJOR.MINOR.PATCH"
 
 ## 5. Versión actual
 
-`v0.0.7`
+`v0.0.8`
 
 ## 6. Historial
 
 | Versión | Fecha | Descripción |
 |---|---|---|
+| `v0.0.8` | 2026-08-10 | Remediación general de distribución, seguridad, cobertura, navegadores, rendimiento y mantenibilidad. |
 | `v0.0.7` | 2026-08-02 | Remediación integral de propósito de producto, arquitectura del shell, UX accesible y UI responsive. |
 | `v0.0.6` | 2026-08-01 | Auditoría técnica integral, límites de recursos, dependencias seguras y robustez de archivos, eventos y configuración. |
 | `v0.0.5` | 2026-07-29 | LSP local para TypeScript/JavaScript/Python, cambio dinámico de workspace y leases recuperables. |

@@ -703,6 +703,8 @@ export const EditorPanel = memo(function EditorPanel({
                 lineHeight: 20,
                 minimap: { enabled: false },
                 padding: { top: 10 },
+                domReadOnly:
+                  workspaceMode === "read" || draft.status === "loading",
                 readOnly:
                   workspaceMode === "read" || draft.status === "loading",
                 readOnlyMessage: {

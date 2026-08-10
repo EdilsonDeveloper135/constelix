@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const CONSTELIX_VERSION = "0.0.8" as const;
+export const CONSTELIX_RELEASE = `v${CONSTELIX_VERSION}` as const;
 export const PROTOCOL_VERSION = 1 as const;
 export const ProtocolVersionSchema = z.literal(PROTOCOL_VERSION);
 export const WorkspaceIdSchema = z.string().regex(/^[a-f0-9]{24}$/);

@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 
 import { EventBus } from "../apps/agent/src/events.js";
 import { TerminalManager } from "../apps/agent/src/terminals.js";
+import { benchmarkEnvironment, percentile } from "./benchmark-utils.js";
 
 const PTY_SAMPLES = 20;
 const PTY_P95_BUDGET_MS = 100;
@@ -37,6 +38,7 @@ try {
     samples: latencies.map(Math.round),
     p95Ms: Math.round(p95Ms),
     budgetMs: PTY_P95_BUDGET_MS,
+    environment: benchmarkEnvironment(),
     passed: p95Ms <= PTY_P95_BUDGET_MS,
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -59,7 +61,11 @@ function waitForTerminalOutput(
     let output = "";
     const timeout = setTimeout(() => {
       unsubscribe();
-      reject(new Error(`PTY output did not match within ${timeoutMs} ms.`));
+      reject(
+        new Error(
+          `PTY output did not match within ${timeoutMs} ms after receiving ${Buffer.byteLength(output)} bytes (host: ${JSON.stringify(benchmarkEnvironment())}).`,
+        ),
+      );
     }, timeoutMs);
     timeout.unref();
     const unsubscribe = events.subscribe((event) => {
@@ -73,14 +79,4 @@ function waitForTerminalOutput(
       resolve();
     });
   });
-}
-
-function percentile(values: readonly number[], quantile: number): number {
-  if (values.length === 0) throw new Error("A percentile requires at least one sample.");
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.max(
-    0,
-    Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1),
-  );
-  return sorted[index]!;
 }

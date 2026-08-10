@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.7` el 2026-08-02.
+Actualizado para `v0.0.8` el 2026-08-10.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -13,13 +13,15 @@ Actualizado para `v0.0.7` el 2026-08-02.
   limit y red sin perder el historial. La UI conserva un aviso accionable; para
   Ollama solicita verificar el daemon, el puerto y el modelo configurado.
 
-## KI-003 — Chunks web grandes
+## KI-003 — Worker diferido de layout ELK
 
-- Estado: abierto, rendimiento.
-- Impacto: Vite emite advertencias de tamaño por los workers y recursos de Monaco y ELK. No se observaron errores funcionales en E2E.
-- Mitigación: Monaco, xterm y sus workers permanecen en chunks diferidos; la
-  integración usa los subpaths públicos de Monaco 0.56. Evaluar separación
-  adicional de idiomas antes de una distribución pública.
+- Estado: limitación de rendimiento mitigada.
+- Impacto: el worker de ELK ocupa aproximadamente 1,59 MiB sin comprimir. Se
+  carga de forma diferida para layouts automáticos y no forma parte de la ruta
+  JavaScript inicial. El build ya no emite la advertencia de chunks de Vite.
+- Mitigación: Monaco importa solo la API, worker y lenguajes utilizados; Monaco,
+  React, canvas y estado se dividen en grupos independientes. Mantener el worker
+  ELK diferido y medir carga real antes de sustituir su motor de layout.
 
 ## KI-004 — Carrera TOCTOU residual entre procesos del mismo usuario
 
@@ -36,7 +38,7 @@ Actualizado para `v0.0.7` el 2026-08-02.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.7 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.8 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -78,7 +80,7 @@ Actualizado para `v0.0.7` el 2026-08-02.
 ## KI-009 — Alcance y confianza de los servidores de lenguaje
 
 - Estado: limitación técnica y de seguridad aceptada.
-- Impacto: v0.0.7 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+- Impacto: v0.0.8 ofrece LSP únicamente para TypeScript, JavaScript y Python.
   `typescript-language-server` y Pyright se ejecutan como procesos del usuario
   local y analizan configuración y dependencias del workspace; no constituyen
   una frontera frente a un repositorio hostil.
@@ -99,28 +101,30 @@ Actualizado para `v0.0.7` el 2026-08-02.
 
 ## Estado de pruebas
 
-La verificación de `v0.0.7` se ejecutó con Node.js 24 y pnpm 11:
+La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
 
 - instalación congelada, `git diff --check`, version check, typecheck, build y
   ausencia de source maps de producción: correctos;
-- `pnpm audit --prod`: sin vulnerabilidades conocidas en las dependencias de
-  producción;
-- Vitest: 45 archivos y 325 pruebas correctas, incluidas las regresiones de
+- `pnpm audit --audit-level low` y `pnpm audit --prod --audit-level low`: sin
+  vulnerabilidades conocidas;
+- Vitest: 47 archivos y 330 pruebas correctas, con cobertura global por encima
+  de los umbrales obligatorios e incluidas las regresiones de
   filesystem acotado, UTF-8, scanner, sockets, configuración privada, SQLite,
   locks, lifecycle A→B, aislamiento de sesión, navegación de carpetas y
   transporte LSP;
-- Playwright: 19 de 19 escenarios correctos en Chromium, incluidos hot-swap,
-  recientes, paginación de carpetas, navegación, foco, borradores, locks,
-  Settings, viewport compacto, apariencia, Monaco, LSP y PTY;
+- Playwright: 38 escenarios correctos, 19 en Chromium y 19 en WebKit, incluidos
+  hot-swap, recientes, paginación de carpetas, navegación, foco Safari,
+  borradores, locks, Settings, viewport compacto, apariencia, Monaco, LSP y PTY;
 - benchmark de 10.000 archivos y 2.000.000 de líneas: indexación fría en
-  45.358 ms, actualización incremental p95 en 144 ms y PTY p95 en 0 ms, dentro
+  40.322 ms, actualización incremental p95 en 127 ms y PTY p95 en 0 ms, dentro
   de los presupuestos de 90 s, 1 s y 100 ms;
 - smoke LSP: diagnósticos y hover reales correctos con los servidores
   TypeScript y Pyright incluidos;
-- smoke del paquete: tarball `constelix-agent-0.0.7.tgz` instalado en un entorno
-  temporal, ruta con espacios y dashboard servido correctamente;
-- el tarball no imprimió la capability y el build final conserva el aviso
-  explícito de chunks diferidos grandes de Monaco/TypeScript/ELK.
+- smoke del paquete: tarball `constelix-agent-0.0.8.tgz` con licencia, README y
+  metadatos, instalado en un entorno temporal, ruta con espacios y dashboard
+  servido correctamente;
+- el tarball no imprimió la capability y el build final no emitió advertencias
+  de tamaño de chunk.
 
 Los smokes reales de proveedores LLM y Codex siguen siendo opt-in porque
 requieren servicios externos, credenciales o un turno con efectos. Sus

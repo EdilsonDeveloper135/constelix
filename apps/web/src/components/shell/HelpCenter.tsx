@@ -142,8 +142,14 @@ export const HelpCenter = memo(function HelpCenter() {
           <button
             type="button"
             onClick={() => {
+              const returnFocus = returnFocusRef.current;
               close();
-              setSettingsOpen(true);
+              window.requestAnimationFrame(() => {
+                if (returnFocus && document.contains(returnFocus)) {
+                  returnFocus.focus();
+                }
+                setSettingsOpen(true);
+              });
             }}
           >
             <Settings2 aria-hidden="true" size={15} /> Configurar

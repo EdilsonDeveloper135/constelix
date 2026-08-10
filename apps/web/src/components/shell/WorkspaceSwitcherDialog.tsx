@@ -116,9 +116,11 @@ export const WorkspaceSwitcherDialog = memo(
       return () => {
         window.cancelAnimationFrame(frame);
         document.removeEventListener("keydown", onKeyDown);
-        (previous ?? document.querySelector<HTMLElement>(
-          "[data-workspace-trigger]",
-        ))?.focus();
+        const returnFocus =
+          previous && document.contains(previous)
+            ? previous
+            : document.querySelector<HTMLElement>("[data-workspace-trigger]");
+        returnFocus?.focus();
       };
     }, [browse?.parentPath, browsePath, close, open, switching]);
 

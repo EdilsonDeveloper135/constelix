@@ -1,5 +1,54 @@
 # Changelog
 
+## [v0.0.8] - 2026-08-10
+
+### Added
+
+- Auditoría general y remediación trazable de distribución, seguridad,
+  dependencias, cobertura, navegadores, rendimiento, compatibilidad Codex y
+  mantenibilidad en `docs/audit-v0.0.8.md`.
+- Cobertura V8 con umbrales obligatorios, proyecto Playwright WebKit y matriz CI
+  independiente para Chromium y WebKit.
+- Licencia MIT, metadatos npm completos, README del paquete, Dependabot y
+  comprobaciones del contenido y metadatos del tarball publicado.
+- Diagnósticos de benchmark con fase, revisión, carga del host y percentiles
+  compartidos, sin relajar los presupuestos de rendimiento.
+
+### Changed
+
+- Codex CLI se valida como rango compatible `>=0.144.5 <0.148.0`, probado con
+  `0.147.0`, en lugar de acoplar Actuar a una única versión exacta.
+- La versión del runtime se centraliza en contratos compartidos y se reutiliza
+  en agente, LSP, workspace y cliente Codex.
+- Monaco importa únicamente la API de editor y los lenguajes utilizados; Vite
+  separa Monaco, React, canvas y estado en grupos estables de carga diferida.
+- El indexador incremental divide escaneo, lectura, vecinos, importadores y
+  referencias en unidades acotadas para reducir complejidad y facilitar
+  regresiones.
+- CI fija cada acción por SHA, limita permisos y ejecuta seguridad, rendimiento,
+  empaquetado, LSP y E2E como fronteras separadas.
+
+### Fixed
+
+- La autenticación REST exige exactamente `Bearer <capability>` y compara el
+  secreto en tiempo constante, rechazando prefijos, sufijos y casing inválidos.
+- Safari/WebKit restaura el foco en Ayuda, Configuración, paleta y selector
+  aunque el navegador no enfoque controles automáticamente durante un clic.
+- Monaco aplica también `domReadOnly`, por lo que el input interno anuncia y
+  hace cumplir Modo Lectura de forma consistente entre motores.
+- El proxy de desarrollo silencia únicamente desconexiones E2E esperadas y
+  conserva visibles los errores reales.
+- Las dependencias directas y transitivas quedan actualizadas y
+  `pnpm audit --audit-level low` termina sin vulnerabilidades conocidas.
+- El paquete npm incluye licencia, README y metadatos de proyecto verificables,
+  además del CLI y dashboard de producción.
+
+### Known issues
+
+- Se conservan las restricciones externas y riesgos aceptados descritos en
+  `KNOWN_ISSUES.md`; el recurso diferido de layout ELK sigue siendo grande, pero
+  ya no bloquea la carga inicial ni genera la advertencia de chunks de Vite.
+
 ## [v0.0.7] - 2026-08-02
 
 ### Added

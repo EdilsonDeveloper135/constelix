@@ -7,8 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CodexManager,
+  MIN_SUPPORTED_CODEX_VERSION,
+  SUPPORTED_CODEX_VERSION_RANGE,
   TESTED_CODEX_VERSION,
   createCodexSandboxPolicy,
+  isSupportedCodexVersion,
   type CodexManagerOptions,
 } from "./codex.js";
 import { EventBus, type LocalServerEvent } from "./events.js";
@@ -262,6 +265,17 @@ describe("createCodexSandboxPolicy", () => {
   });
 });
 
+describe("Codex CLI compatibility", () => {
+  it("accepts the tested protocol window and rejects unknown versions", () => {
+    expect(isSupportedCodexVersion(MIN_SUPPORTED_CODEX_VERSION)).toBe(true);
+    expect(isSupportedCodexVersion("0.146.0")).toBe(true);
+    expect(isSupportedCodexVersion(TESTED_CODEX_VERSION)).toBe(true);
+    expect(isSupportedCodexVersion("0.144.4")).toBe(false);
+    expect(isSupportedCodexVersion("0.148.0")).toBe(false);
+    expect(isSupportedCodexVersion("0.147.0-beta.1")).toBe(false);
+  });
+});
+
 describe("CodexManager App Server protocol", () => {
   it("refuses approval after the canonical workspace root is replaced", async () => {
     const parent = await mkdtemp(join(tmpdir(), "constelix-codex-identity-"));
@@ -333,7 +347,7 @@ describe("CodexManager App Server protocol", () => {
       await expect(incompatible.availability()).resolves.toEqual({
         available: false,
         version: "0.1.0",
-        reason: `Constelix admite actualmente Codex CLI ${TESTED_CODEX_VERSION}.`,
+        reason: `Constelix admite Codex CLI ${SUPPORTED_CODEX_VERSION_RANGE}.`,
       });
     } finally {
       absent.close();

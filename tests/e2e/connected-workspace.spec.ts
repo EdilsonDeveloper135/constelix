@@ -1080,7 +1080,7 @@ test.describe("workspace connected to the local agent", () => {
       status: "ambiguous",
       forceAllowed: true,
       pid: 4812,
-      agentVersion: "v0.0.7",
+      agentVersion: "v0.0.8",
       heartbeatAt: "2026-07-25T20:31:30.000Z",
     };
     await page.route("**/api/v1/workspaces", async (route) => {
@@ -1143,7 +1143,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(lockAlert).toBeFocused();
     await expect(lockAlert).toContainText("PID");
     await expect(lockAlert).toContainText("4812");
-    await expect(lockAlert).toContainText("v0.0.7");
+    await expect(lockAlert).toContainText("v0.0.8");
     const forceButton = lockAlert.getByRole("button", {
       name: "Forzar liberación",
     });
@@ -1343,8 +1343,10 @@ async function writeTerminalCommand(
         let output = "";
         const timeout = window.setTimeout(() => {
           socket.close();
-          rejectCommand(new Error("PTY output timed out."));
-        }, 5_000);
+          rejectCommand(
+            new Error(`PTY output timed out. Last output: ${output.slice(-500)}`),
+          );
+        }, 15_000);
 
         socket.addEventListener("message", (event) => {
           const message = JSON.parse(String(event.data)) as {

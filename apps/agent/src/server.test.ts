@@ -406,6 +406,18 @@ describe("local agent HTTP boundary", () => {
         headers: { host },
       });
       expect(unauthorized.statusCode).toBe(401);
+      for (const authorization of [
+        "Bearer test-capabilitx",
+        "Bearer test-capability extra",
+        "bearer test-capability",
+      ]) {
+        const rejectedCapability = await server.app.inject({
+          method: "GET",
+          url: "/api/v1/health",
+          headers: { host, authorization },
+        });
+        expect(rejectedCapability.statusCode).toBe(401);
+      }
       const encodedUnauthorized = await server.app.inject({
         method: "GET",
         url: "/%61pi/v1/health",

@@ -9,6 +9,11 @@ const reuseExistingWebServer =
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: true,
+  // Connected scenarios exercise one real loopback agent through one Vite
+  // proxy. A single worker keeps the two browser projects deterministic when
+  // the complete matrix is launched in one command; CI still runs projects in
+  // separate jobs.
+  workers: 1,
   use: {
     baseURL: webServerUrl,
     trace: "retain-on-failure"
@@ -32,6 +37,10 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1600, height: 960 } }
+    },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"], viewport: { width: 1600, height: 960 } }
     }
   ]
 });

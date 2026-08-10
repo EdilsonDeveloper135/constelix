@@ -69,6 +69,14 @@ export interface IndexStatus {
   summary: WorkspaceSummary;
 }
 
+interface IncrementalScanState {
+  changedSources: Map<string, ScannedSource>;
+  removedPaths: Set<string>;
+  diagnostics: Array<{ relativePath?: string; message: string }>;
+  sourceByteLimit: number;
+  affectedSourceBytes: number;
+}
+
 export interface WorkspaceIndexerOptions {
   watcherFactory?: (path: string, options: ChokidarOptions) => FSWatcher;
   watcherRestartBaseDelayMs?: number;
@@ -529,37 +537,8 @@ export class WorkspaceIndexer {
     try {
       await this.assertWorkspace();
       this.publishStatus("scanning", 0, changedPaths.length, "Applying filesystem changes");
-      const changedSources = new Map<string, ScannedSource>();
-      const removedPaths = new Set<string>();
-      const diagnostics: Array<{ relativePath?: string; message: string }> = [];
-      const matcher = await buildIgnoreMatcher(this.workspace, (diagnostic) => {
-        diagnostics.push(diagnostic);
-      });
-      const sourceByteLimit = boundedSourceByteLimit(
-        this.options.scanOptions?.maxTotalBytes,
-      );
-      let affectedSourceBytes = 0;
-
-      for (const relativePath of changedPaths) {
-        const language = detectSupportedLanguage(relativePath);
-        if (
-          language === undefined ||
-          isSecretPath(relativePath) ||
-          matcher.ignores(relativePath)
-        ) {
-          if (this.#files.has(relativePath)) removedPaths.add(relativePath);
-          continue;
-        }
-        const source = await this.readIncrementalSource(relativePath, diagnostics);
-        if (source === undefined) removedPaths.add(relativePath);
-        else if (this.#files.get(relativePath)?.contentHash !== source.contentHash) {
-          affectedSourceBytes += source.sizeBytes;
-          if (affectedSourceBytes > sourceByteLimit) {
-            throw incrementalSourceBudgetError(sourceByteLimit);
-          }
-          changedSources.set(relativePath, source);
-        }
-      }
+      const scan = await this.scanIncrementalChanges(changedPaths);
+      const { changedSources, removedPaths, diagnostics } = scan;
 
       if (changedSources.size === 0 && removedPaths.size === 0) {
         this.publishStatus(
@@ -588,19 +567,7 @@ export class WorkspaceIndexer {
         );
       }
 
-      const affectedSources = new Map(changedSources);
-      for (const relativePath of affectedPaths) {
-        if (affectedSources.has(relativePath) || removedPaths.has(relativePath)) continue;
-        const source = await this.readIncrementalSource(relativePath, diagnostics);
-        if (source === undefined) removedPaths.add(relativePath);
-        else {
-          affectedSourceBytes += source.sizeBytes;
-          if (affectedSourceBytes > sourceByteLimit) {
-            throw incrementalSourceBudgetError(sourceByteLimit);
-          }
-          affectedSources.set(relativePath, source);
-        }
-      }
+      const affectedSources = await this.readAffectedSources(affectedPaths, scan);
 
       this.publishStatus("parsing", 0, affectedSources.size);
       const sourceFiles = [...affectedSources.values()];
@@ -670,6 +637,82 @@ export class WorkspaceIndexer {
     }
   }
 
+  private async scanIncrementalChanges(
+    changedPaths: readonly string[],
+  ): Promise<IncrementalScanState> {
+    const state: IncrementalScanState = {
+      changedSources: new Map(),
+      removedPaths: new Set(),
+      diagnostics: [],
+      sourceByteLimit: boundedSourceByteLimit(
+        this.options.scanOptions?.maxTotalBytes,
+      ),
+      affectedSourceBytes: 0,
+    };
+    const matcher = await buildIgnoreMatcher(this.workspace, (diagnostic) => {
+      state.diagnostics.push(diagnostic);
+    });
+
+    for (const relativePath of changedPaths) {
+      if (
+        detectSupportedLanguage(relativePath) === undefined ||
+        isSecretPath(relativePath) ||
+        matcher.ignores(relativePath)
+      ) {
+        if (this.#files.has(relativePath)) state.removedPaths.add(relativePath);
+        continue;
+      }
+      const source = await this.readIncrementalSource(
+        relativePath,
+        state.diagnostics,
+      );
+      if (source === undefined) {
+        state.removedPaths.add(relativePath);
+        continue;
+      }
+      if (this.#files.get(relativePath)?.contentHash === source.contentHash) {
+        continue;
+      }
+      state.affectedSourceBytes = consumeIncrementalSourceBytes(
+        state.affectedSourceBytes,
+        source.sizeBytes,
+        state.sourceByteLimit,
+      );
+      state.changedSources.set(relativePath, source);
+    }
+    return state;
+  }
+
+  private async readAffectedSources(
+    affectedPaths: ReadonlySet<string>,
+    state: IncrementalScanState,
+  ): Promise<Map<string, ScannedSource>> {
+    const affectedSources = new Map(state.changedSources);
+    for (const relativePath of affectedPaths) {
+      if (
+        affectedSources.has(relativePath) ||
+        state.removedPaths.has(relativePath)
+      ) {
+        continue;
+      }
+      const source = await this.readIncrementalSource(
+        relativePath,
+        state.diagnostics,
+      );
+      if (source === undefined) {
+        state.removedPaths.add(relativePath);
+        continue;
+      }
+      state.affectedSourceBytes = consumeIncrementalSourceBytes(
+        state.affectedSourceBytes,
+        source.sizeBytes,
+        state.sourceByteLimit,
+      );
+      affectedSources.set(relativePath, source);
+    }
+    return affectedSources;
+  }
+
   private async readIncrementalSource(
     relativePath: string,
     diagnostics: Array<{ relativePath?: string; message: string }>,
@@ -712,22 +755,44 @@ export class WorkspaceIndexer {
     const nodeById = new Map(this.#fullSnapshot.nodes.map((node) => [node.id, node]));
     const sources = [...changedSources];
 
+    if (sources.some((source) => !this.#files.has(source.relativePath))) {
+      this.addUnresolvedImporters(affected, nodeById);
+    }
+    this.addGraphNeighbors(affected, nodeById);
+
+    const hints = collectReferenceHints(sources);
+    if (hints.size > 0) {
+      this.addReferenceMatches(
+        affected,
+        expandTypeScriptReferenceHints(hints, typeScriptResolution),
+      );
+    }
+    return affected;
+  }
+
+  private addUnresolvedImporters(
+    affected: Set<string>,
+    nodeById: ReadonlyMap<string, GraphNode>,
+  ): void {
     // A new module can satisfy an import that was previously represented by an
     // external node. Reanalyze those importers so the edge can be promoted to
-    // the real module. This is intentionally conservative because aliases and
-    // Python package imports cannot be matched reliably from a path alone.
-    if (sources.some((source) => !this.#files.has(source.relativePath))) {
-      for (const edge of this.#fullSnapshot.edges) {
-        if (edge.relation !== "imports") continue;
-        if (nodeById.get(edge.target)?.kind !== "external") continue;
-        const importerPath = nodeById.get(edge.source)?.relativePath;
-        if (importerPath !== undefined && this.#files.has(importerPath)) {
-          affected.add(importerPath);
-          if (affected.size > MAX_INCREMENTAL_AFFECTED_FILES) break;
-        }
+    // the real module. This remains conservative because aliases and Python
+    // package imports cannot be matched reliably from a path alone.
+    for (const edge of this.#fullSnapshot.edges) {
+      if (edge.relation !== "imports") continue;
+      if (nodeById.get(edge.target)?.kind !== "external") continue;
+      const importerPath = nodeById.get(edge.source)?.relativePath;
+      if (importerPath !== undefined && this.#files.has(importerPath)) {
+        affected.add(importerPath);
+        if (affected.size > MAX_INCREMENTAL_AFFECTED_FILES) return;
       }
     }
+  }
 
+  private addGraphNeighbors(
+    affected: Set<string>,
+    nodeById: ReadonlyMap<string, GraphNode>,
+  ): void {
     const changedNodeIds = new Set(
       this.#fullSnapshot.nodes
         .filter((node) => affected.has(node.relativePath))
@@ -740,33 +805,22 @@ export class WorkspaceIndexer {
         if (relativePath !== undefined && this.#files.has(relativePath)) affected.add(relativePath);
       }
     }
+  }
 
-    const hints = new Set<string>();
-    for (const source of sources) {
-      for (const hint of extractReferenceHints(source.source)) {
-        hints.add(hint);
-        if (hint.startsWith(".")) {
-          hints.add(
-            normalizeReferenceHint(
-              posix.join(posix.dirname(source.relativePath), hint),
-            ),
-          );
-        }
+  private addReferenceMatches(
+    affected: Set<string>,
+    referenceHints: readonly string[],
+  ): void {
+    for (const relativePath of this.#files.keys()) {
+      if (
+        referenceHints.some((hint) =>
+          pathMatchesReference(relativePath, hint)
+        )
+      ) {
+        affected.add(relativePath);
+        if (affected.size > MAX_INCREMENTAL_AFFECTED_FILES) return;
       }
     }
-    if (hints.size > 0) {
-      const referenceHints = expandTypeScriptReferenceHints(
-        hints,
-        typeScriptResolution,
-      );
-      for (const relativePath of this.#files.keys()) {
-        if (referenceHints.some((hint) => pathMatchesReference(relativePath, hint))) {
-          affected.add(relativePath);
-          if (affected.size > MAX_INCREMENTAL_AFFECTED_FILES) break;
-        }
-      }
-    }
-    return affected;
   }
 
   private publishStatus(
@@ -1021,6 +1075,35 @@ function incrementalSourceBudgetError(limit: number): IncrementalFallbackError {
   return new IncrementalFallbackError(
     `Incremental source batch exceeded the ${limit} byte aggregate source-memory limit.`,
   );
+}
+
+function collectReferenceHints(
+  sources: readonly ScannedSource[],
+): Set<string> {
+  const hints = new Set<string>();
+  for (const source of sources) {
+    for (const hint of extractReferenceHints(source.source)) {
+      hints.add(hint);
+      if (hint.startsWith(".")) {
+        hints.add(
+          normalizeReferenceHint(
+            posix.join(posix.dirname(source.relativePath), hint),
+          ),
+        );
+      }
+    }
+  }
+  return hints;
+}
+
+function consumeIncrementalSourceBytes(
+  currentBytes: number,
+  sourceBytes: number,
+  limit: number,
+): number {
+  const nextBytes = currentBytes + sourceBytes;
+  if (nextBytes > limit) throw incrementalSourceBudgetError(limit);
+  return nextBytes;
 }
 
 function diffIncrementalSnapshots(previous: GraphSnapshot, next: GraphSnapshot): GraphDelta {

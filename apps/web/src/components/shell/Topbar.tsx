@@ -56,7 +56,10 @@ export const Topbar = memo(function Topbar() {
         aria-haspopup="dialog"
         aria-expanded={selectorOpen}
         data-workspace-trigger
-        onClick={() => void openWorkspaceSelector()}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          void openWorkspaceSelector();
+        }}
       >
         <span>
           <strong>{workspaceName}</strong>
@@ -71,7 +74,10 @@ export const Topbar = memo(function Topbar() {
         type="button"
         title={[askNotice, codexReason].filter(Boolean).join(" · ")}
         aria-label={`Estado del workspace: ${connectionLabel(connection, demoMode)}. ${askModeLabel(askMode)}. Abrir configuración`}
-        onClick={() => setSettingsOpen(true)}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          setSettingsOpen(true);
+        }}
       >
         <span className="capability-summary__icon">
           {connected ? <Wifi aria-hidden="true" size={14} /> : <WifiOff aria-hidden="true" size={14} />}
@@ -94,13 +100,24 @@ export const Topbar = memo(function Topbar() {
         type="button"
         aria-label="Buscar o ejecutar comando"
         title="Buscar o ejecutar comando (⌘K)"
-        onClick={() => setCommandPaletteOpen(true)}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          setCommandPaletteOpen(true);
+        }}
       >
         <Search aria-hidden="true" size={15} />
         <span>Buscar o ejecutar comando…</span>
         <kbd><Command aria-hidden="true" size={11} /> K</kbd>
       </button>
-      <button className="topbar-icon-button" type="button" aria-label="Configuración" onClick={() => setSettingsOpen(true)}>
+      <button
+        className="topbar-icon-button"
+        type="button"
+        aria-label="Configuración"
+        onClick={(event) => {
+          event.currentTarget.focus();
+          setSettingsOpen(true);
+        }}
+      >
         <Settings2 aria-hidden="true" size={17} />
       </button>
     </header>

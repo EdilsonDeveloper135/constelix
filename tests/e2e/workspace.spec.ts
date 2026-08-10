@@ -137,6 +137,18 @@ test("supports keyboard navigation and restores focus around modal UI", async ({
   await search.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(commandTrigger).toBeFocused();
+
+  await commandTrigger.press("Enter");
+  await page
+    .getByRole("option", { name: /Abrir configuración/ })
+    .press("Enter");
+  const settings = page.getByRole("dialog", {
+    name: "Configuración de Constelix",
+  });
+  await expect(settings).toBeVisible();
+  await expect(settings.getByLabel("URL base del LLM")).toBeFocused();
+  await settings.getByRole("button", { name: "Cancelar" }).click();
+  await expect(commandTrigger).toBeFocused();
 });
 
 test("keeps one usable tool surface on a compact viewport", async ({ page }) => {

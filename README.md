@@ -16,7 +16,8 @@ operation.
 - macOS.
 - Node.js 24.
 - pnpm 11.
-- Codex CLI 0.144.5 for **Act** mode.
+- Codex CLI `>=0.144.5 <0.148.0` for **Act** mode; `0.147.0` is the
+  currently tested release.
 - An optional OpenAI-compatible endpoint for generated **Ask** responses. The
   default remote endpoint requires a key; loopback endpoints such as Ollama do
   not.
@@ -59,8 +60,9 @@ flowchart LR
 - `packages/analyzers/` extracts the semantic model with Tree-sitter.
 - `packages/graph-core/` owns graph integrity, pagination, queries, paths, and
   revision deltas.
-- `tests/e2e/` exercises the connected product in Chromium; `scripts/` contains
-  packaging, version checks, smokes, and performance budgets.
+- `tests/e2e/` exercises the connected product in Chromium and WebKit;
+  `scripts/` contains packaging, version checks, smokes, and performance
+  budgets.
 
 ## Development
 
@@ -139,18 +141,20 @@ bottom navigation on compact screens without horizontal page overflow.
 
 ```bash
 pnpm typecheck
-pnpm test
+pnpm test:coverage
 pnpm build
 pnpm test:e2e
 pnpm benchmark
 pnpm smoke:lsp
 pnpm smoke:package
-pnpm audit --prod
+pnpm audit:deps
 ```
 
-`pnpm check` combines version validation, type checking, Vitest, and the
-production build. The repository has no separate formatter or lint script;
-style consistency is checked with TypeScript and `git diff --check`.
+`pnpm check` combines version validation, type checking, Vitest coverage, and
+the production build. Coverage thresholds fail closed at 60% statements, 50%
+branches, 54% functions, and 64% lines. The repository has no separate
+formatter or lint script; style consistency is checked with TypeScript and
+`git diff --check`.
 
 The real Codex smoke is opt-in because it starts an approved local agent turn:
 
@@ -163,7 +167,7 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.7.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.8.tgz
 constelix /absolute/path/to/a/project
 ```
 
@@ -198,8 +202,9 @@ Constelix assumes a trusted local user, browser, repository, and OS account. It
 does not claim to isolate mutually hostile processes running under the same
 macOS user. See the [threat model](docs/threat-model.md),
 [protocol](docs/protocol.md),
-[v0.0.7 product and experience audit](docs/audit-v0.0.7.md),
+[v0.0.8 general audit and remediation](docs/audit-v0.0.8.md),
 [progressive shell ADR](docs/adr/0001-progressive-workspace-shell.md), and
 [known limitations](KNOWN_ISSUES.md).
 
-Version checkpoints follow [VERSIONING.md](VERSIONING.md).
+Version checkpoints follow [VERSIONING.md](VERSIONING.md). Constelix is
+distributed under the [MIT License](LICENSE).

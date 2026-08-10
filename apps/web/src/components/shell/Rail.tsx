@@ -59,7 +59,10 @@ export const Rail = memo(function Rail() {
           data-tooltip="Ayuda"
           type="button"
           aria-label="Abrir ayuda y primeros pasos"
-          onClick={() => setHelpOpen(true)}
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setHelpOpen(true);
+          }}
         >
           <CircleHelp aria-hidden={true} size={20} />
           <span>Ayuda</span>
@@ -71,7 +74,10 @@ export const Rail = memo(function Rail() {
           className="with-tooltip"
           data-tooltip="Configuración"
           aria-label="Configuración"
-          onClick={() => setSettingsOpen(true)}
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setSettingsOpen(true);
+          }}
         >
           <Settings2 aria-hidden="true" size={19} />
         </button>

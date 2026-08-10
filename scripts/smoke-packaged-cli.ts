@@ -1,5 +1,12 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +57,23 @@ try {
   );
   if (!archiveName) throw new Error("pnpm pack did not produce a tarball.");
   const archivePath = join(packageDirectory, archiveName);
+  const { stdout: archiveListing } = await execFileAsync(
+    "tar",
+    ["-tzf", archivePath],
+    { cwd: temporaryRoot, timeout: 30_000 },
+  );
+  const archiveEntries = new Set(archiveListing.trim().split("\n"));
+  for (const requiredEntry of [
+    "package/LICENSE",
+    "package/README.md",
+    "package/package.json",
+    "package/dist/cli.js",
+    "package/dist/web/index.html",
+  ]) {
+    if (!archiveEntries.has(requiredEntry)) {
+      throw new Error(`Packaged CLI archive omitted ${requiredEntry}.`);
+    }
+  }
 
   await mkdir(installRoot, { recursive: true });
   await writeFile(
@@ -77,6 +101,25 @@ try {
     ],
     { cwd: temporaryRoot, timeout: 300_000 },
   );
+  const installedManifest = JSON.parse(
+    await readFile(
+      join(installRoot, "node_modules", "@constelix", "agent", "package.json"),
+      "utf8",
+    ),
+  ) as {
+    license?: unknown;
+    homepage?: unknown;
+    repository?: { url?: unknown };
+    bugs?: { url?: unknown };
+  };
+  if (
+    installedManifest.license !== "MIT" ||
+    typeof installedManifest.homepage !== "string" ||
+    typeof installedManifest.repository?.url !== "string" ||
+    typeof installedManifest.bugs?.url !== "string"
+  ) {
+    throw new Error("Packaged CLI distribution metadata is incomplete.");
+  }
 
   const executable = join(
     installRoot,
@@ -120,6 +163,9 @@ try {
         workspaceWithSpaces: true,
         dashboardServed: true,
         capabilityPrinted: false,
+        licenseIncluded: true,
+        readmeIncluded: true,
+        metadataVerified: true,
         passed: true,
       },
       null,

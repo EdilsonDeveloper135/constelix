@@ -69,6 +69,7 @@ export const CommandPalette = memo(function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const skipReturnFocusRef = useRef(false);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -104,6 +105,10 @@ export const CommandPalette = memo(function CommandPalette() {
 
     const previousFocus = previousFocusRef.current;
     previousFocusRef.current = null;
+    if (skipReturnFocusRef.current) {
+      skipReturnFocusRef.current = false;
+      return;
+    }
     if (!previousFocus) return;
     const frame = window.requestAnimationFrame(() => {
       if (document.contains(previousFocus)) previousFocus.focus();
@@ -163,12 +168,21 @@ export const CommandPalette = memo(function CommandPalette() {
     } else if (commandId === "reset-filters") {
       resetCanvasFilters();
       setActiveTool("map");
-    } else if (commandId === "workspace") {
-      void openWorkspaceSelector();
-    } else if (commandId === "settings") {
-      setSettingsOpen(true);
-    } else if (commandId === "help") {
-      setHelpOpen(true);
+    } else if (
+      commandId === "workspace" ||
+      commandId === "settings" ||
+      commandId === "help"
+    ) {
+      const returnFocus = previousFocusRef.current;
+      skipReturnFocusRef.current = true;
+      setOpen(false);
+      window.requestAnimationFrame(() => {
+        if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+        if (commandId === "workspace") void openWorkspaceSelector();
+        else if (commandId === "settings") setSettingsOpen(true);
+        else setHelpOpen(true);
+      });
+      return;
     }
     setOpen(false);
   };

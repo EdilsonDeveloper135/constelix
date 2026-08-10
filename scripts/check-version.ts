@@ -32,12 +32,12 @@ for (const packagePath of packagePaths) {
   }
 }
 
-const [versioning, changelog, knownIssues, readme, codexSource] = await Promise.all([
+const [versioning, changelog, knownIssues, readme, contractsSource] = await Promise.all([
   readFile(resolve(root, "VERSIONING.md"), "utf8"),
   readFile(resolve(root, "CHANGELOG.md"), "utf8"),
   readFile(resolve(root, "KNOWN_ISSUES.md"), "utf8"),
   readFile(resolve(root, "README.md"), "utf8"),
-  readFile(resolve(root, "apps/agent/src/codex.ts"), "utf8"),
+  readFile(resolve(root, "packages/contracts/src/index.ts"), "utf8"),
 ]);
 
 if (!versioning.includes(`## 5. Versión actual\n\n\`${version}\``)) {
@@ -52,10 +52,10 @@ if (!knownIssues.includes(`Actualizado para \`${version}\``)) {
 if (!readme.includes(`constelix-agent-${packageVersion}.tgz`)) {
   throw new Error(`README.md does not reference the ${packageVersion} CLI tarball.`);
 }
-if (!codexSource.includes(
-  `clientInfo: { name: "constelix", title: "Constelix", version: "${packageVersion}" }`,
+if (!contractsSource.includes(
+  `export const CONSTELIX_VERSION = "${packageVersion}" as const;`,
 )) {
-  throw new Error(`Codex clientInfo does not use version ${packageVersion}.`);
+  throw new Error(`The shared runtime version does not use ${packageVersion}.`);
 }
 
 const [{ stdout: existingTag }, { stdout: head }] = await Promise.all([

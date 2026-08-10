@@ -9,7 +9,26 @@ export default defineConfig({
       "scripts/**/*.test.ts",
     ],
     coverage: {
-      reporter: ["text", "html"]
+      provider: "v8",
+      reporter: ["text", "html", "json-summary"],
+      reportsDirectory: "coverage",
+      include: [
+        "apps/*/src/**/*.{ts,tsx}",
+        "packages/*/src/**/*.ts",
+        "scripts/benchmark-utils.ts",
+      ],
+      exclude: [
+        "**/*.test.ts",
+        "**/*.d.ts",
+        "apps/web/src/main.tsx",
+        "scripts/smoke-*.ts",
+      ],
+      thresholds: {
+        statements: 60,
+        branches: 50,
+        functions: 54,
+        lines: 64,
+      },
     }
   }
 });

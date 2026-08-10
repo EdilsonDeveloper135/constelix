@@ -7,9 +7,14 @@ import {
   generateBenchmarkFixture,
   LINES_PER_BENCHMARK_FILE,
 } from "./generate-benchmark.js";
+import {
+  benchmarkEnvironment,
+  percentile,
+} from "./benchmark-utils.js";
 
 const FILE_COUNT = 10_000;
 const COLD_BUDGET_MS = 90_000;
+const COLD_WAIT_TIMEOUT_MS = COLD_BUDGET_MS * 2;
 const INCREMENTAL_BUDGET_MS = 1_000;
 const INCREMENTAL_SAMPLES = 20;
 const fixture = await generateBenchmarkFixture(FILE_COUNT);
@@ -26,7 +31,7 @@ const server = await startAgentServer({
 });
 
 try {
-  const coldStatus = await waitForReady(server, 0, COLD_BUDGET_MS + 5_000);
+  const coldStatus = await waitForReady(server, 0, COLD_WAIT_TIMEOUT_MS);
   const coldMs = performance.now() - startedAt;
   const headers = {
     authorization: `Bearer ${server.capabilityToken}`,
@@ -81,6 +86,7 @@ try {
     incrementalP95Ms: Math.round(incrementalP95Ms),
     incrementalBudgetMs: INCREMENTAL_BUDGET_MS,
     revisions: { cold: coldStatus.revision, incremental: latestRevision },
+    environment: benchmarkEnvironment(),
     passed: coldMs <= COLD_BUDGET_MS && incrementalP95Ms <= INCREMENTAL_BUDGET_MS
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -97,19 +103,15 @@ try {
   ]);
 }
 
-function percentile(values: readonly number[], quantile: number): number {
-  if (values.length === 0) throw new Error("A percentile requires at least one sample.");
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.max(
-    0,
-    Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1),
-  );
-  return sorted[index]!;
-}
-
 interface HealthPayload {
   session: { id: string };
-  index: { phase: string; total: number; revision: number };
+  index: {
+    phase: string;
+    completed: number;
+    total: number;
+    revision: number;
+    message?: string;
+  };
 }
 
 interface BenchmarkIndexStatus extends HealthPayload["index"] {
@@ -121,7 +123,9 @@ async function waitForReady(
   afterRevision: number,
   timeoutMs: number
 ): Promise<BenchmarkIndexStatus> {
+  const startedAt = performance.now();
   const deadline = performance.now() + timeoutMs;
+  let lastStatus: HealthPayload["index"] | undefined;
   while (performance.now() < deadline) {
     const response = await server.app.inject({
       method: "GET",
@@ -135,14 +139,25 @@ async function waitForReady(
       throw new Error(`Health probe failed with HTTP ${response.statusCode}: ${response.body}`);
     }
     const payload = response.json<HealthPayload>();
+    lastStatus = payload.index;
     if (
       payload.index.phase === "ready" &&
       payload.index.revision > afterRevision
     ) {
       return { ...payload.index, sessionId: payload.session.id };
     }
-    if (payload.index.phase === "error") throw new Error("Benchmark indexing entered the error state.");
+    if (payload.index.phase === "error") {
+      throw new Error(
+        `Benchmark indexing entered the error state${payload.index.message ? `: ${payload.index.message}` : "."}`,
+      );
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`Index did not reach a newer ready revision within ${timeoutMs} ms.`);
+  const elapsedMs = Math.round(performance.now() - startedAt);
+  const status = lastStatus
+    ? `${lastStatus.phase} ${lastStatus.completed}/${lastStatus.total}, revision ${lastStatus.revision}`
+    : "no successful health sample";
+  throw new Error(
+    `Index did not reach a newer ready revision within ${timeoutMs} ms (elapsed ${elapsedMs} ms; last status: ${status}; host: ${JSON.stringify(benchmarkEnvironment())}).`,
+  );
 }

@@ -13,6 +13,7 @@ import {
   ActApproveRequestSchema,
   ActTaskRequestSchema,
   AskTurnRequestSchema,
+  CONSTELIX_RELEASE,
   FileReadRequestSchema,
   FileWriteRequestSchema,
   GraphQuerySchema,
@@ -116,7 +117,7 @@ export async function startAgentServer(
     ...(options.indexerScanOptions
       ? { indexerScanOptions: options.indexerScanOptions }
       : {}),
-    agentVersion: "v0.0.7",
+    agentVersion: CONSTELIX_RELEASE,
   });
   const events = manager.globalEvents;
   const app = Fastify({
@@ -849,7 +850,12 @@ function requestSessionId(request: FastifyRequest): string | undefined {
 }
 
 function hasCapability(request: FastifyRequest, token: string): boolean {
-  return request.headers.authorization === `Bearer ${token}`;
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
+    return false;
+  }
+  const candidate = authorization.slice("Bearer ".length);
+  return candidate.length > 0 && secureTokenEquals(candidate, token);
 }
 
 function requestPathname(value: string): string {
