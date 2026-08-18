@@ -84,6 +84,7 @@ interface WorkspaceState {
   graphReconciling: boolean;
   remoteHydrated: boolean;
   selectedNodeId: string | null;
+  pathFindingSourceId: string | null;
   expansionCursors: Record<string, string | null>;
   collapsedNodeIds: Record<string, boolean>;
   pinnedSemanticNodeIds: Record<string, boolean>;
@@ -94,6 +95,7 @@ interface WorkspaceState {
   index: IndexStatus;
   assistantMode: AssistantMode;
   question: string;
+  actObjective: string;
   answer: string;
   conversation: ConversationMessage[];
   assistantError: string | null;
@@ -123,6 +125,8 @@ interface WorkspaceState {
   reconcileGraph: () => Promise<void>;
   handleAgentEvent: (event: AgentEvent) => void;
   selectNode: (id: string | null) => void;
+  setPathFindingSource: (nodeId: string | null) => void;
+  findPathTo: (targetId: string) => Promise<void>;
   raisePanel: (id: string) => void;
   openFile: (relativePath: string, anchorNodeId?: string) => void;
   openTerminal: (cwd?: string, anchorNodeId?: string) => void;
@@ -147,6 +151,7 @@ interface WorkspaceState {
   updateTerminalPanel: (patch: Partial<TerminalPanelData>) => void;
   setAssistantMode: (mode: AssistantMode) => void;
   setQuestion: (question: string) => void;
+  setActObjective: (objective: string) => void;
   submitQuestion: () => Promise<void>;
   cancelQuestion: () => void;
   playEvidencePath: (path: EvidencePath) => void;
@@ -217,6 +222,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   graphReconciling: false,
   remoteHydrated: false,
   selectedNodeId: null,
+  pathFindingSourceId: null,
   expansionCursors: {},
   collapsedNodeIds: {},
   pinnedSemanticNodeIds: {},
@@ -236,6 +242,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       },
   assistantMode: "ask",
   question: startsInDemoMode ? "¿Cómo llega una consulta al grafo?" : "",
+  actObjective: "",
   answer: startsInDemoMode
     ? "La consulta entra por `/api/query`, pasa por `query.handler.ts` y `QueryService`. Después, `GraphIndexer` consulta `ProjectGraph`."
     : "",
@@ -490,6 +497,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         : "connected",
       demoMode: false,
       question: preserveSessionState ? previous.question : "",
+      actObjective: preserveSessionState ? previous.actObjective : "",
       answer: preserveAskState ? previous.answer : "",
       conversation:
         preserveAskState
@@ -965,6 +973,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   selectNode: (selectedNodeId) => set({ selectedNodeId }),
+
+  setPathFindingSource: (pathFindingSourceId) => set({ pathFindingSourceId }),
+
+  findPathTo: async (targetId) => {
+    const state = get();
+    const sourceId = state.pathFindingSourceId;
+    set({ pathFindingSourceId: null });
+    if (!sourceId || state.demoMode) return;
+    const pushNotice = (code: string, message: string, severity: WorkspaceNotice["severity"]) =>
+      set((current) => ({
+        notices: [
+          ...current.notices.filter((notice) => notice.code !== code),
+          { id: crypto.randomUUID(), code, message, severity, recoverable: true },
+        ].slice(-4),
+      }));
+    try {
+      const path = await apiClient.findPath(sourceId, targetId);
+      if (path) {
+        get().playEvidencePath(path);
+      } else {
+        pushNotice(
+          "GRAPH_PATH_NOT_FOUND",
+          "No se encontró una ruta verificable entre los nodos seleccionados.",
+          "warning",
+        );
+      }
+    } catch (error) {
+      pushNotice(
+        "GRAPH_PATH_ERROR",
+        error instanceof Error ? error.message : "No se pudo buscar la ruta.",
+        "error",
+      );
+    }
+  },
 
   raisePanel: (id) => {
     set((state) => {
@@ -1507,6 +1549,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setQuestion: (question) => set({ question }),
 
+  setActObjective: (actObjective) => set({ actObjective }),
+
   submitQuestion: async () => {
     const state = get();
     const prompt = state.question.trim();
@@ -1707,7 +1751,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   createActTask: async () => {
     const state = get();
-    const objective = state.question.trim();
+    const objective = state.actObjective.trim();
     const workspaceReady = canUseWorkspaceFeatures(state);
     if (
       !workspaceReady ||

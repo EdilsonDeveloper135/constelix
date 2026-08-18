@@ -8,9 +8,11 @@ import {
   Languages,
   Network,
   Pencil,
+  RotateCcw,
 } from "lucide-react";
 import { memo } from "react";
 
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { summarizeWorkspacePath } from "../../lib/workspacePresentation";
 import { useShellStore } from "../../store/useShellStore";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
@@ -18,6 +20,8 @@ import { useWorkspaceStore } from "../../store/useWorkspaceStore";
 export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
   const demoMode = useWorkspaceStore((state) => state.demoMode);
   const remoteHydrated = useWorkspaceStore((state) => state.remoteHydrated);
+  const connection = useWorkspaceStore((state) => state.connection);
+  const bootstrapError = useWorkspaceStore((state) => state.assistantError);
   const onboardingOpen = useShellStore((state) => state.onboardingOpen);
   const workspaceName = useWorkspaceStore((state) => state.workspaceName);
   const rootPath = useWorkspaceStore((state) => state.rootPath);
@@ -29,18 +33,28 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
   );
   const setHelpOpen = useShellStore((state) => state.setHelpOpen);
 
-  if (demoMode || !onboardingOpen) return null;
+  const open = !demoMode && onboardingOpen;
+  const { containerRef, onKeyDown } = useFocusTrap<HTMLElement>({
+    open,
+    onClose: () => setOnboardingOpen(false),
+  });
+
+  if (!open) return null;
   const progress = Math.round(index.progress * 100);
   const ready = index.phase === "ready";
+  const stalled = !remoteHydrated && connection === "degraded";
 
   return (
     <div className={`onboarding-overlay${remoteHydrated ? " onboarding-overlay--ready" : ""}`}>
       <section
+        ref={containerRef}
         className="workspace-onboarding"
         role="dialog"
         aria-modal={remoteHydrated ? undefined : "true"}
         aria-labelledby="workspace-onboarding-title"
         aria-describedby="workspace-onboarding-description"
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
       >
         <div className="onboarding-heading">
           <span className="onboarding-icon">
@@ -129,30 +143,49 @@ export const WorkspaceOnboarding = memo(function WorkspaceOnboarding() {
           </div>
         ) : null}
 
-        <div className="onboarding-progress">
-          <div>
-            <span>
-              {ready
-                ? "Índice local listo"
-                : index.message ?? "Preparando el índice local…"}
-            </span>
-            <strong>{progress}%</strong>
+        {stalled ? (
+          <div className="onboarding-error" role="alert">
+            <AlertTriangle aria-hidden="true" size={15} />
+            <div>
+              <p>
+                <strong>No se pudo validar el workspace.</strong>{" "}
+                {bootstrapError ??
+                  "El agente local no respondió. Verifica que siga en ejecución."}
+              </p>
+              <button
+                type="button"
+                onClick={() => void useWorkspaceStore.getState().reconcileGraph()}
+              >
+                <RotateCcw aria-hidden="true" size={13} /> Reintentar
+              </button>
+            </div>
           </div>
-          <div
-            className="onboarding-progress-track"
-            role="progressbar"
-            aria-label="Progreso de indexación"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress}
-          >
-            <span style={{ width: `${progress}%` }} />
+        ) : (
+          <div className="onboarding-progress">
+            <div>
+              <span>
+                {ready
+                  ? "Índice local listo"
+                  : index.message ?? "Preparando el índice local…"}
+              </span>
+              <strong>{progress}%</strong>
+            </div>
+            <div
+              className="onboarding-progress-track"
+              role="progressbar"
+              aria-label="Progreso de indexación"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progress}
+            >
+              <span style={{ width: `${progress}%` }} />
+            </div>
+            <small>
+              {index.filesIndexed.toLocaleString()} archivos ·{" "}
+              {index.symbolsIndexed.toLocaleString()} símbolos
+            </small>
           </div>
-          <small>
-            {index.filesIndexed.toLocaleString()} archivos ·{" "}
-            {index.symbolsIndexed.toLocaleString()} símbolos
-          </small>
-        </div>
+        )}
 
         <div className="onboarding-actions">
           <p>

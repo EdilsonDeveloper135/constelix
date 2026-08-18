@@ -3,6 +3,7 @@ import {
   mkdtemp,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -200,6 +201,38 @@ describe("workspace scanner", () => {
     }
   });
 
+  it("sweeps orphaned atomic-write temporary files only when explicitly enabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-scan-orphan-"));
+    try {
+      const orphan = join(
+        root,
+        ".main.ts.constelix-1-00000000-0000-4000-8000-000000000000.tmp",
+      );
+      await Promise.all([
+        writeFile(join(root, "main.ts"), "export const a = true;\n"),
+        writeFile(orphan, "stale partial write"),
+      ]);
+
+      const withoutSweep = await scanWorkspace("workspace", root, {
+        sweepOrphanedTempFiles: false,
+      });
+      expect(withoutSweep.files.map((file) => file.relativePath)).toEqual([
+        "main.ts",
+      ]);
+      await expect(stat(orphan)).resolves.toBeDefined();
+
+      const withSweep = await scanWorkspace("workspace", root, {
+        sweepOrphanedTempFiles: true,
+      });
+      expect(withSweep.files.map((file) => file.relativePath)).toEqual([
+        "main.ts",
+      ]);
+      await expect(stat(orphan)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("bounds traversal across unsupported filesystem entries", async () => {
     const root = await mkdtemp(join(tmpdir(), "constelix-scan-entries-"));
     try {
@@ -217,9 +250,41 @@ describe("workspace scanner", () => {
       expect(result.truncated).toBe(true);
       expect(result.diagnostics).toContainEqual({
         relativePath: ".",
-        message:
-          "Workspace traversal is limited to 2 filesystem entries and 25000 entries per directory.",
+        message: "Workspace traversal is limited to 2 filesystem entries.",
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("scopes the per-directory entry limit to the offending directory instead of aborting the rest of the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-scan-dir-entries-"));
+    try {
+      await mkdir(join(root, "big"), { recursive: true });
+      await mkdir(join(root, "zzz-after"), { recursive: true });
+      await Promise.all([
+        writeFile(join(root, "big", "a.ts"), "export const a = true;\n"),
+        writeFile(join(root, "big", "b.ts"), "export const b = true;\n"),
+        writeFile(join(root, "big", "c.ts"), "export const c = true;\n"),
+        writeFile(
+          join(root, "zzz-after", "d.ts"),
+          "export const d = true;\n",
+        ),
+      ]);
+
+      const result = await scanWorkspace("workspace", root, {
+        maxDirectoryEntries: 2,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(result.diagnostics).toContainEqual({
+        relativePath: "big",
+        message:
+          "Directory exceeds the 2-entry-per-directory limit and was skipped.",
+      });
+      expect(result.files.map((file) => file.relativePath)).toEqual([
+        "zzz-after/d.ts",
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

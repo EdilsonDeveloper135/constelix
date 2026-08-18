@@ -11,8 +11,21 @@ vi.mock("./api", () => ({ apiClient: apiMock }));
 
 import {
   JsonRpcLspConnection,
+  closeMonacoLspConnections,
   constelixDocumentUri,
+  renameProvider,
+  workspaceEditChanges,
 } from "./lsp";
+
+class FakeUri {
+  readonly scheme: string;
+  constructor(private readonly value: string) {
+    this.scheme = value.slice(0, value.indexOf(":"));
+  }
+  toString(): string {
+    return this.value;
+  }
+}
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -185,6 +198,135 @@ describe("Constelix Monaco LSP client", () => {
       ],
     );
     connection.close();
+  });
+
+  it("applies rename edits only to files already open as a Monaco model, and reports the rest as skipped", async () => {
+    closeMonacoLspConnections();
+    const openModels = new Map<string, { getVersionId: () => number; uri: FakeUri }>([
+      [
+        "constelix://0123456789abcdef01234567/open.ts",
+        { getVersionId: () => 3, uri: new FakeUri("constelix://0123456789abcdef01234567/open.ts") },
+      ],
+    ]);
+    const fakeMonaco = {
+      editor: {
+        getModel: (uri: FakeUri) => openModels.get(uri.toString()),
+      },
+      Uri: { parse: (value: string) => new FakeUri(value) },
+    } as unknown as typeof import("monaco-editor");
+    const model = {
+      uri: new FakeUri("constelix://0123456789abcdef01234567/open.ts"),
+    } as unknown as import("monaco-editor").editor.ITextModel;
+    const position = { lineNumber: 1, column: 5 } as import("monaco-editor").Position;
+    const token = {
+      isCancellationRequested: false,
+      onCancellationRequested: () => ({ dispose() {} }),
+    } as unknown as import("monaco-editor").CancellationToken;
+
+    const provider = renameProvider(fakeMonaco, "typescript");
+    const editsPromise = provider.provideRenameEdits(
+      model,
+      position,
+      "renamedSymbol",
+      token,
+    );
+
+    const socket = FakeWebSocket.instances.at(0);
+    socket?.open();
+    socket?.receive({ jsonrpc: "2.0", id: 1, result: {} });
+    // The rename request is gated behind the initialize/initialized
+    // handshake settling `ready()`, which resolves through a couple of
+    // chained .then()s inside JsonRpcLspConnection — flush a macrotask
+    // rather than guess an exact microtask count.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const renameRequest = sentMessage(socket, 2);
+    expect(renameRequest).toMatchObject({ method: "textDocument/rename" });
+
+    socket?.receive({
+      jsonrpc: "2.0",
+      id: (renameRequest as { id: number }).id,
+      result: {
+        changes: {
+          "constelix://0123456789abcdef01234567/open.ts": [
+            {
+              range: {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 3 },
+              },
+              newText: "renamedSymbol",
+            },
+          ],
+          "constelix://0123456789abcdef01234567/closed.ts": [
+            {
+              range: {
+                start: { line: 2, character: 0 },
+                end: { line: 2, character: 3 },
+              },
+              newText: "renamedSymbol",
+            },
+          ],
+        },
+      },
+    });
+
+    const edits = await editsPromise;
+    if (!edits) throw new Error("Expected a WorkspaceEdit result.");
+    expect(edits.edits).toEqual([
+      {
+        resource: openModels.get(
+          "constelix://0123456789abcdef01234567/open.ts",
+        )!.uri,
+        textEdit: {
+          range: {
+            startLineNumber: 1,
+            startColumn: 1,
+            endLineNumber: 1,
+            endColumn: 4,
+          },
+          text: "renamedSymbol",
+        },
+        versionId: 3,
+      },
+    ]);
+    expect(edits.rejectReason).toContain("1 archivo");
+  });
+});
+
+describe("workspaceEditChanges", () => {
+  it("flattens a legacy `changes` map into [uri, edits] pairs", () => {
+    const edits = [{ range: {}, newText: "renamed" }];
+    expect(
+      workspaceEditChanges({
+        changes: {
+          "constelix://workspace/a.ts": edits,
+          "constelix://workspace/b.ts": edits,
+        },
+      }),
+    ).toEqual([
+      ["constelix://workspace/a.ts", edits],
+      ["constelix://workspace/b.ts", edits],
+    ]);
+  });
+
+  it("flattens the modern `documentChanges` array into [uri, edits] pairs", () => {
+    const edits = [{ range: {}, newText: "renamed" }];
+    expect(
+      workspaceEditChanges({
+        documentChanges: [
+          { textDocument: { uri: "constelix://workspace/a.ts" }, edits },
+          // Malformed entries (missing textDocument/edits) are dropped
+          // rather than thrown on, matching every other LSP result parser
+          // in this file.
+          { textDocument: { uri: "constelix://workspace/b.ts" } },
+        ],
+      }),
+    ).toEqual([["constelix://workspace/a.ts", edits]]);
+  });
+
+  it("returns undefined for a result with neither shape", () => {
+    expect(workspaceEditChanges({})).toBeUndefined();
+    expect(workspaceEditChanges(null)).toBeUndefined();
+    expect(workspaceEditChanges("not an object")).toBeUndefined();
   });
 });
 

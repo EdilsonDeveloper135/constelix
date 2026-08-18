@@ -2,11 +2,26 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    environment: "node",
-    include: [
-      "packages/**/*.test.ts",
-      "apps/**/*.test.ts",
-      "scripts/**/*.test.ts",
+    projects: [
+      {
+        test: {
+          name: "node",
+          environment: "node",
+          include: [
+            "packages/**/*.test.ts",
+            "apps/**/*.test.ts",
+            "scripts/**/*.test.ts",
+          ],
+        },
+      },
+      {
+        test: {
+          name: "web-components",
+          environment: "jsdom",
+          include: ["apps/web/src/**/*.test.tsx"],
+          setupFiles: ["./apps/web/src/test-setup.ts"],
+        },
+      },
     ],
     coverage: {
       provider: "v8",
@@ -19,15 +34,17 @@ export default defineConfig({
       ],
       exclude: [
         "**/*.test.ts",
+        "**/*.test.tsx",
         "**/*.d.ts",
         "apps/web/src/main.tsx",
+        "apps/web/src/test-setup.ts",
         "scripts/smoke-*.ts",
       ],
       thresholds: {
-        statements: 60,
-        branches: 50,
-        functions: 54,
-        lines: 64,
+        statements: 64,
+        branches: 54,
+        functions: 60,
+        lines: 67,
       },
     }
   }

@@ -20,9 +20,9 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent,
 } from "react";
 
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 import {
   DEFAULT_LLM_BASE_URL,
   DEFAULT_LLM_MODEL,
@@ -69,10 +69,8 @@ export const SettingsModal = memo(function SettingsModal({
   onSave,
   onTest,
 }: SettingsModalProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
   const baseUrlRef = useRef<HTMLInputElement>(null);
   const apiKeyRef = useRef<HTMLInputElement>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
   const baseUrlDirtyRef = useRef(false);
   const modelDirtyRef = useRef(false);
@@ -93,6 +91,17 @@ export const SettingsModal = memo(function SettingsModal({
   const codexReason = useWorkspaceStore((state) => state.codexReason);
   const codexVersion = useWorkspaceStore((state) => state.codexVersion);
 
+  const { containerRef: dialogRef, onKeyDown: handleDialogKeyDown } =
+    useFocusTrap<HTMLDivElement>({
+      open,
+      onClose: () => {
+        if (busy || testBusy) return;
+        if (apiKeyRef.current) apiKeyRef.current.value = "";
+        onClose();
+      },
+      initialFocusRef: baseUrlRef,
+    });
+
   useLayoutEffect(() => {
     if (!open) {
       wasOpenRef.current = false;
@@ -110,10 +119,6 @@ export const SettingsModal = memo(function SettingsModal({
     wasOpenRef.current = true;
     baseUrlDirtyRef.current = false;
     modelDirtyRef.current = false;
-    returnFocusRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
     setBaseUrl(initialBaseUrl);
     setModel(initialModel);
     setBusy(false);
@@ -121,7 +126,6 @@ export const SettingsModal = memo(function SettingsModal({
     setError(null);
     setTestBusy(false);
     setTestResult(null);
-    window.requestAnimationFrame(() => baseUrlRef.current?.focus());
   }, [initialBaseUrl, initialModel, open]);
 
   if (!open) return null;
@@ -130,7 +134,6 @@ export const SettingsModal = memo(function SettingsModal({
     if (busy || testBusy) return;
     if (apiKeyRef.current) apiKeyRef.current.value = "";
     onClose();
-    window.requestAnimationFrame(() => returnFocusRef.current?.focus());
   };
 
   const validatedDraft = (): LlmSettingsDraft | null => {
@@ -165,7 +168,6 @@ export const SettingsModal = memo(function SettingsModal({
       await onSave?.(draft);
       if (apiKeyRef.current) apiKeyRef.current.value = "";
       onClose();
-      window.requestAnimationFrame(() => returnFocusRef.current?.focus());
     } catch (saveError) {
       setError(
         saveError instanceof Error
@@ -193,30 +195,6 @@ export const SettingsModal = memo(function SettingsModal({
       );
     } finally {
       setTestBusy(false);
-    }
-  };
-
-  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = Array.from(
-      dialogRef.current?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled), select:not(:disabled)",
-      ) ?? [],
-    );
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last?.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first?.focus();
     }
   };
 

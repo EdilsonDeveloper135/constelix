@@ -4,6 +4,8 @@ import {
   GraphQuerySchema,
   GraphSnapshotSchema,
   PROTOCOL_VERSION,
+  stableId,
+  stableSerialize,
   type EvidencePath,
   type GraphDelta,
   type GraphDirection,
@@ -15,28 +17,7 @@ import {
   type GraphSnapshot
 } from "@constelix/contracts";
 
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const FNV_PRIME = 0x100000001b3n;
-const UINT64_MASK = 0xffffffffffffffffn;
-
-function canonicalPart(part: string): string {
-  return part.normalize("NFC").replaceAll("\\", "/");
-}
-
-/** Deterministic, platform-independent ID suitable for persisted graph entities. */
-export function stableId(namespace: string, ...parts: readonly string[]): string {
-  const canonical = parts.map((part) => {
-    const value = canonicalPart(part);
-    return `${new TextEncoder().encode(value).byteLength}:${value}`;
-  }).join("|");
-  let hash = FNV_OFFSET;
-  for (const byte of new TextEncoder().encode(canonical)) {
-    hash ^= BigInt(byte);
-    hash = (hash * FNV_PRIME) & UINT64_MASK;
-  }
-  const prefix = namespace.toLowerCase().replace(/[^a-z0-9_-]+/g, "_") || "id";
-  return `${prefix}_${hash.toString(16).padStart(16, "0")}`;
-}
+export { stableId, stableSerialize };
 
 export function createNodeId(
   workspaceId: string,
@@ -103,16 +84,6 @@ function scoreNode(node: GraphNode, terms: readonly string[]): number {
 function comparableEntity(entity: GraphNode | GraphEdge): string {
   const { revision: _revision, ...rest } = entity;
   return stableSerialize(rest);
-}
-
-function stableSerialize(value: unknown): string {
-  if (value === undefined) return "undefined";
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`);
-  return `{${entries.join(",")}}`;
 }
 
 export class InMemoryGraphStore {

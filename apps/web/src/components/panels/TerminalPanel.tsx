@@ -16,6 +16,13 @@ function terminalPrompt(cwd: string): string {
   return `\r\n\u001b[36mconstelix\u001b[0m:${cwd} \u001b[33m(main)\u001b[0m $ `;
 }
 
+function mountCwdFor(id: string, fallback: string): string {
+  const currentNode = useWorkspaceStore
+    .getState()
+    .nodes.find((node) => node.id === id);
+  return currentNode?.type === "terminalPanel" ? currentNode.data.cwd : fallback;
+}
+
 interface TerminalOutputDetail {
   terminalId: string;
   data: string;
@@ -45,6 +52,14 @@ export const TerminalPanel = memo(function TerminalPanel({
   const compactMode = !docked && canvasCompactMode;
   const createTerminal = useWorkspaceStore((state) => state.createTerminal);
   const runtime = useWorkspaceStore((state) => state.terminalRuntimes[id]);
+  // Effect 2 (DOM mounting) below intentionally depends on these primitive
+  // fields rather than `runtime` itself: selecting the whole object makes
+  // the dependency change on every registerTerminalRuntime call, including
+  // the one effect 1 issues for a session effect 2 already has mounted,
+  // which tore the just-created xterm instance down and rebuilt it.
+  const runtimeTerminalId = runtime?.terminalId;
+  const runtimeCwd = runtime?.cwd;
+  const runtimeStatus = runtime?.status;
   const registerTerminalRuntime = useWorkspaceStore(
     (state) => state.registerTerminalRuntime,
   );
@@ -53,7 +68,75 @@ export const TerminalPanel = memo(function TerminalPanel({
   );
   const [ready, setReady] = useState(false);
   const [transcriptTruncated, setTranscriptTruncated] = useState(false);
+  // Guards against a duplicate PTY: React (in development, Strict Mode)
+  // invokes an effect, cleans it up, and invokes it again on first mount.
+  // Without this ref, both invocations can see "no runtime yet" before
+  // either request resolves and each create their own real session.
+  const creatingSessionRef = useRef(false);
 
+  // Effect 1: ensure a server-side PTY session exists for this panel's
+  // current cwd. Deliberately owns no DOM/xterm state, so re-running it
+  // (including the run its own registerTerminalRuntime call triggers) is
+  // cheap and side-effect-free once a matching session is already known.
+  useEffect(() => {
+    if (demoMode || !shouldMountTerminal(demoMode, connection, compactMode)) {
+      return;
+    }
+    const mountCwd = mountCwdFor(id, data.cwd);
+    const currentRuntime = useWorkspaceStore.getState().terminalRuntimes[id];
+    if (currentRuntime && currentRuntime.cwd !== mountCwd) {
+      void apiClient.deleteTerminal(currentRuntime.terminalId).catch(() => undefined);
+      clearTerminalRuntime(id);
+      return;
+    }
+    if (currentRuntime || creatingSessionRef.current) return;
+
+    // Deliberately not using a per-invocation "cancelled" flag set from
+    // this effect's own cleanup: React (in development, Strict Mode)
+    // cleans up and re-invokes this effect once on mount even though the
+    // panel is still very much wanted, and that phantom cleanup must not
+    // discard the session this call is about to create. Instead, check
+    // for a real removal (the panel node itself gone, e.g. via
+    // closePanel) once the request actually resolves.
+    creatingSessionRef.current = true;
+    void apiClient
+      .createTerminal(mountCwd, id)
+      .then((session) => {
+        creatingSessionRef.current = false;
+        const stillWanted = useWorkspaceStore
+          .getState()
+          .nodes.some((node) => node.id === id);
+        if (!stillWanted) {
+          void apiClient.deleteTerminal(session.id).catch(() => undefined);
+          return;
+        }
+        registerTerminalRuntime(id, {
+          terminalId: session.id,
+          cwd: mountCwd,
+          status: "running",
+        });
+      })
+      .catch(() => {
+        creatingSessionRef.current = false;
+        // Effect 2 falls back to a local degraded console when no session
+        // ever becomes available.
+      });
+  }, [
+    clearTerminalRuntime,
+    compactMode,
+    connection,
+    data.cwd,
+    demoMode,
+    id,
+    registerTerminalRuntime,
+    runtime,
+  ]);
+
+  // Effect 2: mount xterm.js against whatever session is currently known.
+  // Keyed by stable primitives so it re-runs only on a genuine session
+  // change (created, exited, cwd reassigned) or a real viewport/connection
+  // change — never as an echo of this effect's own writes, because this
+  // effect never calls registerTerminalRuntime itself.
   useEffect(() => {
     if (!shouldMountTerminal(demoMode, connection, compactMode)) {
       setReady(false);
@@ -64,30 +147,16 @@ export const TerminalPanel = memo(function TerminalPanel({
     setTranscriptTruncated(false);
     let disposed = false;
     let resizeObserver: ResizeObserver | null = null;
-    // During bootstrap, the runtime selector can update before React Flow
-    // delivers the matching node props. Use the atomic store snapshot so a
-    // transient prop mismatch never deletes a restored PTY.
-    const currentNode = useWorkspaceStore
-      .getState()
-      .nodes.find((node) => node.id === id);
-    const mountCwd =
-      currentNode?.type === "terminalPanel"
-        ? currentNode.data.cwd
-        : data.cwd;
-    let terminalSessionId =
-      runtime?.cwd === mountCwd ? runtime.terminalId : undefined;
-    let terminalExited = runtime?.status === "exited";
+    const mountCwd = mountCwdFor(id, data.cwd);
+    const currentRuntime = useWorkspaceStore.getState().terminalRuntimes[id];
+    const terminalSessionId =
+      currentRuntime?.cwd === mountCwd ? currentRuntime.terminalId : undefined;
+    const terminalExited = currentRuntime?.status === "exited";
     let removeOutputListener: (() => void) | null = null;
     let hydratingOutput = false;
     let bufferedOutput: TerminalOutputDetail[] = [];
     let latestOutputSequence = 0;
     let warnedDisconnected = false;
-
-    if (runtime && runtime.cwd !== mountCwd) {
-      void apiClient.deleteTerminal(runtime.terminalId).catch(() => undefined);
-      clearTerminalRuntime(id);
-      return;
-    }
 
     void Promise.all([
       import("@xterm/xterm"),
@@ -123,6 +192,14 @@ export const TerminalPanel = memo(function TerminalPanel({
       terminal.open(host);
       fitAddon.fit();
       setReady(true);
+      if (disposed) {
+        // The effect was cleaned up while the xterm/fit-addon modules were
+        // still loading. No disposeTerminal callback has been registered
+        // on `host` yet for the earlier run to have called, so this run
+        // owns disposing what it just created.
+        terminal.dispose();
+        return;
+      }
 
       const writeOutput = (output: TerminalOutputDetail) => {
         if (output.sequence !== undefined) {
@@ -143,28 +220,6 @@ export const TerminalPanel = memo(function TerminalPanel({
       window.addEventListener("constelix:terminal-output", onOutput);
       removeOutputListener = () =>
         window.removeEventListener("constelix:terminal-output", onOutput);
-
-      if (!demoMode && !terminalSessionId) {
-        try {
-          const session = await apiClient.createTerminal(mountCwd, id);
-          if (disposed) {
-            await apiClient.deleteTerminal(session.id).catch(() => undefined);
-            return;
-          }
-          terminalSessionId = session.id;
-          registerTerminalRuntime(id, {
-            terminalId: session.id,
-            cwd: mountCwd,
-            status: "running",
-          });
-          terminalExited = false;
-        } catch {
-          if (disposed) return;
-          terminal.writeln(
-            "\u001b[31mNo se pudo iniciar la PTY local. Ejecutando consola degradada.\u001b[0m",
-          );
-        }
-      }
 
       if (!demoMode && terminalSessionId) {
         terminal.writeln(
@@ -196,9 +251,14 @@ export const TerminalPanel = memo(function TerminalPanel({
           for (const output of pendingOutput) writeOutput(output);
           hydratingOutput = false;
         }
-        if (terminalExited || !terminalCanAcceptInput(runtime)) {
+        if (disposed) {
+          removeOutputListener?.();
+          terminal.dispose();
+          return;
+        }
+        if (terminalExited || !terminalCanAcceptInput(currentRuntime)) {
           terminal.write(
-            `\r\n\u001b[90m[${runtime?.exitLabel ?? "proceso terminado"}]\u001b[0m\r\n`,
+            `\r\n\u001b[90m[${currentRuntime?.exitLabel ?? "proceso terminado"}]\u001b[0m\r\n`,
           );
         }
       }
@@ -257,6 +317,13 @@ export const TerminalPanel = memo(function TerminalPanel({
         }
       });
 
+      if (disposed) {
+        removeOutputListener?.();
+        inputDisposable.dispose();
+        terminal.dispose();
+        return;
+      }
+
       resizeObserver = new ResizeObserver(() => {
         window.requestAnimationFrame(() => {
           if (disposed) return;
@@ -293,14 +360,14 @@ export const TerminalPanel = memo(function TerminalPanel({
       host.replaceChildren();
     };
   }, [
-    clearTerminalRuntime,
     compactMode,
     connection,
     data.cwd,
     demoMode,
     id,
-    registerTerminalRuntime,
-    runtime,
+    runtimeCwd,
+    runtimeStatus,
+    runtimeTerminalId,
   ]);
 
   return (

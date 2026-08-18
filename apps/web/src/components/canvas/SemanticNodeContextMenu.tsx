@@ -2,6 +2,8 @@ import {
   Eye,
   ExternalLink,
   FolderOpen,
+  Milestone,
+  Route,
   SquareTerminal,
 } from "lucide-react";
 import {
@@ -26,11 +28,14 @@ export interface ContextMenuPosition {
 interface SemanticNodeContextMenuProps extends ContextMenuPosition {
   node: SemanticFlowNode;
   returnFocusTo?: HTMLElement | null;
+  pathFindingSourceId: string | null;
   onClose: () => void;
   onInspect: () => void;
   onActivate: () => void;
   onOpenFile: () => void;
   onOpenTerminal: () => void;
+  onSetPathSource: () => void;
+  onFindPath: () => void;
 }
 
 interface MenuItem {
@@ -46,11 +51,14 @@ export const SemanticNodeContextMenu = memo(
     x,
     y,
     returnFocusTo,
+    pathFindingSourceId,
     onClose,
     onInspect,
     onActivate,
     onOpenFile,
     onOpenTerminal,
+    onSetPathSource,
+    onFindPath,
   }: SemanticNodeContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null);
     const capabilities = semanticNodeCapabilities(node.data);
@@ -87,16 +95,42 @@ export const SemanticNodeContextMenu = memo(
           action: onOpenTerminal,
         });
       }
+      if (pathFindingSourceId === node.id) {
+        next.push({
+          id: "cancel-path-source",
+          label: "Cancelar origen de ruta",
+          icon: <Milestone aria-hidden="true" size={14} />,
+          action: onSetPathSource,
+        });
+      } else if (pathFindingSourceId === null) {
+        next.push({
+          id: "set-path-source",
+          label: "Marcar como origen de ruta",
+          icon: <Milestone aria-hidden="true" size={14} />,
+          action: onSetPathSource,
+        });
+      } else {
+        next.push({
+          id: "find-path",
+          label: "Buscar ruta desde el origen marcado",
+          icon: <Route aria-hidden="true" size={14} />,
+          action: onFindPath,
+        });
+      }
       return next;
     }, [
       capabilities.canActivate,
       capabilities.canOpenFile,
       capabilities.canOpenTerminal,
       node.data.expanded,
+      node.id,
       onActivate,
+      onFindPath,
       onInspect,
       onOpenFile,
       onOpenTerminal,
+      onSetPathSource,
+      pathFindingSourceId,
     ]);
     const position = clampContextMenuPosition(
       { x, y },

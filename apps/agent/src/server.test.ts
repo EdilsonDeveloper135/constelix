@@ -964,4 +964,135 @@ describe("local agent HTTP boundary", () => {
       undefined,
     ]);
   });
+
+  it("exposes graph neighbors and shortest-path lookups over REST", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-server-graph-"));
+    const stateRoot = await mkdtemp(join(tmpdir(), "constelix-server-graph-state-"));
+    await writeFile(
+      join(root, "a.ts"),
+      'import { helper } from "./b.js";\nexport const useIt = () => helper();\n',
+    );
+    await writeFile(join(root, "b.ts"), "export function helper() {}\n");
+    const server = await startAgentServer({
+      workspaceRoot: root,
+      port: 0,
+      capabilityToken: "graph-capability",
+      storageDirectory: join(stateRoot, "state"),
+      databasePath: join(stateRoot, "agent-test.sqlite"),
+      webDistPath: join(root, "missing-web-dist"),
+    });
+    const host = new URL(server.origin).host;
+    try {
+      const bootstrap = await server.app.inject({
+        method: "GET",
+        url: "/api/v1/health",
+        headers: { host, authorization: "Bearer graph-capability" },
+      });
+      const sessionId = (bootstrap.json() as { session: { id: string } })
+        .session.id;
+      const headers = {
+        host,
+        authorization: "Bearer graph-capability",
+        "content-type": "application/json",
+        "x-constelix-workspace-session": sessionId,
+      };
+
+      let indexPhase = "idle";
+      for (let attempt = 0; attempt < 100 && indexPhase !== "ready"; attempt += 1) {
+        const health = await server.app.inject({
+          method: "GET",
+          url: "/api/v1/health",
+          headers,
+        });
+        indexPhase = (health.json() as { index: { phase: string } }).index.phase;
+        if (indexPhase !== "ready") {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      expect(indexPhase).toBe("ready");
+
+      const query = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/graph/query",
+        headers,
+        payload: { protocolVersion: 1, search: "a b", limit: 20 },
+      });
+      const allNodes = (
+        query.json() as {
+          nodes: Array<{ id: string; kind: string; relativePath: string }>;
+        }
+      ).nodes;
+      // "imports" edges connect module nodes (a's module imports b's
+      // module), not the file nodes that contain them.
+      const moduleA = allNodes.find(
+        (node) => node.kind === "module" && node.relativePath === "a.ts",
+      );
+      const moduleB = allNodes.find(
+        (node) => node.kind === "module" && node.relativePath === "b.ts",
+      );
+      expect(moduleA).toBeDefined();
+      expect(moduleB).toBeDefined();
+
+      const neighbors = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/graph/neighbors",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          nodeId: moduleA!.id,
+          direction: "outbound",
+          relations: ["imports"],
+          depth: 1,
+          limit: 10,
+        },
+      });
+      expect(neighbors.statusCode).toBe(200);
+      const neighborsBody = neighbors.json() as {
+        nodes: Array<{ id: string }>;
+      };
+      expect(neighborsBody.nodes.map((node) => node.id)).toEqual([
+        moduleB!.id,
+      ]);
+
+      const path = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/graph/path",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          source: moduleA!.id,
+          target: moduleB!.id,
+        },
+      });
+      expect(path.statusCode).toBe(200);
+      const pathBody = path.json() as {
+        path: { nodeIds: string[] } | null;
+      };
+      expect(pathBody.path).not.toBeNull();
+      expect(pathBody.path!.nodeIds).toEqual([moduleA!.id, moduleB!.id]);
+
+      const noPath = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/graph/path",
+        headers,
+        payload: {
+          protocolVersion: 1,
+          source: moduleA!.id,
+          target: "node-that-does-not-exist",
+        },
+      });
+      expect(noPath.statusCode).toBe(200);
+      expect((noPath.json() as { path: unknown }).path).toBeNull();
+
+      const invalidRequest = await server.app.inject({
+        method: "POST",
+        url: "/api/v1/graph/neighbors",
+        headers,
+        payload: { protocolVersion: 1 },
+      });
+      expect(invalidRequest.statusCode).toBe(400);
+    } finally {
+      await server.close();
+    }
+  });
 });

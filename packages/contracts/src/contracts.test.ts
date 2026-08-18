@@ -31,7 +31,56 @@ import {
   WorkspaceSessionSchema,
   WorkspaceSummarySchema,
   WorkspaceTargetSchema,
+  stableId,
+  stableSerialize,
 } from "./index.js";
+
+describe("stableId", () => {
+  it("is deterministic and namespace/part sensitive", () => {
+    expect(stableId("function", "workspace-a", "src/a.ts", "foo")).toBe(
+      stableId("function", "workspace-a", "src/a.ts", "foo"),
+    );
+    expect(stableId("function", "workspace-a", "src/a.ts", "foo")).not.toBe(
+      stableId("function", "workspace-a", "src/a.ts", "bar"),
+    );
+    expect(stableId("function", "workspace-a", "src/a.ts", "foo")).not.toBe(
+      stableId("class", "workspace-a", "src/a.ts", "foo"),
+    );
+  });
+
+  it("does not let concatenated parts collide across a boundary", () => {
+    // Without length-prefixing, ("ab", "c") and ("a", "bc") would hash the
+    // same; this is the property that prevents that.
+    expect(stableId("edge", "ab", "c")).not.toBe(stableId("edge", "a", "bc"));
+  });
+
+  it("normalizes Unicode and path separators before hashing", () => {
+    const decomposed = "e\u0301"; // "e" + combining acute accent (NFD)
+    const precomposed = "\u00e9"; // single "e with acute" codepoint (NFC)
+    expect(decomposed).not.toBe(precomposed);
+    expect(stableId("file", `src/${decomposed}.ts`)).toBe(
+      stableId("file", `src/${precomposed}.ts`),
+    );
+    expect(stableId("file", "src\\windows.ts")).toBe(stableId("file", "src/windows.ts"));
+  });
+
+  it("sanitizes the namespace into a safe id prefix", () => {
+    expect(stableId("My Kind!", "x")).toMatch(/^my_kind__[0-9a-f]{16}$/);
+    expect(stableId("", "x")).toMatch(/^id_[0-9a-f]{16}$/);
+  });
+});
+
+describe("stableSerialize", () => {
+  it("produces identical output regardless of object key order", () => {
+    expect(stableSerialize({ a: 1, b: 2 })).toBe(stableSerialize({ b: 2, a: 1 }));
+  });
+
+  it("distinguishes values that JSON.stringify alone would not", () => {
+    expect(stableSerialize(undefined)).toBe("undefined");
+    expect(stableSerialize(null)).not.toBe(stableSerialize(undefined));
+    expect(stableSerialize([1, 2])).toBe("[1,2]");
+  });
+});
 
 describe("protocol contracts", () => {
   it("applies safe graph query defaults", () => {

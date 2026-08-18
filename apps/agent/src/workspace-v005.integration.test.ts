@@ -17,6 +17,7 @@ import {
   startAgentServer,
 } from "./server.js";
 import {
+  RecentWorkspaceNotFoundError,
   WorkspaceRuntimeManager,
   WorkspaceSessionChangedError,
   WorkspaceSwitchInProgressError,
@@ -90,6 +91,40 @@ describe("Constelix v0.0.5 workspace runtime", () => {
     await expect(runtime.assertHealthy()).rejects.toMatchObject({
       code: "WORKSPACE_LEASE_LOST",
     });
+  }, 20_000);
+
+  it("does not fail startup when the fire-and-forget Codex availability probe rejects", async () => {
+    const parent = await temporaryDirectory("constelix-v005-runtime-codex-");
+    const workspaceRoot = join(parent, "workspace");
+    const storageDirectory = join(parent, "state", "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    await writeFile(
+      join(workspaceRoot, "runtime.ts"),
+      "export const runtimeMarker = 'codex-probe';\n",
+    );
+
+    const runtime = await WorkspaceRuntime.create({
+      workspaceRoot,
+      readOnly: false,
+      storageDirectory,
+      databasePath: join(parent, "state", "workspace.sqlite"),
+      askOptions: { apiKey: "" },
+    });
+    try {
+      expect(runtime.codex).toBeDefined();
+      // start() fires `void this.codex.availability()` without awaiting it.
+      // If that call rejects and nothing catches it, Node treats it as an
+      // unhandled rejection, which crashes the whole agent process by
+      // default. Force a rejection and confirm start() still resolves.
+      vi.spyOn(runtime.codex!, "availability").mockRejectedValue(
+        new Error("simulated Codex availability failure"),
+      );
+
+      await expect(runtime.start()).resolves.toBeUndefined();
+      await waitUntil(() => runtime.indexer.status.phase === "ready");
+    } finally {
+      await runtime.close();
+    }
   }, 20_000);
 });
 
@@ -344,6 +379,152 @@ describe("Constelix v0.0.5 workspace runtime manager", () => {
       releaseCleanup.resolve();
       unsubscribe();
       closeSpy.mockRestore();
+      await manager.close();
+    }
+  }, 20_000);
+
+  it("re-opening the currently active workspace is a no-op: same runtime, same session, no notification", async () => {
+    const fixture = await createTwoWorkspaceFixture(
+      "constelix-v005-manager-noop-",
+    );
+    const firstWorkspaceId = createWorkspaceId(
+      await realpath(fixture.firstRoot),
+    );
+    const manager = await WorkspaceRuntimeManager.create({
+      workspaceRoot: fixture.firstRoot,
+      readOnly: true,
+      storageDirectory: join(fixture.stateRoot, firstWorkspaceId),
+      databasePath: join(fixture.stateRoot, `${firstWorkspaceId}.sqlite`),
+      globalDatabasePath: join(fixture.stateRoot, "global.sqlite"),
+      askOptions: { apiKey: "" },
+    });
+    const workspaceChangedEvents: unknown[] = [];
+    const unsubscribe = manager.globalEvents.subscribe((event) => {
+      if (event.type === "workspace.changed") {
+        workspaceChangedEvents.push(event);
+      }
+    });
+
+    try {
+      await waitUntil(() => manager.current.indexer.status.phase === "ready");
+      const first = manager.current;
+      const firstSession = first.session;
+
+      const reopened = await manager.open({
+        target: { kind: "path", path: fixture.firstRoot },
+        expectedSessionId: firstSession.id,
+      });
+
+      expect(reopened).toBe(first);
+      expect(manager.current).toBe(first);
+      expect(reopened.session.id).toBe(firstSession.id);
+      expect(workspaceChangedEvents).toEqual([]);
+      // The runtime never stopped serving requests, so a stale-looking
+      // capture against the (unchanged) session id must still succeed.
+      expect(manager.capture(firstSession.id)).toBe(first);
+    } finally {
+      unsubscribe();
+      await manager.close();
+    }
+  }, 20_000);
+
+  it("rejects opening a recent workspace id the catalog has never recorded, leaving the current runtime untouched", async () => {
+    const fixture = await createTwoWorkspaceFixture(
+      "constelix-v005-manager-unknown-recent-",
+    );
+    const firstWorkspaceId = createWorkspaceId(
+      await realpath(fixture.firstRoot),
+    );
+    const manager = await WorkspaceRuntimeManager.create({
+      workspaceRoot: fixture.firstRoot,
+      readOnly: true,
+      storageDirectory: join(fixture.stateRoot, firstWorkspaceId),
+      databasePath: join(fixture.stateRoot, `${firstWorkspaceId}.sqlite`),
+      globalDatabasePath: join(fixture.stateRoot, "global.sqlite"),
+      askOptions: { apiKey: "" },
+    });
+
+    try {
+      await waitUntil(() => manager.current.indexer.status.phase === "ready");
+      const current = manager.current;
+
+      await expect(
+        manager.open({
+          target: { kind: "recent", workspaceId: "never-seen-workspace-id" },
+          expectedSessionId: current.session.id,
+        }),
+      ).rejects.toThrow(RecentWorkspaceNotFoundError);
+      await expect(
+        manager.open({
+          target: { kind: "recent", workspaceId: "never-seen-workspace-id" },
+          expectedSessionId: current.session.id,
+        }),
+      ).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+
+      expect(manager.current).toBe(current);
+      await expect(manager.current.assertHealthy()).resolves.toBeUndefined();
+    } finally {
+      await manager.close();
+    }
+  }, 20_000);
+
+  it("rejects opening a workspace once the manager itself has been closed", async () => {
+    const fixture = await createTwoWorkspaceFixture(
+      "constelix-v005-manager-closed-",
+    );
+    const firstWorkspaceId = createWorkspaceId(
+      await realpath(fixture.firstRoot),
+    );
+    const manager = await WorkspaceRuntimeManager.create({
+      workspaceRoot: fixture.firstRoot,
+      readOnly: true,
+      storageDirectory: join(fixture.stateRoot, firstWorkspaceId),
+      databasePath: join(fixture.stateRoot, `${firstWorkspaceId}.sqlite`),
+      globalDatabasePath: join(fixture.stateRoot, "global.sqlite"),
+      askOptions: { apiKey: "" },
+    });
+    const sessionId = manager.current.session.id;
+    await manager.close();
+
+    await expect(
+      manager.open({
+        target: { kind: "path", path: fixture.secondRoot },
+        expectedSessionId: sessionId,
+      }),
+    ).rejects.toThrow("Workspace manager is closed.");
+  }, 20_000);
+
+  it("forwards dispatched client messages to whichever runtime is currently active", async () => {
+    const fixture = await createTwoWorkspaceFixture(
+      "constelix-v005-manager-dispatch-",
+    );
+    const firstWorkspaceId = createWorkspaceId(
+      await realpath(fixture.firstRoot),
+    );
+    const manager = await WorkspaceRuntimeManager.create({
+      workspaceRoot: fixture.firstRoot,
+      readOnly: true,
+      storageDirectory: join(fixture.stateRoot, firstWorkspaceId),
+      databasePath: join(fixture.stateRoot, `${firstWorkspaceId}.sqlite`),
+      globalDatabasePath: join(fixture.stateRoot, "global.sqlite"),
+      askOptions: { apiKey: "" },
+    });
+
+    try {
+      const dispatchSpy = vi.spyOn(
+        manager.current.events,
+        "dispatchClientMessage",
+      );
+      const message = {
+        protocolVersion: 1 as const,
+        type: "ask.cancel" as const,
+        turnId: "turn-under-test",
+      };
+
+      manager.dispatchClientMessage(message);
+
+      expect(dispatchSpy).toHaveBeenCalledWith(message);
+    } finally {
       await manager.close();
     }
   }, 20_000);

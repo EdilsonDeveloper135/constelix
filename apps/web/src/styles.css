@@ -55,13 +55,6 @@ button {
   border: 0;
 }
 
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
-}
-
 .app-shell {
   display: grid;
   grid-template: var(--topbar-height) minmax(0, 1fr) / var(--rail-width) minmax(0, 1fr);
@@ -346,7 +339,7 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.rail-item:hover:not(:disabled) {
+.rail-item:hover {
   color: #e5edef;
   background: #182225;
 }
@@ -354,12 +347,6 @@ textarea:focus-visible {
 .rail-item--active {
   color: var(--cyan);
   background: #153039;
-}
-
-.rail-item:disabled {
-  color: #6b7477;
-  cursor: not-allowed;
-  opacity: 0.68;
 }
 
 .rail-footer {
@@ -1808,6 +1795,42 @@ textarea:focus-visible {
   margin: 0 0 3px;
   font-size: 9px;
   line-height: 1.35;
+}
+
+.onboarding-error {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 9px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  color: #edf2f1;
+  background: #2a1616;
+}
+
+.onboarding-error svg {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+.onboarding-error p {
+  margin: 0 0 7px;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.onboarding-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  color: #ffd9d9;
+  background: transparent;
+  font-size: 9px;
+  cursor: pointer;
 }
 
 .onboarding-progress > div:first-child {

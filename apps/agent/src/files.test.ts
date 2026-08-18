@@ -15,7 +15,9 @@ import {
   FileTooLargeError,
   InvalidTextFileError,
   MAX_TEXT_FILE_BYTES,
+  NotAFileError,
   contentHash,
+  isOrphanedTemporaryFileName,
   readWorkspaceTextFile,
   writeWorkspaceTextFile,
 } from "./files.js";
@@ -112,6 +114,35 @@ describe("workspace text files", () => {
     ).rejects.toBeInstanceOf(WorkspaceReadOnlyError);
     await expect(readFile(join(root, "main.ts"), "utf8")).resolves.toBe(
       "export const before = true;\n",
+    );
+  });
+
+  it("recognizes only genuine atomic-write temporary filenames as orphaned", () => {
+    expect(
+      isOrphanedTemporaryFileName(
+        ".main.ts.constelix-12345-a1b2c3d4-e5f6-4789-a012-b3c4d5e6f789.tmp",
+      ),
+    ).toBe(true);
+    expect(
+      isOrphanedTemporaryFileName(
+        ".a.b.c.constelix-1-00000000-0000-4000-8000-000000000000.tmp",
+      ),
+    ).toBe(true);
+    expect(isOrphanedTemporaryFileName("main.ts")).toBe(false);
+    expect(isOrphanedTemporaryFileName("notes.tmp")).toBe(false);
+    expect(isOrphanedTemporaryFileName(".hidden-file")).toBe(false);
+    expect(
+      isOrphanedTemporaryFileName(".main.ts.constelix-notanumber-x.tmp"),
+    ).toBe(false);
+  });
+
+  it("rejects opening a directory as a text file with a typed, mappable error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-files-not-a-file-"));
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src", "main.ts"), "export const value = 1;\n");
+
+    await expect(readWorkspaceTextFile(root, "src")).rejects.toBeInstanceOf(
+      NotAFileError,
     );
   });
 

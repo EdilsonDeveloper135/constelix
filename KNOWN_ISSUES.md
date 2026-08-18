@@ -1,6 +1,6 @@
 # Errores y limitaciones conocidas
 
-Actualizado para `v0.0.8` el 2026-08-10.
+Actualizado para `v0.0.9` el 2026-08-17.
 
 ## KI-001 — Disponibilidad y compatibilidad del proveedor LLM
 
@@ -38,7 +38,7 @@ Actualizado para `v0.0.8` el 2026-08-10.
 ## KI-005 — Plataforma y terminal de solo lectura
 
 - Estado: limitación técnica aceptada.
-- Impacto: v0.0.8 soporta únicamente macOS; la terminal segura de Modo Lectura
+- Impacto: v0.0.9 soporta únicamente macOS; la terminal segura de Modo Lectura
   depende de `/usr/bin/sandbox-exec`.
 - Mitigación: Constelix falla cerrado con
   `READ_ONLY_TERMINAL_UNAVAILABLE` si ese mecanismo no existe. Otras
@@ -79,15 +79,25 @@ Actualizado para `v0.0.8` el 2026-08-10.
 
 ## KI-009 — Alcance y confianza de los servidores de lenguaje
 
-- Estado: limitación técnica y de seguridad aceptada.
-- Impacto: v0.0.8 ofrece LSP únicamente para TypeScript, JavaScript y Python.
+- Estado: limitación técnica y de seguridad aceptada; alcance ampliado con
+  renombrado de símbolos (`textDocument/rename`).
+- Impacto: v0.0.9 ofrece LSP únicamente para TypeScript, JavaScript y Python.
   `typescript-language-server` y Pyright se ejecutan como procesos del usuario
   local y analizan configuración y dependencias del workspace; no constituyen
-  una frontera frente a un repositorio hostil.
+  una frontera frente a un repositorio hostil. El renombrado solo aplica la
+  edición a los archivos que ya tienen un modelo de Monaco abierto en el
+  editor; el resto se reporta como omitido en vez de escribirse en disco sin
+  que el usuario lo abra y confirme el guardado. El alcance real entre
+  archivos de una misma operación de renombrado depende además de la
+  resolución de proyecto del propio servidor de lenguaje, no solo del puente
+  de Constelix.
 - Mitigación: usar LSP solo con repositorios confiables. El agente fija las
   implementaciones, fuerza la raíz, restringe métodos, sanea su entorno, media
-  URI, impone límites de mensajes y contrapresión, autentica el WebSocket y
-  termina cada proceso al cerrar o cambiar workspace.
+  URI —incluidas las claves de un `WorkspaceEdit.changes`, no solo los campos
+  `uri`—, impone límites de mensajes y contrapresión, autentica el WebSocket y
+  termina cada proceso al cerrar o cambiar workspace. `workspace/applyEdit`
+  iniciado por el servidor sigue rechazándose: toda escritura pasa por el
+  flujo normal de guardado con verificación de hash de contenido.
 
 ## KI-010 — Identidad de workspaces movidos y procesos durante el hot-swap
 
@@ -101,7 +111,7 @@ Actualizado para `v0.0.8` el 2026-08-10.
 
 ## Estado de pruebas
 
-La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
+La verificación de `v0.0.9` se ejecutó con Node.js 24 y pnpm 11:
 
 - instalación congelada, `git diff --check`, version check, typecheck, build y
   ausencia de source maps de producción: correctos;
@@ -120,7 +130,7 @@ La verificación de `v0.0.8` se ejecutó con Node.js 24 y pnpm 11:
   de los presupuestos de 90 s, 1 s y 100 ms;
 - smoke LSP: diagnósticos y hover reales correctos con los servidores
   TypeScript y Pyright incluidos;
-- smoke del paquete: tarball `constelix-agent-0.0.8.tgz` con licencia, README y
+- smoke del paquete: tarball `constelix-agent-0.0.9.tgz` con licencia, README y
   metadatos, instalado en un entorno temporal, ruta con espacios y dashboard
   servido correctamente;
 - el tarball no imprimió la capability y el build final no emitió advertencias

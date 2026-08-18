@@ -113,6 +113,10 @@ export function configureMonacoLsp(
         language,
         referenceProvider(monaco, language),
       ),
+      monaco.languages.registerRenameProvider(
+        language,
+        renameProvider(monaco, language),
+      ),
     );
   }
   providerDisposables.push(
@@ -274,6 +278,7 @@ export class JsonRpcLspConnection {
               hover: { contentFormat: ["markdown", "plaintext"] },
               definition: { linkSupport: true },
               references: {},
+              rename: { prepareSupport: false },
               publishDiagnostics: {
                 relatedInformation: true,
                 versionSupport: true,
@@ -553,6 +558,109 @@ function referenceProvider(
       return locationsFromResult(result).slice(0, 200).map(toMonacoLocation);
     },
   };
+}
+
+export function renameProvider(
+  monaco: typeof Monaco,
+  language: LspLanguage,
+): Monaco.languages.RenameProvider {
+  return {
+    async provideRenameEdits(model, position, newName, token) {
+      if (model.uri.scheme !== "constelix") {
+        return { edits: [], rejectReason: "Este archivo no admite renombrado." };
+      }
+      const result = await connectionFor(language).request(
+        "textDocument/rename",
+        {
+          textDocument: { uri: model.uri.toString() },
+          position: toLspPosition(position),
+          newName,
+        },
+        token,
+      ).catch(() => null);
+      const changes = workspaceEditChanges(result);
+      if (!changes) {
+        return {
+          edits: [],
+          rejectReason:
+            "El servidor de lenguaje no propuso cambios para este símbolo.",
+        };
+      }
+      const edits: Monaco.languages.IWorkspaceTextEdit[] = [];
+      let skippedFiles = 0;
+      for (const [uri, textEdits] of changes) {
+        if (!uri.startsWith("constelix://")) continue;
+        // Only files already open as an editor model get their in-memory
+        // content patched here; Constelix persists through the normal
+        // save/content-hash flow (EditorPanel's onChange -> draft dirty
+        // state), not by writing files the user never opened.
+        const targetModel = monaco.editor.getModel(monaco.Uri.parse(uri));
+        if (!targetModel) {
+          skippedFiles += 1;
+          continue;
+        }
+        for (const textEdit of textEdits) {
+          if (
+            !isRecord(textEdit) ||
+            !isLspRange(textEdit.range) ||
+            typeof textEdit.newText !== "string"
+          ) {
+            continue;
+          }
+          edits.push({
+            resource: targetModel.uri,
+            textEdit: {
+              range: toMonacoRange(textEdit.range),
+              text: textEdit.newText,
+            },
+            versionId: targetModel.getVersionId(),
+          });
+        }
+      }
+      if (skippedFiles > 0) {
+        // Surface this even on a partial success: applying only some of
+        // the edits and staying silent about the rest would leave the
+        // rename half-done (some usages renamed, others not) with no
+        // indication anything was incomplete.
+        const skipNotice = `El renombrado afecta a ${skippedFiles} archivo${skippedFiles === 1 ? "" : "s"} que no ${skippedFiles === 1 ? "está abierto" : "están abiertos"} en el editor. Ábre${skippedFiles === 1 ? "lo" : "los"} y vuelve a intentarlo.`;
+        if (edits.length === 0) return { edits: [], rejectReason: skipNotice };
+        return { edits, rejectReason: skipNotice };
+      }
+      if (edits.length === 0) {
+        return {
+          edits: [],
+          rejectReason:
+            "El servidor de lenguaje no propuso cambios para este símbolo.",
+        };
+      }
+      return { edits };
+    },
+  };
+}
+
+export function workspaceEditChanges(
+  value: unknown,
+): Array<[string, unknown[]]> | undefined {
+  if (!isRecord(value)) return undefined;
+  if (isRecord(value.changes)) {
+    return Object.entries(value.changes).flatMap(([uri, textEdits]) =>
+      Array.isArray(textEdits) ? [[uri, textEdits] as [string, unknown[]]] : [],
+    );
+  }
+  if (Array.isArray(value.documentChanges)) {
+    return value.documentChanges.flatMap((change) => {
+      if (
+        !isRecord(change) ||
+        !isRecord(change.textDocument) ||
+        typeof change.textDocument.uri !== "string" ||
+        !Array.isArray(change.edits)
+      ) {
+        return [];
+      }
+      return [[change.textDocument.uri, change.edits] as [string, unknown[]]];
+    });
+  }
+  return undefined;
 }
 
 function completionItem(

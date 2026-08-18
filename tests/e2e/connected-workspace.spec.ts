@@ -289,22 +289,27 @@ test.describe("workspace connected to the local agent", () => {
     await expect(
       menu.getByRole("menuitem", { name: "Inspeccionar nodo" }),
     ).toBeFocused();
+    // A directory node's menu is Inspeccionar, Explorar, Abrir terminal,
+    // Marcar como origen de ruta (in that order) — Shift+Tab from the first
+    // item wraps to the last one, which is the path-finding toggle.
     await page.keyboard.press("Shift+Tab");
     await expect(
-      menu.getByRole("menuitem", { name: "Abrir terminal aquí" }),
+      menu.getByRole("menuitem", { name: "Marcar como origen de ruta" }),
     ).toBeFocused();
-    await page.keyboard.press("Tab");
+    await page.keyboard.press("End");
+    await expect(
+      menu.getByRole("menuitem", { name: "Marcar como origen de ruta" }),
+    ).toBeFocused();
+    await page.keyboard.press("Home");
     await expect(
       menu.getByRole("menuitem", { name: "Inspeccionar nodo" }),
     ).toBeFocused();
     await page.waitForTimeout(150);
     expect(terminalCreates).toBe(0);
 
-    await page.keyboard.press("End");
     const openTerminalItem = menu.getByRole("menuitem", {
       name: "Abrir terminal aquí",
     });
-    await expect(openTerminalItem).toBeFocused();
     await openTerminalItem.click();
     await expect(menu).toHaveCount(0);
     await expect(page.locator('.app-shell[data-active-tool="terminal"]')).toBeVisible();
@@ -931,8 +936,13 @@ test.describe("workspace connected to the local agent", () => {
       expectedMode: "Edición",
     });
     await page.getByRole("button", { name: "Código", exact: true }).click();
+    // The file-tree button's accessible name is "Abrir index.ts" (plus an
+    // optional active/dirty suffix), not the bare filename, and a semantic
+    // node's own "open in editor" action can also contain "index.ts" as a
+    // substring — scope to the file explorer landmark to disambiguate.
     await page
-      .getByRole("button", { name: "index.ts", exact: true })
+      .getByRole("complementary", { name: "Explorador de archivos" })
+      .getByRole("button", { name: "index.ts" })
       .click();
     const editor = page.locator(".monaco-editor").first();
     await editor.click();
@@ -1080,7 +1090,7 @@ test.describe("workspace connected to the local agent", () => {
       status: "ambiguous",
       forceAllowed: true,
       pid: 4812,
-      agentVersion: "v0.0.8",
+      agentVersion: "v0.0.9",
       heartbeatAt: "2026-07-25T20:31:30.000Z",
     };
     await page.route("**/api/v1/workspaces", async (route) => {
@@ -1143,7 +1153,7 @@ test.describe("workspace connected to the local agent", () => {
     await expect(lockAlert).toBeFocused();
     await expect(lockAlert).toContainText("PID");
     await expect(lockAlert).toContainText("4812");
-    await expect(lockAlert).toContainText("v0.0.8");
+    await expect(lockAlert).toContainText("v0.0.9");
     const forceButton = lockAlert.getByRole("button", {
       name: "Forzar liberación",
     });
@@ -1204,7 +1214,10 @@ test.describe("workspace connected to the local agent", () => {
       }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Código", exact: true }).click();
-    await page.getByRole("button", { name: "index.ts", exact: true }).click();
+    await page
+      .getByRole("complementary", { name: "Explorador de archivos" })
+      .getByRole("button", { name: "index.ts" })
+      .click();
     await expect(page.getByRole("button", { name: "Guardar archivo" })).toBeDisabled();
     await expect(page.locator(".monaco-editor textarea").first()).not.toBeEditable();
 
@@ -1436,7 +1449,14 @@ async function openConnectedWorkspace(
   const onboarding = page.getByRole("dialog", {
     name: options.expectedName,
   });
-  await expect(onboarding).toBeVisible();
+  // This is the one assertion in the whole suite waiting on a cold page
+  // load plus a real bootstrap() round trip, not just an in-page state
+  // change, so it is the most sensitive to host load — a loaded machine
+  // running the full dual-browser suite can occasionally exceed the
+  // default 5s here even though nothing is actually hung. Every other
+  // assertion in this helper checks content inside an already-visible
+  // dialog and keeps the default timeout.
+  await expect(onboarding).toBeVisible({ timeout: 15_000 });
   await expect(onboarding.getByText("Archivos detectados")).toBeVisible();
   await expect(onboarding.getByText("Lenguajes")).toBeVisible();
   await expect(onboarding.getByText("Tipo de proyecto")).toBeVisible();

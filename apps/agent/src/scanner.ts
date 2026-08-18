@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { opendir, stat } from "node:fs/promises";
+import { opendir, stat, unlink } from "node:fs/promises";
 import { posix, relative, sep } from "node:path";
 import createIgnore, { type Ignore } from "ignore";
 import type { TypeScriptResolutionOptions } from "@constelix/analyzers";
@@ -15,6 +15,7 @@ import {
   FileTooLargeError,
   InvalidTextFileError,
   decodeUtf8Text,
+  isOrphanedTemporaryFileName,
   readBoundedWorkspaceFile,
 } from "./files.js";
 import {
@@ -89,10 +90,19 @@ export interface ScanProgress {
 export interface ScanWorkspaceOptions {
   maxFiles?: number;
   maxEntries?: number;
+  maxDirectoryEntries?: number;
   maxBytes?: number;
   maxTotalBytes?: number;
   progressEveryFiles?: number;
   onProgress?: (progress: ScanProgress) => void;
+  /**
+   * Opportunistically removes atomic-write temporary files left behind by
+   * a process that died mid-write (see isOrphanedTemporaryFileName).
+   * Intended for the one cold-start scan of a workspace only: enabling it
+   * on a scan that can overlap live editor writes risks deleting a
+   * legitimate in-flight temporary file.
+   */
+  sweepOrphanedTempFiles?: boolean;
 }
 
 export async function buildIgnoreMatcher(
@@ -204,6 +214,10 @@ export async function scanWorkspace(
     Math.max(Math.trunc(options.maxEntries ?? MAX_WORKSPACE_ENTRIES), 1),
     MAX_WORKSPACE_ENTRIES,
   );
+  const maxDirectoryEntries = Math.min(
+    Math.max(Math.trunc(options.maxDirectoryEntries ?? MAX_DIRECTORY_ENTRIES), 1),
+    MAX_DIRECTORY_ENTRIES,
+  );
   const maxBytes = Math.min(Math.max(options.maxBytes ?? MAX_SOURCE_BYTES, 1), MAX_SOURCE_BYTES);
   const maxTotalBytes = Math.min(
     Math.max(options.maxTotalBytes ?? MAX_WORKSPACE_SOURCE_BYTES, 1),
@@ -274,20 +288,32 @@ export async function scanWorkspace(
     const directory = await opendir(canonicalDirectory);
     const entries: Dirent[] = [];
     for await (const entry of directory) {
-      if (
-        entriesVisited >= maxEntries ||
-        entries.length >= MAX_DIRECTORY_ENTRIES
-      ) {
+      if (entriesVisited >= maxEntries) {
+        // A global, workspace-wide budget: once exhausted, every remaining
+        // directory anywhere in the tree is intentionally left unvisited.
         entryLimitReached = true;
-        // Directory iteration order is filesystem-dependent. Discard the
-        // partial directory instead of indexing a nondeterministic subset.
         entries.length = 0;
         result.skipped += 1;
         result.truncated = true;
         addDiagnosticOnce(
           "WORKSPACE_ENTRY_LIMIT",
           relativeDirectory || ".",
-          `Workspace traversal is limited to ${maxEntries} filesystem entries and ${MAX_DIRECTORY_ENTRIES} entries per directory.`,
+          `Workspace traversal is limited to ${maxEntries} filesystem entries.`,
+        );
+        break;
+      }
+      if (entries.length >= maxDirectoryEntries) {
+        // A per-directory budget. Directory iteration order is
+        // filesystem-dependent, so discard the partial directory instead of
+        // indexing a nondeterministic subset — but this must stay scoped to
+        // this directory and must not stop sibling or later directories
+        // elsewhere in the workspace from being scanned.
+        entries.length = 0;
+        result.skipped += 1;
+        result.truncated = true;
+        addDiagnostic(
+          relativeDirectory || ".",
+          `Directory exceeds the ${maxDirectoryEntries}-entry-per-directory limit and was skipped.`,
         );
         break;
       }
@@ -305,6 +331,17 @@ export async function scanWorkspace(
       if (isSecretPath(relativePath)) {
         result.skipped += 1;
         recordOmission(relativePath, "secret");
+        continue;
+      }
+      if (
+        options.sweepOrphanedTempFiles &&
+        entry.isFile() &&
+        isOrphanedTemporaryFileName(entry.name)
+      ) {
+        await unlink(await resolveExistingWorkspacePath(workspace, relativePath)).catch(
+          () => undefined,
+        );
+        result.skipped += 1;
         continue;
       }
 

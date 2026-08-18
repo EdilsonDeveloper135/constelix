@@ -6,7 +6,6 @@ import {
   FolderOpen,
   RefreshCcw,
   Save,
-  SplitSquareVertical,
   Upload,
 } from "lucide-react";
 import {
@@ -209,6 +208,10 @@ export const EditorPanel = memo(function EditorPanel({
   const [lspStatus, setLspStatus] =
     useState<LspDocumentStatus>("connecting");
   const [diagnosticCount, setDiagnosticCount] = useState(0);
+  const [cursorPosition, setCursorPosition] = useState({
+    lineNumber: 1,
+    column: 1,
+  });
   const lspDocumentRef = useRef<MonacoLspDocument | null>(null);
   const pathRef = useRef(data.relativePath);
   const saveRef = useRef<() => Promise<void>>(async () => undefined);
@@ -521,9 +524,6 @@ export const EditorPanel = memo(function EditorPanel({
           >
             <Save aria-hidden="true" size={13} />
           </button>
-          <button type="button" aria-label="Dividir editor">
-            <SplitSquareVertical aria-hidden="true" size={13} />
-          </button>
         </>
       }
     >
@@ -578,6 +578,11 @@ export const EditorPanel = memo(function EditorPanel({
               }
               type="button"
               style={{ paddingInlineStart: 8 + item.depth * 12 }}
+              aria-label={
+                item.type === "folder"
+                  ? `${item.open ? "Colapsar" : "Expandir"} carpeta ${item.name}`
+                  : `Abrir ${item.name}${item.active ? " (archivo activo)" : ""}${item.dirty ? ", cambios sin guardar" : ""}`
+              }
               onClick={() =>
                 item.type === "file" && item.relativePath
                   ? openFile(item.relativePath)
@@ -605,7 +610,7 @@ export const EditorPanel = memo(function EditorPanel({
               )}
               <span>{item.name}</span>
               {item.dirty ? (
-                <span className="file-tree-dirty" aria-label="Borrador sin guardar">
+                <span className="file-tree-dirty" aria-hidden="true">
                   •
                 </span>
               ) : null}
@@ -694,9 +699,21 @@ export const EditorPanel = memo(function EditorPanel({
                   });
                   editor.revealLineInCenter(data.revealLine);
                 }
+                const position = editor.getPosition();
+                setCursorPosition({
+                  lineNumber: position?.lineNumber ?? 1,
+                  column: position?.column ?? 1,
+                });
+                editor.onDidChangeCursorPosition((event) => {
+                  setCursorPosition({
+                    lineNumber: event.position.lineNumber,
+                    column: event.position.column,
+                  });
+                });
               }}
               options={{
                 automaticLayout: true,
+                ariaLabel: `Editor de código: ${data.relativePath}`,
                 fontFamily:
                   "SFMono-Regular, Menlo, Monaco, Consolas, monospace",
                 fontSize: 12,
@@ -726,7 +743,7 @@ export const EditorPanel = memo(function EditorPanel({
         </div>
       </div>
       <footer className="editor-statusbar">
-        <span>Ln 1, Col 1</span>
+        <span>{`Ln ${cursorPosition.lineNumber}, Col ${cursorPosition.column}`}</span>
         <span>Espacios: 2</span>
         <span>UTF-8</span>
         <span>LF</span>

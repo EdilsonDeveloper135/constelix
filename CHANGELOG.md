@@ -1,5 +1,72 @@
 # Changelog
 
+## [v0.0.9] - 2026-08-17
+
+### Added
+
+- Renombrado de símbolos vía LSP (`textDocument/rename`) para TypeScript,
+  JavaScript y Python, integrado con el proveedor de renombrado de Monaco.
+- Rutas REST `POST /api/v1/graph/neighbors` y `POST /api/v1/graph/path` sobre
+  el motor de grafo existente, con una afordancia de "marcar origen y buscar
+  ruta" en el menú contextual de nodos semánticos.
+- Infraestructura de pruebas de componentes en `apps/web`: Testing Library,
+  entorno jsdom por proyecto Vitest, patrón reutilizable de mocks para
+  Monaco/xterm y el hook compartido `useFocusTrap`, aplicado a Configuración,
+  Ayuda y el onboarding del workspace.
+- Cobertura ampliada de componentes, hooks y del ciclo de vida del gestor de
+  workspaces (hot-swap, sesión cerrada, reapertura del mismo workspace,
+  workspace reciente inexistente).
+
+### Changed
+
+- `useWorkspaceStore` separa el campo de la pregunta de Preguntar del
+  objetivo de Actuar; ya no se filtra texto sin enviar entre ambos modos.
+- El auto-encuadre inicial del canvas también se aplica en viewport de
+  escritorio, no solo en el compacto.
+- `stableId`/`stableSerialize` se consolidan en `@constelix/contracts` como
+  fuente única; se eliminan las implementaciones duplicadas en graph-core y en
+  los IDs de analyzers.
+- `server.ts` factoriza el guard de solo lectura y la validación de
+  coincidencia entre id de cuerpo y de URL, repetidos en varias rutas, en
+  helpers compartidos.
+- Los umbrales de cobertura de Vitest se elevan conforme a la cobertura real
+  alcanzada tras ampliar las pruebas.
+
+### Fixed
+
+- El límite de entradas por directorio del scanner ya no aborta el resto del
+  workspace; omite únicamente el directorio que lo excede y sigue recorriendo
+  el resto.
+- El `WorkspaceEdit` de un renombrado LSP ya no filtra rutas de archivo
+  absolutas ni deja claves `file://` sin traducir en `changes`; el renombrado
+  solo aplica ediciones a archivos con un modelo de Monaco ya abierto y avisa
+  de forma explícita sobre los que quedaron fuera.
+- La sesión de terminal ya no se crea dos veces bajo la doble invocación de
+  Strict Mode de React, ni se descarta la sesión recién creada por una
+  limpieza fantasma del mismo efecto.
+- El socket de eventos se adjunta solo después de confirmar la salud del
+  workspace, no antes.
+- Una sesión de Codex realmente en cuarentena finaliza la tarea en estado
+  terminal en lugar de dejar Actuar bloqueado indefinidamente.
+- Preguntar cae a búsqueda local ante `ASK_CONTEXT_EXHAUSTED` y aplica el
+  mismo timeout al modo local que al proveedor remoto.
+- El onboarding del workspace atrapa el foco, admite Escape y expone un
+  estado de error con reintento cuando el bootstrap no puede validarse.
+- El aviso de "Búsqueda local activa" ya no se recorta contra la cabecera de
+  Conversación en viewport compacto.
+- Los ~12 controles del explorador de archivos del editor exponen nombres
+  accesibles con tipo, carpeta/archivo, estado activo y cambios sin guardar;
+  la barra de estado de Monaco refleja la posición real del cursor en lugar
+  de un valor fijo.
+- Archivos de escritura de Codex en cuarentena, terminales concurrentes sin
+  límite y errores de archivo sin tipar ya no llegan como error genérico 500
+  al cliente.
+
+### Known issues
+
+- Se conservan las limitaciones descritas en `KNOWN_ISSUES.md`; KI-009 se
+  actualiza para reflejar el alcance real del nuevo renombrado LSP.
+
 ## [v0.0.8] - 2026-08-10
 
 ### Added

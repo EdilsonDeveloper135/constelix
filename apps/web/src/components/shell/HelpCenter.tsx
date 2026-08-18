@@ -9,21 +9,11 @@ import {
   SquareTerminal,
   X,
 } from "lucide-react";
-import {
-  memo,
-  useEffect,
-  useRef,
-  type KeyboardEvent,
-} from "react";
+import { memo, useRef } from "react";
 
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { useShellStore } from "../../store/useShellStore";
 import { useWorkspaceStore } from "../../store/useWorkspaceStore";
-
-const focusableSelector = [
-  "button:not([disabled])",
-  "a[href]",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
 
 export const HelpCenter = memo(function HelpCenter() {
   const open = useShellStore((state) => state.helpOpen);
@@ -33,52 +23,20 @@ export const HelpCenter = memo(function HelpCenter() {
   const askMode = useWorkspaceStore((state) => state.askMode);
   const actAvailable = useWorkspaceStore((state) => state.actAvailable);
   const workspaceMode = useWorkspaceStore((state) => state.workspaceMode);
-  const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    returnFocusRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    const frame = window.requestAnimationFrame(() => closeRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [open]);
+  const close = () => setOpen(false);
+  const { containerRef: dialogRef, onKeyDown: handleKeyDown, returnFocusRef } =
+    useFocusTrap<HTMLElement>({
+      open,
+      onClose: close,
+      initialFocusRef: closeRef,
+    });
 
   if (!open) return null;
 
-  const close = () => {
-    setOpen(false);
-    const returnFocus = returnFocusRef.current;
-    returnFocusRef.current = null;
-    window.requestAnimationFrame(() => returnFocus?.focus());
-  };
   const activate = (tool: "map" | "files" | "terminal" | "ai") => {
     setActiveTool(tool);
     close();
-  };
-  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = Array.from(
-      dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [],
-    );
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    if (!first || !last) return;
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   };
 
   return (

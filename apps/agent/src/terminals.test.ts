@@ -5,8 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { EventBus } from "./events.js";
 import { inspectWorkspace } from "./security.js";
 import {
+  MAX_TERMINAL_SESSIONS,
   ReadOnlyTerminalUnavailableError,
   TerminalManager,
+  TerminalSessionLimitError,
   createTerminalLaunchCommand,
   toTerminalSessionCwd,
 } from "./terminals.js";
@@ -109,6 +111,35 @@ describe("terminal launch policy", () => {
       "terminal.created",
       expect.objectContaining({ cwd: "apps/agent" }),
     );
+    manager.close();
+  });
+
+  it("rejects a new terminal once the concurrent session limit is reached", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-terminal-limit-"));
+    const workspace = await inspectWorkspace(root);
+    const events = {
+      onClientMessage: vi.fn(() => () => undefined),
+      publish: vi.fn(),
+    } as unknown as EventBus;
+    const manager = new TerminalManager(workspace, events);
+
+    for (let index = 0; index < MAX_TERMINAL_SESSIONS; index += 1) {
+      await manager.create({ shell: "/bin/zsh" });
+    }
+    expect(manager.list()).toHaveLength(MAX_TERMINAL_SESSIONS);
+
+    await expect(manager.create({ shell: "/bin/zsh" })).rejects.toBeInstanceOf(
+      TerminalSessionLimitError,
+    );
+    expect(manager.list()).toHaveLength(MAX_TERMINAL_SESSIONS);
+
+    // Closing one session frees a slot for the next terminal.
+    const [freed] = manager.list();
+    manager.remove(freed!.id);
+    await expect(
+      manager.create({ shell: "/bin/zsh" }),
+    ).resolves.toMatchObject({ status: "running" });
+
     manager.close();
   });
 });

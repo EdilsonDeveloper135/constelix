@@ -16,7 +16,6 @@ interface RailItem {
   id: RailTool;
   label: string;
   icon: ComponentType<{ size?: number; "aria-hidden"?: boolean }>;
-  disabled?: boolean;
 }
 
 const tools: RailItem[] = [
@@ -42,11 +41,10 @@ export const Rail = memo(function Rail() {
             <button
               key={item.id}
               className={`rail-item with-tooltip${selected ? " rail-item--active" : ""}`}
-              data-tooltip={item.disabled ? `${item.label} (Próximamente)` : item.label}
+              data-tooltip={item.label}
               type="button"
               aria-current={selected ? "page" : undefined}
-              aria-label={item.disabled ? `${item.label}, disponible próximamente` : item.label}
-              disabled={item.disabled}
+              aria-label={item.label}
               onClick={() => setActiveTool(item.id)}
             >
               <Icon aria-hidden={true} size={20} />

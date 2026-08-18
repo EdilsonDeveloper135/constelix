@@ -151,6 +151,7 @@ const ALLOWED_CLIENT_LSP_METHODS = new Set([
   "textDocument/didOpen",
   "textDocument/hover",
   "textDocument/references",
+  "textDocument/rename",
 ]);
 const EXTERNAL_URI = Symbol("external-lsp-uri");
 
@@ -903,6 +904,18 @@ function mapValue(
     if (key === "__proto__" || key === "constructor" || key === "prototype") {
       continue;
     }
+    // A WorkspaceEdit's `changes` map keys URIs directly (as object keys,
+    // not as a `uri`-named field), so the generic value-walk below never
+    // sees them. Map the key through the same translator used for every
+    // other URI (passing the "uri" property name so an unresolvable
+    // external file is dropped via EXTERNAL_URI instead of falling through
+    // to the string placeholder used for non-URI-property values) or the
+    // response leaks raw filesystem paths and the client ends up with
+    // edits addressed to file:// URIs it can't match to its own
+    // constelix:// documents.
+    const mappedKey =
+      property === "changes" ? mapString(key, "uri") : key;
+    if (mappedKey === EXTERNAL_URI) continue;
     const mapped = mapValue(item, key, mapString, filterExternal);
     if (mapped === EXTERNAL_URI) {
       if (URI_PROPERTY_NAMES.has(key)) return EXTERNAL_URI;
@@ -913,7 +926,7 @@ function mapValue(
       if (key === "params" && filterExternal) return EXTERNAL_URI;
       continue;
     }
-    output[key] = mapped;
+    output[mappedKey] = mapped;
   }
   return output;
 }

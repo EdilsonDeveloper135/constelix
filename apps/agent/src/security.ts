@@ -166,10 +166,6 @@ export async function inspectWorkspace(
   };
 }
 
-export async function canonicalizeWorkspace(inputPath: string): Promise<string> {
-  return (await inspectWorkspace(inputPath)).canonicalRoot;
-}
-
 export function createWorkspaceId(canonicalRoot: string): string {
   return createHash("sha256").update(canonicalRoot).digest("hex").slice(0, 24);
 }

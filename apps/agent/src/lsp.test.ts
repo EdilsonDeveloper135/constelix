@@ -263,6 +263,51 @@ describe("LSP URI mapping", () => {
     });
     expect(JSON.stringify(mapped)).not.toContain(outside);
   });
+
+  it("rewrites the URI keys of a rename WorkspaceEdit's changes map, and drops external ones", async () => {
+    const root = await temporaryDirectory("constelix-lsp-rename-");
+    const outside = await temporaryDirectory("constelix-lsp-rename-outside-");
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(join(root, "main.ts"), "export const main = true;\n");
+    await writeFile(join(root, "src", "helper.ts"), "export const helper = 1;\n");
+    await writeFile(join(outside, "lib.d.ts"), "declare const external: 1;\n");
+    const mapper = new LspUriMapper(root, "workspace-id");
+
+    const mapped = mapper.mapServerMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        changes: {
+          [pathToFileURL(join(root, "main.ts")).href]: [
+            { range: range(), newText: "renamed" },
+          ],
+          [pathToFileURL(join(root, "src", "helper.ts")).href]: [
+            { range: range(), newText: "renamed" },
+          ],
+          [pathToFileURL(join(outside, "lib.d.ts")).href]: [
+            { range: range(), newText: "renamed" },
+          ],
+        },
+      },
+    });
+
+    expect(mapped).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        changes: {
+          "constelix://workspace-id/main.ts": [
+            { range: range(), newText: "renamed" },
+          ],
+          "constelix://workspace-id/src/helper.ts": [
+            { range: range(), newText: "renamed" },
+          ],
+        },
+      },
+    });
+    expect(JSON.stringify(mapped)).not.toContain(outside);
+    expect(JSON.stringify(mapped)).not.toContain(root);
+  });
 });
 
 describe("LspManager", () => {

@@ -359,14 +359,16 @@
   }
 
   .ask-question-column {
+    flex: 0 1 auto;
     min-height: 210px;
-    flex: 0 0 42%;
+    max-height: 60%;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
 
   .ask-answer-column {
     flex: 1;
+    min-height: 120px;
   }
 
   .act-layout {

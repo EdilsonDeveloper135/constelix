@@ -26,6 +26,8 @@ export const AssistantPanel = memo(function AssistantPanel({
   const setMode = useWorkspaceStore((state) => state.setAssistantMode);
   const question = useWorkspaceStore((state) => state.question);
   const setQuestion = useWorkspaceStore((state) => state.setQuestion);
+  const actObjective = useWorkspaceStore((state) => state.actObjective);
+  const setActObjective = useWorkspaceStore((state) => state.setActObjective);
   const answer = useWorkspaceStore((state) => state.answer);
   const conversation = useWorkspaceStore((state) => state.conversation);
   const error = useWorkspaceStore((state) => state.assistantError);
@@ -374,15 +376,15 @@ export const AssistantPanel = memo(function AssistantPanel({
                 Objetivo del turno
                 <textarea
                   id="constelix-act-objective"
-                  value={question}
+                  value={actObjective}
                   disabled={!workspaceReady}
-                  onChange={(event) => setQuestion(event.target.value)}
+                  onChange={(event) => setActObjective(event.target.value)}
                   placeholder="Describe una tarea concreta para Codex…"
                 />
               </label>
               <p className="act-scope-root"><strong>Raíz protegida:</strong> <code>{rootPath}</code></p>
               {error ? <p className="assistant-error" role="alert">{error}</p> : null}
-              <button className="act-primary" type="button" disabled={!workspaceReady || !question.trim()} onClick={() => void createActTask()}>Preparar tarea</button>
+              <button className="act-primary" type="button" disabled={!workspaceReady || !actObjective.trim()} onClick={() => void createActTask()}>Preparar tarea</button>
             </>
           ) : actTask.status === "awaitingApproval" ? (
             <div className="approval-card">

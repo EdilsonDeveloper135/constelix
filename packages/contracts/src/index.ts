@@ -1,11 +1,53 @@
 import { z } from "zod";
 
-export const CONSTELIX_VERSION = "0.0.8" as const;
+export const CONSTELIX_VERSION = "0.0.9" as const;
 export const CONSTELIX_RELEASE = `v${CONSTELIX_VERSION}` as const;
 export const PROTOCOL_VERSION = 1 as const;
 export const ProtocolVersionSchema = z.literal(PROTOCOL_VERSION);
 export const WorkspaceIdSchema = z.string().regex(/^[a-f0-9]{24}$/);
 export const WorkspaceAccessModeSchema = z.enum(["read", "edit"]);
+
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME = 0x100000001b3n;
+const UINT64_MASK = 0xffffffffffffffffn;
+
+/**
+ * Deterministic, platform-independent ID suitable for persisted graph
+ * entities. The single shared implementation behind graph-core's node/edge
+ * IDs and the analyzers' extraction IDs — keep it here, not duplicated in
+ * each package, so the two can never silently drift apart.
+ */
+export function stableId(namespace: string, ...parts: readonly string[]): string {
+  const canonical = parts
+    .map((part) => {
+      const value = part.normalize("NFC").replaceAll("\\", "/");
+      return `${new TextEncoder().encode(value).byteLength}:${value}`;
+    })
+    .join("|");
+  let hash = FNV_OFFSET;
+  for (const byte of new TextEncoder().encode(canonical)) {
+    hash ^= BigInt(byte);
+    hash = (hash * FNV_PRIME) & UINT64_MASK;
+  }
+  const prefix = namespace.toLowerCase().replace(/[^a-z0-9_-]+/g, "_") || "id";
+  return `${prefix}_${hash.toString(16).padStart(16, "0")}`;
+}
+
+/**
+ * Deterministic JSON-like serialization with sorted object keys, so two
+ * structurally equal values always serialize identically regardless of key
+ * insertion order. Shared by graph-core's snapshot diffing and the agent's
+ * incremental-index diffing.
+ */
+export function stableSerialize(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`);
+  return `{${entries.join(",")}}`;
+}
 
 export const SourcePositionSchema = z.object({
   line: z.number().int().nonnegative(),
@@ -291,6 +333,31 @@ export const GraphQuerySchema = z.object({
   cursor: z.string().optional()
 });
 
+export const GraphNeighborsRequestSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  nodeId: z.string().min(1),
+  direction: GraphDirectionSchema.default("both"),
+  relations: z.array(GraphRelationSchema).default([]),
+  kinds: z.array(GraphNodeKindSchema).default([]),
+  depth: z.number().int().min(1).max(4).default(1),
+  limit: z.number().int().min(1).max(500).default(100)
+});
+
+export const GraphNeighborsResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  nodes: z.array(GraphNodeSchema),
+  edges: z.array(GraphEdgeSchema)
+});
+
+export const GraphPathRequestSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  source: z.string().min(1),
+  target: z.string().min(1),
+  direction: GraphDirectionSchema.default("both"),
+  relations: z.array(GraphRelationSchema).default([]),
+  maxDepth: z.number().int().min(1).max(24).default(12)
+});
+
 export const PanelKindSchema = z.enum(["editor", "terminal", "ask", "act", "inspector", "index"]);
 export const PanelDockSchema = z.enum(["floating", "right", "bottom"]);
 
@@ -374,6 +441,11 @@ export const EvidencePathSchema = z.object({
       path: ["edgeIds"]
     });
   }
+});
+
+export const GraphPathResponseSchema = z.object({
+  protocolVersion: ProtocolVersionSchema,
+  path: EvidencePathSchema.nullable()
 });
 
 export const AskToolNameSchema = z.enum([
@@ -749,6 +821,10 @@ export type GraphSnapshot = z.infer<typeof GraphSnapshotSchema>;
 export type GraphDelta = z.infer<typeof GraphDeltaSchema>;
 export type GraphDirection = z.infer<typeof GraphDirectionSchema>;
 export type GraphQuery = z.infer<typeof GraphQuerySchema>;
+export type GraphNeighborsRequest = z.infer<typeof GraphNeighborsRequestSchema>;
+export type GraphNeighborsResponse = z.infer<typeof GraphNeighborsResponseSchema>;
+export type GraphPathRequest = z.infer<typeof GraphPathRequestSchema>;
+export type GraphPathResponse = z.infer<typeof GraphPathResponseSchema>;
 export type PanelKind = z.infer<typeof PanelKindSchema>;
 export type PanelDock = z.infer<typeof PanelDockSchema>;
 export type PanelState = z.infer<typeof PanelStateSchema>;

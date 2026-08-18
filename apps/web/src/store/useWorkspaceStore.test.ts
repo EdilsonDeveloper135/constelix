@@ -29,6 +29,7 @@ const apiMock = vi.hoisted(() => ({
   queryGraph: vi.fn(),
   queryGraphPage: vi.fn(),
   queryEvidenceGraph: vi.fn(),
+  findPath: vi.fn(),
   deleteTerminal: vi.fn(),
   saveLayout: vi.fn(),
   ask: vi.fn(),
@@ -724,6 +725,32 @@ describe("workspace bootstrap reconciliation", () => {
     expect(useWorkspaceStore.getState().actTask?.status).toBe("cancelled");
   });
 
+  it("keeps an unsent Ask question from leaking into the Act objective, and vice versa", async () => {
+    useWorkspaceStore.setState({
+      remoteHydrated: true,
+      demoMode: false,
+      connection: "connected",
+      workspaceMode: "edit",
+      actAvailable: true,
+    });
+
+    useWorkspaceStore.getState().setQuestion("Unsent question about auth.ts");
+    expect(useWorkspaceStore.getState().actObjective).toBe("");
+
+    useWorkspaceStore.getState().setActObjective("Refactor the parser");
+    expect(useWorkspaceStore.getState().question).toBe(
+      "Unsent question about auth.ts",
+    );
+
+    await useWorkspaceStore.getState().createActTask();
+    expect(apiMock.createActTask).toHaveBeenCalledWith("Refactor the parser");
+    // The Ask question — which Act must never submit as its objective —
+    // is still exactly what the user typed, untouched by Act.
+    expect(useWorkspaceStore.getState().question).toBe(
+      "Unsent question about auth.ts",
+    );
+  });
+
   it("docks an existing terminal without recreating its server PTY", () => {
     const runtime = {
       terminalId: "terminal-existing",
@@ -809,6 +836,92 @@ describe("workspace bootstrap reconciliation", () => {
     );
   });
 
+});
+
+describe("graph path-finding", () => {
+  function seedPathNodes() {
+    useWorkspaceStore.setState({
+      demoMode: false,
+      nodes: [
+        ...useWorkspaceStore.getState().nodes,
+        semanticNode("node-a"),
+        semanticNode("node-b"),
+      ],
+      edges: [
+        ...useWorkspaceStore.getState().edges,
+        {
+          id: "edge-a-b",
+          type: "graphEdge",
+          source: "node-a",
+          target: "node-b",
+          data: { relation: "imports", confidence: "extracted" },
+        },
+      ],
+    });
+  }
+
+  it("does nothing when no source has been marked", async () => {
+    useWorkspaceStore.setState({ pathFindingSourceId: null });
+    await useWorkspaceStore.getState().findPathTo("node-b");
+    expect(apiMock.findPath).not.toHaveBeenCalled();
+  });
+
+  it("does not call the backend in demo mode, but still clears the marked source", async () => {
+    useWorkspaceStore.setState({ demoMode: true, pathFindingSourceId: "node-a" });
+    await useWorkspaceStore.getState().findPathTo("node-b");
+    expect(apiMock.findPath).not.toHaveBeenCalled();
+    expect(useWorkspaceStore.getState().pathFindingSourceId).toBeNull();
+  });
+
+  it("queries the backend, plays the returned path, and clears the marked source", async () => {
+    seedPathNodes();
+    useWorkspaceStore.setState({ pathFindingSourceId: "node-a" });
+    const foundPath = {
+      protocolVersion: 1 as const,
+      nodeIds: ["node-a", "node-b"],
+      edgeIds: ["edge-a-b"],
+      evidence: [],
+      complete: true,
+    };
+    apiMock.findPath.mockResolvedValue(foundPath);
+
+    await useWorkspaceStore.getState().findPathTo("node-b");
+
+    expect(apiMock.findPath).toHaveBeenCalledWith("node-a", "node-b");
+    expect(useWorkspaceStore.getState().pathFindingSourceId).toBeNull();
+    expect(useWorkspaceStore.getState().evidencePath).toEqual(foundPath);
+  });
+
+  it("surfaces a warning notice when the backend reports no path", async () => {
+    seedPathNodes();
+    useWorkspaceStore.setState({ pathFindingSourceId: "node-a", notices: [] });
+    apiMock.findPath.mockResolvedValue(null);
+
+    await useWorkspaceStore.getState().findPathTo("node-b");
+
+    const notices = useWorkspaceStore.getState().notices;
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      code: "GRAPH_PATH_NOT_FOUND",
+      severity: "warning",
+    });
+  });
+
+  it("surfaces an error notice when the path lookup itself fails", async () => {
+    seedPathNodes();
+    useWorkspaceStore.setState({ pathFindingSourceId: "node-a", notices: [] });
+    apiMock.findPath.mockRejectedValue(new Error("network unreachable"));
+
+    await useWorkspaceStore.getState().findPathTo("node-b");
+
+    const notices = useWorkspaceStore.getState().notices;
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      code: "GRAPH_PATH_ERROR",
+      severity: "error",
+      message: "network unreachable",
+    });
+  });
 });
 
 function bootstrapPayload(options: {

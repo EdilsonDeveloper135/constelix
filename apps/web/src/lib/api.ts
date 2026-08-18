@@ -3,6 +3,8 @@ import {
   EvidencePathSchema,
   FileReadResponseSchema,
   FileWriteResponseSchema,
+  GraphNeighborsResponseSchema,
+  GraphPathResponseSchema,
   GraphSnapshotSchema,
   LlmConnectionTestResponseSchema,
   LlmPublicConfigurationSchema,
@@ -22,8 +24,12 @@ import {
   type ActTask as ContractActTask,
   type ActTaskRequest,
   type AskTurnRequest,
+  type EvidencePath,
   type FileReadRequest,
   type FileWriteRequest,
+  type GraphDirection,
+  type GraphNodeKind,
+  type GraphRelation,
   type GraphSnapshot,
   type LlmConfigurationUpdate,
   type LlmConnectionTestResponse,
@@ -293,6 +299,43 @@ export class ConstelixApiClient {
       }),
     });
     return GraphSnapshotSchema.parse(response);
+  }
+
+  async getNeighbors(
+    nodeId: string,
+    options: {
+      direction?: GraphDirection;
+      relations?: GraphRelation[];
+      kinds?: GraphNodeKind[];
+      depth?: number;
+      limit?: number;
+    } = {},
+  ) {
+    const response = await this.request<unknown>("/graph/neighbors", {
+      method: "POST",
+      body: JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        nodeId,
+        direction: options.direction ?? "both",
+        relations: options.relations ?? [],
+        kinds: options.kinds ?? [],
+        depth: options.depth ?? 1,
+        limit: options.limit ?? 100,
+      }),
+    });
+    return GraphNeighborsResponseSchema.parse(response);
+  }
+
+  async findPath(sourceId: string, targetId: string): Promise<EvidencePath | null> {
+    const response = await this.request<unknown>("/graph/path", {
+      method: "POST",
+      body: JSON.stringify({
+        protocolVersion: PROTOCOL_VERSION,
+        source: sourceId,
+        target: targetId,
+      }),
+    });
+    return GraphPathResponseSchema.parse(response).path;
   }
 
   async readFile(relativePath: string) {

@@ -7,9 +7,11 @@ import { OpenAIUnavailableError } from "./ask.js";
 import { CodexUnavailableError } from "./codex.js";
 import {
   FileChangedDuringReadError,
+  FileChangedDuringWriteError,
   FileConflictError,
   FileTooLargeError,
   InvalidTextFileError,
+  NotAFileError,
 } from "./files.js";
 import { LlmConfigurationError } from "./llm-config.js";
 import {
@@ -25,7 +27,10 @@ import {
   redactSecrets,
   summarizeWorkspacePath,
 } from "./security.js";
-import { ReadOnlyTerminalUnavailableError } from "./terminals.js";
+import {
+  ReadOnlyTerminalUnavailableError,
+  TerminalSessionLimitError,
+} from "./terminals.js";
 import { WorkspaceBrowserError } from "./workspace-browser.js";
 import {
   RecentWorkspaceNotFoundError,
@@ -65,8 +70,14 @@ export function mapAgentError(error: Error): MappedAgentError {
   if (error instanceof InvalidTextFileError) {
     return recoverable(error, 422);
   }
-  if (error instanceof FileChangedDuringReadError) {
+  if (
+    error instanceof FileChangedDuringReadError ||
+    error instanceof FileChangedDuringWriteError
+  ) {
     return recoverable(error, 409);
+  }
+  if (error instanceof NotAFileError) {
+    return recoverable(error, 400);
   }
   if (error instanceof PathSecurityError) {
     return fixed(error, 403, false);
@@ -131,7 +142,8 @@ export function mapAgentError(error: Error): MappedAgentError {
   }
   if (
     error instanceof LspSessionLimitError ||
-    error instanceof LspProtocolError
+    error instanceof LspProtocolError ||
+    error instanceof TerminalSessionLimitError
   ) {
     return recoverable(error, 409);
   }

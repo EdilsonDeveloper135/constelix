@@ -984,6 +984,117 @@ describe("AskService provider integration", () => {
       database.close();
     }
   });
+
+  it("falls back locally instead of hard-failing when the request cannot fit the context budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-context-"));
+    const { ask, database, events } = createAskFixture(
+      root,
+      createGraphFacade([]),
+      new FailingProvider(
+        "ASK_CONTEXT_EXHAUSTED",
+        0,
+        "The Ask context cannot fit safely within the 200 KiB request budget.",
+      ),
+    );
+
+    try {
+      const fallback = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "fallback",
+      );
+      const completed = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "completed",
+      );
+      ask.startTurn("thread-context", "Explain", "request-context");
+
+      await expect(fallback).resolves.toMatchObject({
+        payload: {
+          type: "fallback",
+          code: "ASK_CONTEXT_EXHAUSTED",
+          discardPartial: true,
+        },
+      });
+      await expect(completed).resolves.toMatchObject({
+        payload: { type: "completed", mode: "local" },
+      });
+      // Unlike an invalid key, an oversized turn is not a persistent
+      // configuration problem — the next, unrelated turn should still be
+      // free to retry the configured provider.
+      expect(ask.mode).toBe("openai");
+    } finally {
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
+
+  it("bounds a local-mode turn with the same timeout used for the provider path", async () => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "constelix-ask-local-timeout-"));
+    const database = new ConstelixDatabase(":memory:");
+    database.upsertWorkspace("workspace", root);
+    const events = new EventBus();
+    const ask = new AskService(
+      "workspace",
+      root,
+      createGraphFacade([]),
+      database,
+      events,
+      { turnTimeoutMs: 10 },
+    );
+
+    // Stand in for a stalled local search: the promise stays pending until
+    // its signal aborts, exactly like the real throwIfAborted() checkpoints
+    // inside LocalAskEngine.search() would behave against a slow read.
+    let capturedSignal: AbortSignal | undefined;
+    const searchSpy = vi
+      .spyOn(LocalAskEngine.prototype, "search")
+      .mockImplementation(
+        (_query, _selectedNodeIds, signal) =>
+          new Promise((_resolve, reject) => {
+            capturedSignal = signal;
+            signal?.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }),
+      );
+
+    try {
+      expect(ask.mode).toBe("local");
+      const errored = waitForEvent(
+        events,
+        (event) =>
+          event.type === "ask.event" &&
+          isRecord(event.payload) &&
+          event.payload.type === "error",
+      );
+      ask.startTurn("thread-local-timeout", "Explain", "request-local-timeout");
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(capturedSignal?.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(11);
+      const event = await errored;
+      expect(capturedSignal?.aborted).toBe(true);
+      expect((event.payload as { message: string }).message).toContain(
+        "tiempo límite",
+      );
+    } finally {
+      searchSpy.mockRestore();
+      ask.close();
+      events.close();
+      database.close();
+    }
+  });
 });
 
 class ScriptedProvider implements AIProvider {

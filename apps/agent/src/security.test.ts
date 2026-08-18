@@ -16,7 +16,6 @@ import {
   WorkspaceReadOnlyError,
   assertWorkspaceIdentity,
   assertWorkspaceWritable,
-  canonicalizeWorkspace,
   containsClearlySecretContent,
   createSafeChildEnvironment,
   inspectWorkspace,
@@ -37,7 +36,7 @@ describe("workspace path security", () => {
       join(root, "src con espacios", "módulo.ts"),
       "export const ok = true;\n",
     );
-    const canonical = await canonicalizeWorkspace(root);
+    const canonical = (await inspectWorkspace(root)).canonicalRoot;
     await expect(
       resolveExistingWorkspacePath(canonical, "src con espacios/módulo.ts"),
     ).resolves.toBe(join(canonical, "src con espacios", "módulo.ts"));

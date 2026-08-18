@@ -167,7 +167,7 @@ CONSTELIX_CODEX_SMOKE_APPROVED=1 pnpm smoke:codex
 ```bash
 pnpm build
 pnpm --filter @constelix/agent pack
-npm install --global ./apps/agent/constelix-agent-0.0.8.tgz
+npm install --global ./apps/agent/constelix-agent-0.0.9.tgz
 constelix /absolute/path/to/a/project
 ```
 

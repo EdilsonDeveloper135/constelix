@@ -6,6 +6,7 @@ import {
   PROTOCOL_VERSION,
   sanitizeGraphSnapshot,
   sanitizeUnknownStrings,
+  stableSerialize,
   type GraphDelta,
   type GraphEdge,
   type GraphNode,
@@ -102,6 +103,7 @@ export class WorkspaceIndexer {
   #queued = false;
   #closed = false;
   #forceFullReason: string | undefined;
+  #sweptOrphanedTempFiles = false;
   readonly #pendingChanges = new Set<string>();
   readonly #files = new Map<string, IndexedFileRecord>();
   readonly #analyzer = new AnalyzerWorkerClient();
@@ -325,7 +327,12 @@ export class WorkspaceIndexer {
       await this.assertWorkspace();
       const scanStartedBeforeWatcherReady = !this.#watcherReady;
       this.publishStatus("scanning", 0, 0, reason);
-      let scan = await this.scanWorkspaceProgressively();
+      // Only the very first scan of a workspace's lifetime may overlap
+      // with no live write endpoint yet, so it is the only safe place to
+      // remove orphaned atomic-write temporary files from an earlier crash.
+      const sweepOrphanedTempFiles = !this.#sweptOrphanedTempFiles;
+      this.#sweptOrphanedTempFiles = true;
+      let scan = await this.scanWorkspaceProgressively({ sweepOrphanedTempFiles });
       let normalized = await this.analyzeScan(scan, revision);
 
       if (scanStartedBeforeWatcherReady) {
@@ -409,7 +416,9 @@ export class WorkspaceIndexer {
     }
   }
 
-  private scanWorkspaceProgressively(): Promise<ScanResult> {
+  private scanWorkspaceProgressively(
+    scanOptionsOverride?: Pick<ScanWorkspaceOptions, "sweepOrphanedTempFiles">,
+  ): Promise<ScanResult> {
     const configuredMaximum = this.options.scanOptions?.maxFiles ?? MAX_WORKSPACE_FILES;
     const maximumFiles = Math.min(
       Math.max(Math.trunc(configuredMaximum), 1),
@@ -417,6 +426,7 @@ export class WorkspaceIndexer {
     );
     return scanWorkspace(this.workspaceId, this.workspace, {
       ...this.options.scanOptions,
+      ...scanOptionsOverride,
       onProgress: (progress) => {
         this.#summary = progress.summary;
         this.publishProvisionalScan(progress);
@@ -1139,16 +1149,6 @@ function sameEntity(left: GraphNode | GraphEdge, right: GraphNode | GraphEdge): 
   const { revision: _leftRevision, ...leftComparable } = left;
   const { revision: _rightRevision, ...rightComparable } = right;
   return stableSerialize(leftComparable) === stableSerialize(rightComparable);
-}
-
-function stableSerialize(value: unknown): string {
-  if (value === undefined) return "undefined";
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`);
-  return `{${entries.join(",")}}`;
 }
 
 function pruneDanglingEdges(

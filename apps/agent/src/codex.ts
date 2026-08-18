@@ -197,7 +197,13 @@ export class CodexManager {
       const availability = await check;
       if (generation === this.#availabilityGeneration) {
         this.#availability = availability;
-        this.publishAvailability(availability);
+        try {
+          this.publishAvailability(availability);
+        } catch {
+          // Best-effort notification to already-connected clients. A
+          // publish failure must not fail the availability check itself,
+          // and must never crash a fire-and-forget caller.
+        }
       }
       return availability;
     } finally {
@@ -344,9 +350,7 @@ export class CodexManager {
         return this.completePreStartCancellation(task);
       }
       if (error instanceof CodexSessionQuarantinedError) {
-        task.error = redactSecrets(error.message);
-        this.persist(task);
-        this.publishAct(task, "session_quarantined", { message: task.error });
+        this.quarantineTask(task, error);
         throw error;
       }
       if (isTerminalTaskStatus(task.status)) throw error;
@@ -434,9 +438,7 @@ export class CodexManager {
         await this.invalidateAmbiguousSession("turn/interrupt", error);
       } catch (terminationError) {
         if (terminationError instanceof CodexSessionQuarantinedError) {
-          task.error = redactSecrets(terminationError.message);
-          this.persist(task);
-          this.publishAct(task, "session_quarantined", { message: task.error });
+          this.quarantineTask(task, terminationError);
         }
         throw terminationError;
       }
@@ -467,6 +469,31 @@ export class CodexManager {
     this.events.publish("act.task.cancelled", { taskId: task.id });
     this.publishAct(task, "cancelled");
     return task;
+  }
+
+  // A quarantined session already received SIGTERM then SIGKILL from
+  // invalidateAmbiguousSession(); Constelix never sends it another RPC
+  // request. Leaving the task at "approved"/"running" after that point does
+  // not add any additional safety — it only prevents Act from ever
+  // recovering, since activeTask treats those statuses as permanently
+  // blocking. Move the task to its terminal "failed" state so a fresh
+  // approval (and, if needed, a fresh Codex process from ensureStarted())
+  // can proceed.
+  private quarantineTask(
+    task: ActTaskRecord,
+    error: CodexSessionQuarantinedError,
+  ): void {
+    this.clearTaskTimer(task.id);
+    task.status = "failed";
+    task.completedAt = new Date().toISOString();
+    delete task.cancellationRequested;
+    task.error = redactSecrets(error.message);
+    this.persist(task);
+    this.events.publish("act.task.failed", {
+      taskId: task.id,
+      message: task.error,
+    });
+    this.publishAct(task, "session_quarantined", { message: task.error });
   }
 
   private async resolveAvailability(): Promise<CodexAvailability> {
@@ -519,7 +546,7 @@ export class CodexManager {
     this.clearTaskTimer(task.id);
     const timeout = setTimeout(() => {
       this.#activityTimers.delete(task.id);
-      void this.cancelInactiveTask(task.id);
+      void this.cancelInactiveTask(task.id).catch(() => undefined);
     }, this.options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS);
     timeout.unref();
     this.#activityTimers.set(task.id, timeout);

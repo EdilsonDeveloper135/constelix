@@ -19,6 +19,19 @@ import {
 
 export const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
+const ORPHANED_TEMPORARY_FILE_PATTERN =
+  /^\..+\.constelix-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+
+/**
+ * Matches the atomic-write temporary filename produced by
+ * writeWorkspaceTextFile (`.<name>.constelix-<pid>-<uuid>.tmp`). A file
+ * with this name survives only if the process died between creating it
+ * and renaming it into place.
+ */
+export function isOrphanedTemporaryFileName(name: string): boolean {
+  return ORPHANED_TEMPORARY_FILE_PATTERN.test(name);
+}
+
 export function contentHash(content: string | Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -62,6 +75,24 @@ export class FileChangedDuringReadError extends Error {
   constructor() {
     super("The file changed on disk while it was being read.");
     this.name = "FileChangedDuringReadError";
+  }
+}
+
+export class FileChangedDuringWriteError extends Error {
+  readonly code = "FILE_CHANGED_DURING_WRITE";
+
+  constructor() {
+    super("The target path changed while the file was being saved.");
+    this.name = "FileChangedDuringWriteError";
+  }
+}
+
+export class NotAFileError extends Error {
+  readonly code = "NOT_A_FILE";
+
+  constructor() {
+    super("The requested path is not a file.");
+    this.name = "NotAFileError";
   }
 }
 
@@ -113,7 +144,7 @@ export async function readBoundedWorkspaceFile(
   try {
     const initialInfo = await handle.stat();
     if (!initialInfo.isFile()) {
-      throw new Error("The requested path is not a file.");
+      throw new NotAFileError();
     }
     if (initialInfo.size > maxBytes) {
       throw new FileTooLargeError(initialInfo.size, maxBytes);
@@ -230,7 +261,7 @@ export async function writeWorkspaceTextFile(
       MAX_TEXT_FILE_BYTES,
     );
     if (current.absolutePath !== target) {
-      throw new Error("The target path changed while the file was being saved.");
+      throw new FileChangedDuringWriteError();
     }
     currentMode = current.mode & 0o777;
     actualHash = contentHash(current.buffer);
@@ -257,7 +288,7 @@ export async function writeWorkspaceTextFile(
       request.relativePath,
     );
     if (revalidatedTarget !== target) {
-      throw new Error("The target path changed while the file was being saved.");
+      throw new FileChangedDuringWriteError();
     }
     await rename(temporary, revalidatedTarget);
   } catch (error) {

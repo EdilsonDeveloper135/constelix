@@ -34,6 +34,7 @@ interface TerminalOutputChunk {
 }
 
 const MAX_OUTPUT_HISTORY_BYTES = 256 * 1024;
+export const MAX_TERMINAL_SESSIONS = 16;
 const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const READ_ONLY_SANDBOX_PROFILE = [
   "(version 1)",
@@ -48,6 +49,17 @@ export class ReadOnlyTerminalUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ReadOnlyTerminalUnavailableError";
+  }
+}
+
+export class TerminalSessionLimitError extends Error {
+  readonly code = "TERMINAL_SESSION_LIMIT";
+
+  constructor() {
+    super(
+      `This workspace already has ${MAX_TERMINAL_SESSIONS} open terminal sessions, the maximum allowed at once. Close one before starting another.`,
+    );
+    this.name = "TerminalSessionLimitError";
   }
 }
 
@@ -120,6 +132,12 @@ export class TerminalManager {
     createdAt: string;
     status: "running";
   }> {
+    const runningSessions = [...this.#sessions.values()].filter(
+      (session) => !session.exited,
+    ).length;
+    if (runningSessions >= MAX_TERMINAL_SESSIONS) {
+      throw new TerminalSessionLimitError();
+    }
     const workspaceRoot = await resolveExistingWorkspacePath(this.workspace, ".");
     const absoluteCwd = options.cwd
       ? await resolveExistingWorkspacePath(this.workspace, options.cwd)

@@ -44,6 +44,10 @@ class FakeCodexAppServer extends EventEmitter {
   holdInitialize = false;
   holdTurnStart = false;
   holdInterrupt = false;
+  /** Simulates a process that does not honor signals (e.g. stuck in an
+   * uninterruptible wait): kill() still reports success, matching Node's
+   * `ChildProcess.killed` semantics, but no "exit" event ever follows. */
+  ignoreSignals = false;
   #stdinBuffer = "";
   #turnCounter = 0;
   #heldInitializeId: number | string | undefined;
@@ -57,6 +61,7 @@ class FakeCodexAppServer extends EventEmitter {
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     if (this.killed) return false;
     this.killed = true;
+    if (this.ignoreSignals) return true;
     this.emit("exit", null, signal);
     return true;
   }
@@ -424,6 +429,37 @@ describe("CodexManager App Server protocol", () => {
     }
   });
 
+  it("does not reject when publishing the resolved capability fails", async () => {
+    const database = {
+      saveCodexTask: () => undefined,
+      audit: () => undefined,
+      loadLatestCodexThreadId: () => undefined,
+    } as unknown as ConstelixDatabase;
+    const eventBus = new EventBus();
+    vi.spyOn(eventBus, "publish").mockImplementation(() => {
+      throw new Error("simulated invalid outbound event");
+    });
+    const manager = new CodexManager(
+      "workspace",
+      "/workspace",
+      eventBus,
+      database,
+      { getCodexVersion: async () => TESTED_CODEX_VERSION },
+    );
+    try {
+      // A fire-and-forget caller such as `void this.codex.availability()`
+      // must never see this reject, or it becomes an unhandled rejection
+      // that can crash the whole agent process.
+      await expect(manager.availability()).resolves.toEqual({
+        available: true,
+        version: TESTED_CODEX_VERSION,
+      });
+    } finally {
+      manager.close();
+      eventBus.close();
+    }
+  });
+
   it("waits for task approval, performs the handshake, and starts one scoped turn", async () => {
     const harness = createHarness();
     const pending = harness.manager.createTask("Refactor src/internal.ts.");
@@ -575,6 +611,56 @@ describe("CodexManager App Server protocol", () => {
     ).toHaveLength(1);
   });
 
+  it("recovers Act after a genuinely quarantined session instead of wedging future approvals", async () => {
+    vi.useFakeTimers();
+    const firstServer = new FakeCodexAppServer();
+    firstServer.holdTurnStart = true;
+    firstServer.ignoreSignals = true;
+    const secondServer = new FakeCodexAppServer();
+    const harness = createHarness(undefined, undefined, {
+      appServers: [firstServer, secondServer],
+      requestTimeoutMs: 20,
+    });
+    const first = harness.manager.createTask(
+      "Start a turn whose Codex process never honors termination signals.",
+    );
+
+    const approving = harness.manager.approve(first.id);
+    const assertion = expect(approving).rejects.toThrow(
+      "did not terminate after an ambiguous turn/start result",
+    );
+    // The turn/start request times out first (requestTimeoutMs: 20), then
+    // invalidateAmbiguousSession() waits out a SIGTERM grace period and a
+    // SIGKILL grace period before concluding the session is quarantined.
+    await vi.advanceTimersByTimeAsync(25);
+    await vi.advanceTimersByTimeAsync(1_001);
+    await vi.advanceTimersByTimeAsync(1_001);
+    await assertion;
+
+    // The task must reach a terminal state, not stay wedged at "approved".
+    expect(harness.manager.getTask(first.id)).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("did not terminate"),
+    });
+    expect(harness.manager.activeTask).toBeUndefined();
+    expect(
+      harness.events.some(
+        (event) =>
+          event.type === "act.event" &&
+          (event.payload as { taskId?: string }).taskId === first.id &&
+          (event.payload as { event?: string }).event === "session_quarantined",
+      ),
+    ).toBe(true);
+
+    // Act must recover: a fresh task can still be approved and run.
+    const second = harness.manager.createTask(
+      "Start only after the quarantined session is no longer blocking.",
+    );
+    await expect(harness.manager.approve(second.id)).resolves.toMatchObject({
+      status: "running",
+    });
+  });
+
   it("cancels an approved task that remains inactive during App Server startup", async () => {
     vi.useFakeTimers();
     const harness = createHarness(undefined, 100);
@@ -600,6 +686,48 @@ describe("CodexManager App Server protocol", () => {
       status: "cancelled",
       completedAt: expect.any(String),
     });
+  });
+
+  it("does not leave an unhandled rejection when the inactivity watchdog itself fails", async () => {
+    vi.useFakeTimers();
+    const database = {
+      saveCodexTask: () => undefined,
+      audit: (
+        _workspaceId: string,
+        _category: string,
+        action: string,
+      ) => {
+        if (action === "turn/inactivity") {
+          throw new Error("simulated audit failure");
+        }
+      },
+      loadLatestCodexThreadId: () => undefined,
+    } as unknown as ConstelixDatabase;
+    const eventBus = new EventBus();
+    const appServer = new FakeCodexAppServer();
+    const manager = new CodexManager("workspace", "/workspace", eventBus, database, {
+      getCodexVersion: async () => TESTED_CODEX_VERSION,
+      spawnAppServer: () => appServer as unknown as SpawnedCodexProcess,
+      requestTimeoutMs: 1_000,
+      inactivityTimeoutMs: 100,
+    });
+    try {
+      const task = manager.createTask("Start a task whose watchdog audit fails.");
+      const approving = manager.approve(task.id);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // touchTask()'s setTimeout now always attaches a .catch() to the
+      // fire-and-forget cancelInactiveTask() call. If that regressed, this
+      // throwing audit() would surface as an unhandled promise rejection
+      // and fail (or crash) the test run instead of leaving the timer path
+      // to fail closed.
+      await vi.advanceTimersByTimeAsync(200);
+      appServer.releaseInitialize();
+      await approving;
+    } finally {
+      manager.close();
+      eventBus.close();
+    }
   });
 
   it("resets the running-turn inactivity watchdog when Codex emits activity", async () => {

@@ -30,7 +30,6 @@ import {
   inspectWorkspace,
   redactLocalPaths,
   redactSecrets,
-  summarizeWorkspacePath,
   type WorkspaceDescriptor,
 } from "./security.js";
 import { TerminalManager } from "./terminals.js";
@@ -240,7 +239,7 @@ export class WorkspaceRuntime {
       await this.assertHealthy();
       this.#started = true;
       this.#identityMonitor = this.startIdentityMonitor();
-      if (this.codex) void this.codex.availability();
+      if (this.codex) void this.codex.availability().catch(() => undefined);
     } catch (error) {
       await this.close().catch(() => undefined);
       throw error;
@@ -446,12 +445,4 @@ export function defaultConstelixStateRoot(): string {
     "Application Support",
     "Constelix",
   );
-}
-
-export function workspaceDisplayName(runtime: WorkspaceRuntime): string {
-  return basename(runtime.workspaceRoot);
-}
-
-export function workspaceDisplayPath(runtime: WorkspaceRuntime): string {
-  return summarizeWorkspacePath(runtime.workspaceRoot);
 }

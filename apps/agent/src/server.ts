@@ -16,6 +16,8 @@ import {
   CONSTELIX_RELEASE,
   FileReadRequestSchema,
   FileWriteRequestSchema,
+  GraphNeighborsRequestSchema,
+  GraphPathRequestSchema,
   GraphQuerySchema,
   LayoutWriteRequestSchema,
   LlmConfigurationUpdateSchema,
@@ -269,11 +271,14 @@ export async function startAgentServer(
       return payload;
     });
 
-    app.get("/api/v1/events", { websocket: true }, (socket) => {
-      events.attachAuthenticated(socket as never);
-      void manager.current.assertHealthy().catch(() => {
+    app.get("/api/v1/events", { websocket: true }, async (socket) => {
+      try {
+        await manager.current.assertHealthy();
+      } catch {
         socket.close(4409, "Workspace isolation changed");
-      });
+        return;
+      }
+      events.attachAuthenticated(socket as never);
     });
 
     app.get<{
@@ -450,6 +455,38 @@ export async function startAgentServer(
       return runtime.indexer.query(GraphQuerySchema.parse(request.body));
     });
 
+    app.post("/api/v1/graph/neighbors", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = GraphNeighborsRequestSchema.parse(request.body);
+      const result = runtime.indexer.graph.neighbors(input.nodeId, {
+        direction: input.direction,
+        relations: input.relations,
+        kinds: input.kinds,
+        depth: input.depth,
+        limit: input.limit,
+      });
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        nodes: result.nodes,
+        edges: result.edges,
+      };
+    });
+
+    app.post("/api/v1/graph/path", async (request) => {
+      const runtime = captureRequest(manager, request);
+      const input = GraphPathRequestSchema.parse(request.body);
+      const path = runtime.indexer.graph.shortestPath(
+        input.source,
+        input.target,
+        {
+          direction: input.direction,
+          relations: input.relations,
+          maxDepth: input.maxDepth,
+        },
+      );
+      return { protocolVersion: PROTOCOL_VERSION, path };
+    });
+
     app.post("/api/v1/files/read", async (request) => {
       const runtime = captureRequest(manager, request);
       const input = FileReadRequestSchema.parse(request.body);
@@ -575,8 +612,10 @@ export async function startAgentServer(
         const runtime = captureRequest(manager, request);
         const input = AskTurnRequestSchema.parse(request.body);
         if (input.threadId !== request.params.id) {
-          return reply.code(400).send(
-            errorBody("THREAD_MISMATCH", "Thread id does not match URL."),
+          return respondIdMismatch(
+            reply,
+            "THREAD_MISMATCH",
+            "Thread id does not match URL.",
           );
         }
         if (!input.threadId.startsWith(`${runtime.workspaceId}:`)) {
@@ -603,7 +642,7 @@ export async function startAgentServer(
 
     app.post("/api/v1/act/tasks", async (request, reply) => {
       const runtime = captureRequest(manager, request);
-      if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+      assertWritable(runtime);
       const input = ActTaskRequestSchema.parse(request.body);
       if (!isSupportedActScope(input.capabilities)) {
         return reply.code(400).send(
@@ -629,11 +668,13 @@ export async function startAgentServer(
       "/api/v1/act/tasks/:id/approve",
       async (request, reply) => {
         const runtime = captureRequest(manager, request);
-        if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+        assertWritable(runtime);
         const input = ActApproveRequestSchema.parse(request.body);
         if (input.taskId !== request.params.id) {
-          return reply.code(400).send(
-            errorBody("TASK_MISMATCH", "Task id does not match URL."),
+          return respondIdMismatch(
+            reply,
+            "TASK_MISMATCH",
+            "Task id does not match URL.",
           );
         }
         if (!runtime.codex) {
@@ -650,7 +691,7 @@ export async function startAgentServer(
       "/api/v1/act/tasks/:id/cancel",
       async (request) => {
         const runtime = captureRequest(manager, request);
-        if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+        assertWritable(runtime);
         ProtocolOnlyRequestSchema.parse(request.body);
         if (!runtime.codex) {
           throw new CodexUnavailableError("Codex is unavailable.");
@@ -842,6 +883,18 @@ function captureRequest(
   request: FastifyRequest,
 ): WorkspaceRuntime {
   return manager.capture(requestSessionId(request));
+}
+
+function assertWritable(runtime: WorkspaceRuntime): void {
+  if (runtime.workspace.readOnly) throw new WorkspaceReadOnlyError();
+}
+
+function respondIdMismatch(
+  reply: FastifyReply,
+  code: string,
+  message: string,
+): FastifyReply {
+  return reply.code(400).send(errorBody(code, message));
 }
 
 function requestSessionId(request: FastifyRequest): string | undefined {

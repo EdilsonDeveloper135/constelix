@@ -96,10 +96,17 @@ function CanvasInner() {
   const graphReconciling = useWorkspaceStore((state) => state.graphReconciling);
   const loadNextGraphPage = useWorkspaceStore((state) => state.loadNextGraphPage);
   const selectedNodeId = useWorkspaceStore((state) => state.selectedNodeId);
+  const pathFindingSourceId = useWorkspaceStore(
+    (state) => state.pathFindingSourceId,
+  );
+  const setPathFindingSource = useWorkspaceStore(
+    (state) => state.setPathFindingSource,
+  );
+  const findPathTo = useWorkspaceStore((state) => state.findPathTo);
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [locked, setLocked] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const compactFittedWorkspaceRef = useRef<string | null>(null);
+  const autoFittedWorkspaceRef = useRef<string | null>(null);
   const canvasNodes = useMemo(
     () => nodes.filter(isFloatingCanvasNode),
     [nodes],
@@ -172,24 +179,26 @@ function CanvasInner() {
   }, [setCanvasZoom]);
 
   useEffect(() => {
-    if (!compactViewport || compactFittedWorkspaceRef.current === workspaceId) {
-      return;
-    }
+    // Fit the graph once per workspace hydration on every viewport size —
+    // not just compact — so the canvas opens legible instead of requiring
+    // a manual "Encuadrar" click. Only setActiveTool("map") dispatched the
+    // constelix:fit-graph event below, which never fires on a cold load
+    // because "map" is already the default active tool.
+    if (autoFittedWorkspaceRef.current === workspaceId) return;
     const semanticNodes = decoratedNodes
       .filter((node) => node.type === "semantic" && !node.hidden)
       .map(({ id }) => ({ id }));
     if (!workspaceId || semanticNodes.length === 0) return;
-    compactFittedWorkspaceRef.current = workspaceId;
+    autoFittedWorkspaceRef.current = workspaceId;
     const frame = window.requestAnimationFrame(() => {
-      void fitView({
-        nodes: semanticNodes,
-        padding: 0.12,
-        duration: 0,
-        maxZoom: 0.45,
-      });
+      void fitView(
+        compactViewport
+          ? { nodes: semanticNodes, padding: 0.12, duration: 0, maxZoom: 0.45 }
+          : { nodes: semanticNodes, padding: 0.16, duration: 0, maxZoom: 1 },
+      );
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [decoratedNodes, fitView, workspaceId]);
+  }, [compactViewport, decoratedNodes, fitView, workspaceId]);
 
   useEffect(() => {
     const focusGraph = () => {
@@ -387,6 +396,7 @@ function CanvasInner() {
           x={contextMenu.x}
           y={contextMenu.y}
           returnFocusTo={contextMenu.returnFocusTo}
+          pathFindingSourceId={pathFindingSourceId}
           onClose={() => setContextMenu(null)}
           onInspect={() => selectNode(contextMenuNode.id)}
           onActivate={() => void activateSemanticNode(contextMenuNode.id)}
@@ -398,6 +408,14 @@ function CanvasInner() {
           onOpenTerminal={() =>
             openTerminal(semanticNodeCwd(contextMenuNode.data), contextMenuNode.id)
           }
+          onSetPathSource={() =>
+            setPathFindingSource(
+              pathFindingSourceId === contextMenuNode.id
+                ? null
+                : contextMenuNode.id,
+            )
+          }
+          onFindPath={() => void findPathTo(contextMenuNode.id)}
         />
       ) : null}
     </>
