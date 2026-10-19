@@ -40,12 +40,12 @@
     "check": "pnpm version:check && pnpm typecheck && pnpm test:coverage && pnpm build"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
-    "@types/node": "^24.13.3",
-    "@vitest/coverage-v8": "4.1.10",
-    "jsdom": "^30.0.1",
-    "tsx": "^4.23.11",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "5.0.5",
+    "jsdom": "^30.1.3",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.5"
   }
 }
